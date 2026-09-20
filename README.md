@@ -119,14 +119,22 @@ WKWebView.
 
 Two ways in, reaching the same server but differing in what the worker can do.
 
-**Tool-free** — plain chat completions, for summarize/classify/draft work:
+**Tool-free** — plain chat completions, for summarize/classify/draft work. This is the
+shipped `local` role, pointed at LM Studio:
 
 ```toml
-[roles.summarizer]
+[roles.local]
 provider  = "openai_compat"
-base_url  = "http://localhost:11434/v1"   # or http://<host>:11434/v1
-model     = "qwen3.6:35b-a3b"
+base_url  = "http://localhost:1234/v1"    # LM Studio; Ollama serves :11434
+model     = "qwen3.6-35b-a3b"
 isolation = "none"
+```
+
+LM Studio does not start its server automatically — open the **Developer** tab and start
+it, or nothing is listening. `model` must match what the server reports:
+
+```bash
+curl -s http://localhost:1234/v1/models | python3 -m json.tool
 ```
 
 **Agentic** — a real tool loop with sandboxing, via Codex, no code required:
@@ -137,10 +145,10 @@ provider      = "codex"
 model         = "qwen3.6:35b-a3b"
 isolation     = "worktree"
 tools         = ["Read", "Edit", "Write", "Bash"]
-provider_opts = { model_provider = "ollama" }
+provider_opts = { model_provider = "lmstudio" }
 ```
 
-`ollama` and `lmstudio` are Codex built-ins pointing at `localhost:11434` and
+`lmstudio` and `ollama` are Codex built-ins pointing at `localhost:11434` and
 `localhost:1234`. **A server on another machine needs its own provider id**, because Codex
 reserves those two names and refuses to override them. In `~/.codex/config.toml`:
 
