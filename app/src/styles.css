@@ -86,7 +86,7 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .gate-card h1 { margin: 0 0 6px; font-size: 22px; }
 .gate-card p { margin: 0 0 18px; }
 .gate-card label { display: block; font-weight: 600; margin-bottom: 6px; }
-.gate-card button { width: 100%; margin-top: 16px; }
+.gate-card button.wide { margin-top: 16px; }
 .hint { font-size: 12px; color: var(--muted); margin-top: 8px !important; }
 
 /* ---------- shell ---------- */
@@ -97,7 +97,8 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 10px 16px 10px 84px; /* clears the macOS traffic lights */
+  padding: 10px 22px 10px 92px; /* clears the macOS traffic lights */
+  min-height: 46px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
 }
@@ -175,8 +176,18 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .rail h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
 .rail h3 { margin: 18px 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
 
-.fleet { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.fleet li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.fleet { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+
+/* Two columns: identity that may truncate, badges that never wrap. */
+.fleet li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+.fleet-main { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.fleet-backend { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fleet-badges { display: flex; gap: 4px; white-space: nowrap; }
 .role-name { font-weight: 600; }
 
 .badge {
@@ -226,7 +237,7 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 
 /* ---------- budget meter ---------- */
 
-.meter { display: flex; align-items: center; gap: 16px; }
+.meter { display: flex; align-items: center; gap: 16px; flex: 0 0 auto; }
 .meter-item { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.25; }
 .meter-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
 
@@ -288,8 +299,11 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 
 /* ---------- start gate checks ---------- */
 
-.picker { display: flex; gap: 8px; }
-.picker input { flex: 1; }
+.picker { display: flex; gap: 8px; align-items: stretch; }
+/* min-width:0 lets the field actually shrink-and-grow inside the flex row rather than
+   being held at its intrinsic width while the button eats the space. */
+.picker input { flex: 1 1 auto; min-width: 0; }
+.picker button { flex: 0 0 auto; }
 .wide { width: 100%; }
 
 .checks { list-style: none; margin: 14px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
