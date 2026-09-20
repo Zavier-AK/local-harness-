@@ -103,7 +103,7 @@ logged in (`claude /login`, `codex login`), plus Ollama or LM Studio for local r
 ```bash
 # Headless — the whole loop, no desktop needed
 cargo run -p harness-cli -- roles
-cargo run -p harness-cli -- run-worker mock "WRITE:demo.txt:hello"
+cargo run -p harness-cli -- run-worker mock "WRITE:demo.txt:hello" --patch
 cargo run -p harness-cli -- chat "Plan the change, then delegate it."
 cargo run -p harness-cli -- usage --hours 5
 
@@ -118,7 +118,7 @@ WKWebView.
 ## Testing
 
 ```bash
-cargo test                        # engine: 66 tests, no network, no CLI login needed
+cargo test                        # engine: 71 tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 

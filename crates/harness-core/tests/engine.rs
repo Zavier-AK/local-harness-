@@ -45,6 +45,7 @@ struct Fixture {
     harness: Arc<Harness>,
     events: tokio::sync::mpsc::UnboundedReceiver<HarnessEvent>,
     _dir: tempfile::TempDir,
+    #[allow(dead_code)]
     root: std::path::PathBuf,
 }
 
@@ -361,6 +362,25 @@ async fn worker_usage_is_not_double_counted_by_the_event_hook() {
     let rows = f.harness.usage_window(3600).await.unwrap();
     let mock = rows.iter().find(|r| r.provider == "mock").unwrap();
     assert_eq!(mock.runs, 1, "worker usage recorded exactly once");
+}
+
+#[tokio::test]
+async fn dropping_the_engine_closes_the_event_stream() {
+    // The engine owns the event sender, so anything that holds a strong reference to it
+    // keeps the stream open. A consumer that holds one and then waits for the stream to
+    // end waits forever — which is exactly how the CLI deadlocked on shutdown. Consumers
+    // must hold a Weak handle; this test is the invariant that makes that necessary.
+    let f = fixture().await;
+    let mut events = f.events;
+
+    let weak = Arc::downgrade(&f.harness);
+    drop(f.harness);
+
+    assert!(weak.upgrade().is_none(), "no strong references should remain");
+    assert!(
+        events.recv().await.is_none(),
+        "the event stream must end once the engine is dropped"
+    );
 }
 
 #[tokio::test]

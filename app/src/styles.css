@@ -260,3 +260,28 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 
 .drawer footer { margin-top: auto; border-top: 1px solid var(--border); padding-top: 16px; }
 .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 12px; }
+
+/* ---------- patch view ---------- */
+
+.diff-section { min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+
+.patch {
+  margin: 0;
+  padding: 0;
+  max-height: 46vh;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  tab-size: 4;
+}
+
+/* Each line is its own row so the background spans the full scroll width. */
+.dl { padding: 0 10px; white-space: pre; }
+.dl.add { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+.dl.del { background: color-mix(in srgb, var(--error) 14%, transparent); color: var(--error); }
+.dl.hunk { color: var(--accent); background: var(--accent-soft); }
+.dl.meta { color: var(--muted); }

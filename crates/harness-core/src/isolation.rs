@@ -46,6 +46,15 @@ async fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// A branch's changes, ready to render.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Patch {
+    pub text: String,
+    /// True when `text` holds only the first `max_lines` of a larger diff.
+    pub truncated: bool,
+    pub total_lines: usize,
+}
+
 /// A prepared workspace, held for as long as the worker runs.
 ///
 /// Dropping the handle does not clean up — teardown is explicit via [`Workspace::release`]
@@ -201,6 +210,39 @@ impl Workspaces {
                 })
             }
         }
+    }
+
+    /// The unified diff a branch carries, for review before it is landed.
+    ///
+    /// Computed from the branch rather than the worktree, because the worktree is torn
+    /// down as soon as the worker finishes while the branch is kept precisely so its work
+    /// stays reviewable. The three-dot form diffs against the merge base, so a `HEAD`
+    /// that moved on after the worker started does not pollute the patch.
+    ///
+    /// Truncated at `max_lines`: a worker that rewrote a lockfile should not be able to
+    /// wedge the reviewer's UI.
+    pub async fn patch(&self, branch: &str, max_lines: usize) -> Result<Patch> {
+        if !branch.starts_with(&format!("{BRANCH_PREFIX}/")) {
+            bail!("refusing to read `{branch}`: not a harness branch");
+        }
+
+        let text = git(
+            &self.project_root,
+            &["diff", "--no-color", &format!("HEAD...{branch}")],
+        )
+        .await?;
+
+        let total = text.lines().count();
+        if total > max_lines {
+            let head: Vec<&str> = text.lines().take(max_lines).collect();
+            return Ok(Patch {
+                text: head.join("\n"),
+                truncated: true,
+                total_lines: total,
+            });
+        }
+
+        Ok(Patch { text, truncated: false, total_lines: total })
     }
 
     /// Land a reviewed branch on the current checkout.
@@ -400,6 +442,69 @@ mod tests {
 
         let branches = git(ws.project_root(), &["branch", "--list"]).await.unwrap();
         assert!(!branches.contains("harness/w1"));
+    }
+
+    #[tokio::test]
+    async fn patch_shows_what_a_branch_changed() {
+        let (_dir, ws) = scratch_repo().await;
+        let workspace = ws.prepare("w1", Isolation::Worktree).await.unwrap();
+
+        tokio::fs::write(workspace.cwd.join("feature.txt"), "line one\nline two\n").await.unwrap();
+        workspace.commit("harness: worker w1").await.unwrap();
+        let branch = workspace.branch.clone().unwrap();
+        workspace.release().await.unwrap();
+
+        // Readable after teardown: the worktree is gone, the branch is the record.
+        let patch = ws.patch(&branch, 500).await.unwrap();
+        assert!(patch.text.contains("+++ b/feature.txt"), "{}", patch.text);
+        assert!(patch.text.contains("+line one"));
+        assert!(patch.text.contains("+line two"));
+        assert!(!patch.truncated);
+    }
+
+    #[tokio::test]
+    async fn patch_ignores_commits_made_after_the_worker_started() {
+        let (dir, ws) = scratch_repo().await;
+        let workspace = ws.prepare("w1", Isolation::Worktree).await.unwrap();
+        tokio::fs::write(workspace.cwd.join("worker.txt"), "from worker\n").await.unwrap();
+        workspace.commit("harness: worker w1").await.unwrap();
+        let branch = workspace.branch.clone().unwrap();
+        workspace.release().await.unwrap();
+
+        // Meanwhile the user commits something unrelated on their own branch.
+        tokio::fs::write(dir.path().join("unrelated.txt"), "from user\n").await.unwrap();
+        git(ws.project_root(), &["add", "-A"]).await.unwrap();
+        git(ws.project_root(), &["commit", "-q", "-m", "user work"]).await.unwrap();
+
+        // The review must show only the worker's change, not the user's.
+        let patch = ws.patch(&branch, 500).await.unwrap();
+        assert!(patch.text.contains("worker.txt"), "{}", patch.text);
+        assert!(!patch.text.contains("unrelated.txt"), "{}", patch.text);
+    }
+
+    #[tokio::test]
+    async fn oversized_patches_are_truncated_not_dumped() {
+        let (_dir, ws) = scratch_repo().await;
+        let workspace = ws.prepare("w1", Isolation::Worktree).await.unwrap();
+
+        let big: String = (0..500).map(|n| format!("line {n}\n")).collect();
+        tokio::fs::write(workspace.cwd.join("big.txt"), big).await.unwrap();
+        workspace.commit("harness: worker w1").await.unwrap();
+        let branch = workspace.branch.clone().unwrap();
+        workspace.release().await.unwrap();
+
+        let patch = ws.patch(&branch, 20).await.unwrap();
+        assert!(patch.truncated);
+        assert_eq!(patch.text.lines().count(), 20);
+        // The full size is still reported, so the reviewer knows what they are not seeing.
+        assert!(patch.total_lines > 400, "{}", patch.total_lines);
+    }
+
+    #[tokio::test]
+    async fn patch_refuses_branches_it_did_not_create() {
+        let (_dir, ws) = scratch_repo().await;
+        let err = ws.patch("main", 100).await.unwrap_err();
+        assert!(err.to_string().contains("not a harness branch"), "{err}");
     }
 
     #[tokio::test]

@@ -168,6 +168,23 @@ async fn pending_merges(state: State<'_, AppState>) -> Result<Vec<(String, Strin
     Ok(session.harness.pending_merges().await)
 }
 
+/// The diff a worker left behind, so it can be read before it is landed.
+///
+/// Capped: a worker that regenerated a lockfile should not be able to wedge the drawer.
+#[tauri::command]
+async fn worker_patch(
+    state: State<'_, AppState>,
+    worker_id: String,
+) -> Result<harness_core::isolation::Patch, String> {
+    let slot = state.session.lock().await;
+    let session = slot.as_ref().ok_or("no session running")?;
+    session
+        .harness
+        .worker_patch(&worker_id, 2_000)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
 /// Land a worker's branch. This is the only path that merges, and it exists only here —
 /// the model cannot reach it, by design.
 #[tauri::command]
@@ -244,6 +261,7 @@ pub fn run() {
             start_session,
             send_turn,
             list_workers,
+            worker_patch,
             pending_merges,
             approve_merge,
             reject_merge,

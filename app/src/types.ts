@@ -35,6 +35,13 @@ export type HarnessEvent =
   | { type: "run_finished"; run_id: string; text: string; usage: Usage; cost_usd: number | null; is_error: boolean }
   | { type: "error"; run_id: string; message: string };
 
+/** Mirrors `harness_core::isolation::Patch`. */
+export type Patch = {
+  text: string;
+  truncated: boolean;
+  total_lines: number;
+};
+
 export type Role = {
   name: string;
   provider: string;

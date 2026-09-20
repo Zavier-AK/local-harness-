@@ -13,11 +13,14 @@ use harness_core::orchestrator::Orchestrator;
 use harness_core::roles::RoleRegistry;
 use harness_core::store::Store;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 /// How long a single orchestrator turn may run before the driver gives up on it.
 const TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// How long to wait for the event stream to close during shutdown.
+const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Parser)]
 #[command(name = "harness", about = "Hierarchical multi-agent harness over subscription CLIs")]
@@ -49,6 +52,10 @@ enum Command {
         task: String,
         #[arg(long)]
         context_file: Vec<String>,
+
+        /// Print the worker's diff, not just its file list.
+        #[arg(long)]
+        patch: bool,
     },
 
     /// Start the head chat: a long-lived Claude session with delegation tools attached.
@@ -166,15 +173,24 @@ fn render(event: &HarnessEvent, streaming: &mut bool) {
 ///
 /// `turn_done`, when provided, is signalled on every `RunFinished` so a caller can wait
 /// for a turn to settle instead of guessing with a sleep.
+///
+/// The engine is held by [`Weak`] on purpose. `Harness` owns the event sender, so a
+/// strong reference here would keep the channel open forever and this task would never
+/// see the end of the stream — the caller's `drop(harness)` has to be able to actually
+/// drop it.
 fn spawn_renderer(
     mut events: UnboundedReceiver<HarnessEvent>,
-    harness: Arc<Harness>,
+    harness: Weak<Harness>,
     turn_done: Option<tokio::sync::mpsc::UnboundedSender<()>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut streaming = false;
         while let Some(event) = events.recv().await {
-            harness.note_event(&event).await;
+            // Backpressure only matters while the engine is still alive; rendering the
+            // tail of the stream after it is gone is still worth doing.
+            if let Some(harness) = harness.upgrade() {
+                harness.note_event(&event).await;
+            }
             render(&event, &mut streaming);
 
             if let (HarnessEvent::RunFinished { .. }, Some(done)) = (&event, &turn_done) {
@@ -182,6 +198,13 @@ fn spawn_renderer(
             }
         }
     })
+}
+
+/// Wait for a renderer to drain, without letting a missed drop hang the process.
+async fn drain(renderer: tokio::task::JoinHandle<()>) {
+    if tokio::time::timeout(DRAIN_TIMEOUT, renderer).await.is_err() {
+        tracing::warn!("event stream did not close within {DRAIN_TIMEOUT:?}; exiting anyway");
+    }
 }
 
 fn build_harness(cli: &Cli, events: harness_core::agents::EventSink) -> Result<Arc<Harness>> {
@@ -240,8 +263,8 @@ async fn main() -> Result<()> {
             }
         }
 
-        Command::RunWorker { role, task, context_file } => {
-            let renderer = spawn_renderer(rx, Arc::clone(&harness), None);
+        Command::RunWorker { role, task, context_file, patch } => {
+            let renderer = spawn_renderer(rx, Arc::downgrade(&harness), None);
             let record = harness.delegate(role, task, context_file.clone()).await?;
 
             println!("\n--- result ---\n{}", record.summary);
@@ -253,9 +276,23 @@ async fn main() -> Result<()> {
                     diff.deletions,
                     record.branch.as_deref().unwrap_or("(no branch)")
                 );
+
+                if *patch {
+                    match harness.worker_patch(&record.id, 2_000).await {
+                        Ok(p) => {
+                            println!("\n--- diff ---\n{}", p.text);
+                            if p.truncated {
+                                println!("\n… truncated; {} lines total", p.total_lines);
+                            }
+                        }
+                        Err(err) => eprintln!("could not read the diff: {err:#}"),
+                    }
+                } else if record.branch.is_some() {
+                    println!("(re-run with --patch to see the diff)");
+                }
             }
             drop(harness);
-            let _ = renderer.await;
+            drain(renderer).await;
         }
 
         Command::Chat { turns, model, max_turns } => {
@@ -273,9 +310,9 @@ async fn main() -> Result<()> {
             println!("MCP server: {}", orchestrator.mcp_url());
 
             let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel();
-            let renderer = spawn_renderer(worker_events, Arc::clone(&harness), None);
+            let renderer = spawn_renderer(worker_events, Arc::downgrade(&harness), None);
             let orchestrator_renderer =
-                spawn_renderer(orchestrator_events, Arc::clone(&harness), Some(done_tx));
+                spawn_renderer(orchestrator_events, Arc::downgrade(&harness), Some(done_tx));
 
             let mut orchestrator = orchestrator;
             for (index, turn) in turns.iter().enumerate() {
@@ -298,9 +335,9 @@ async fn main() -> Result<()> {
             }
 
             orchestrator.shutdown().await?;
-            let _ = orchestrator_renderer.await;
+            drain(orchestrator_renderer).await;
             drop(harness);
-            let _ = renderer.await;
+            drain(renderer).await;
         }
 
         Command::McpServe { bind } => {
@@ -310,11 +347,11 @@ async fn main() -> Result<()> {
             println!("\nmcp-config:\n{}", server.claude_mcp_config());
             println!("\nCtrl-C to stop.");
 
-            let renderer = spawn_renderer(rx, Arc::clone(&harness), None);
+            let renderer = spawn_renderer(rx, Arc::downgrade(&harness), None);
             tokio::signal::ctrl_c().await?;
             server.shutdown().await;
             drop(harness);
-            let _ = renderer.await;
+            drain(renderer).await;
         }
 
         Command::Usage { hours } => {

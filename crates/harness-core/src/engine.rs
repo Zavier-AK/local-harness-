@@ -467,6 +467,20 @@ impl Harness {
         self.workspaces.discard(&branch).await
     }
 
+    /// The diff a worker left on its branch, for review before it is landed.
+    pub async fn worker_patch(&self, worker_id: &str, max_lines: usize) -> Result<crate::isolation::Patch> {
+        let record = self
+            .worker(worker_id)
+            .await
+            .with_context(|| format!("no worker `{worker_id}`"))?;
+
+        let branch = record
+            .branch
+            .with_context(|| format!("worker `{worker_id}` left nothing on a branch"))?;
+
+        self.workspaces.patch(&branch, max_lines).await
+    }
+
     /// Token totals for the rolling window that actually governs a subscription.
     pub async fn usage_window(&self, seconds: i64) -> Result<Vec<crate::store::ProviderUsage>> {
         self.store.lock().await.usage_window(seconds)
