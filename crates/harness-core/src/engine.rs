@@ -25,6 +25,9 @@ pub struct RoleInfo {
     pub isolation: String,
     pub can_edit_files: bool,
     pub brief: Option<String>,
+    /// Whether this role's backend is installed and reachable. `None` until probed.
+    pub available: Option<bool>,
+    pub unavailable_reason: Option<String>,
 }
 
 /// A worker's state, as the UI and the orchestrator both see it.
@@ -135,8 +138,30 @@ impl Harness {
                 isolation: role.isolation.as_str().to_string(),
                 can_edit_files: role.effective_tools().iter().any(|t| t == "Edit" || t == "Write"),
                 brief: role.brief.clone(),
+                available: None,
+                unavailable_reason: None,
             })
             .collect()
+    }
+
+    /// The fleet, with each backend probed for whether it can actually run.
+    ///
+    /// Probed concurrently: a fleet with several unreachable local servers would
+    /// otherwise stall session startup by the timeout, once per role.
+    pub async fn list_roles_probed(&self) -> Vec<RoleInfo> {
+        let probes = self.registry.roles.iter().map(|(name, role)| async move {
+            (name.clone(), crate::availability::probe(role).await)
+        });
+        let results: Vec<_> = futures::future::join_all(probes).await;
+
+        let mut roles = self.list_roles();
+        for info in &mut roles {
+            if let Some((_, probe)) = results.iter().find(|(name, _)| *name == info.name) {
+                info.available = Some(probe.available);
+                info.unavailable_reason = probe.reason.clone();
+            }
+        }
+        roles
     }
 
     /// Note that a provider is rate-limited. Delegation to it sheds to fallbacks until

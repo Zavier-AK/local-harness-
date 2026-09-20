@@ -49,6 +49,15 @@ export type Role = {
   isolation: string;
   can_edit_files: boolean;
   brief: string | null;
+  available: boolean;
+  unavailable_reason: string | null;
+};
+
+/** What a candidate project directory offers, checked before starting a session. */
+export type ProjectStatus = {
+  exists: boolean;
+  is_git_repo: boolean;
+  has_roles_file: boolean;
 };
 
 export type SessionInfo = {

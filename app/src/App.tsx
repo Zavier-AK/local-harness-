@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import StartGate from "./StartGate";
 import HeadChat from "./HeadChat";
 import WorkerRail from "./WorkerRail";
 import DiffDrawer from "./DiffDrawer";
@@ -9,10 +10,6 @@ import type { ChatItem, HarnessEvent, SessionInfo, UsageRow, Worker } from "./ty
 
 export default function App() {
   const [session, setSession] = useState<SessionInfo | null>(null);
-  const [starting, setStarting] = useState(false);
-  const [startError, setStartError] = useState<string | null>(null);
-  const [projectRoot, setProjectRoot] = useState("");
-
   const [chat, setChat] = useState<ChatItem[]>([]);
   const [workers, setWorkers] = useState<Record<string, Worker>>({});
   const [usage, setUsage] = useState<UsageRow[]>([]);
@@ -54,30 +51,6 @@ export default function App() {
     };
   }, [session, refreshUsage]);
 
-  async function start() {
-    setStarting(true);
-    setStartError(null);
-    try {
-      const info = await invoke<SessionInfo>("start_session", {
-        projectRoot: projectRoot.trim(),
-        rolesPath: null,
-        model: null,
-      });
-      setSession(info);
-      setChat([
-        {
-          kind: "notice",
-          tone: "info",
-          text: `Session up. ${info.roles.length} roles available. Delegation server on ${info.mcp_url}.`,
-        },
-      ]);
-    } catch (err) {
-      setStartError(String(err));
-    } finally {
-      setStarting(false);
-    }
-  }
-
   async function send(text: string) {
     setChat((prev) => [...prev, { kind: "user", text }]);
     setBusy(true);
@@ -113,31 +86,31 @@ export default function App() {
 
   if (!session) {
     return (
-      <main className="gate">
-        <div className="gate-card">
-          <h1>Harness</h1>
-          <p className="muted">
-            A head agent that plans, and a fleet of workers that do the work — on your
-            subscriptions, not API billing.
-          </p>
-          <label htmlFor="project">Project directory</label>
-          <input
-            id="project"
-            value={projectRoot}
-            onChange={(e) => setProjectRoot(e.target.value)}
-            placeholder="/Users/you/code/your-project"
-            spellCheck={false}
-          />
-          <p className="hint">
-            Needs a <code>roles.toml</code> in that directory, and a git repository so
-            workers can be given their own worktrees.
-          </p>
-          <button onClick={start} disabled={starting || !projectRoot.trim()}>
-            {starting ? "Starting…" : "Start session"}
-          </button>
-          {startError && <p className="error">{startError}</p>}
-        </div>
-      </main>
+      <StartGate
+        onStarted={(info) => {
+          setSession(info);
+          const blocked = info.roles.filter((r) => !r.available);
+          setChat([
+            {
+              kind: "notice",
+              tone: "info",
+              text: `Session up. ${info.roles.length - blocked.length} of ${info.roles.length} roles ready.`,
+            },
+            // Surfaced here rather than discovered mid-delegation, which costs a turn.
+            ...(blocked.length
+              ? ([
+                  {
+                    kind: "notice" as const,
+                    tone: "warn" as const,
+                    text: `Unavailable: ${blocked
+                      .map((r) => `${r.name} (${r.unavailable_reason ?? "backend not reachable"})`)
+                      .join("; ")}`,
+                  },
+                ] as ChatItem[])
+              : []),
+          ]);
+        }}
+      />
     );
   }
 

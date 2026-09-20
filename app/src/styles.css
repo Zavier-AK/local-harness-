@@ -285,3 +285,28 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .dl.del { background: color-mix(in srgb, var(--error) 14%, transparent); color: var(--error); }
 .dl.hunk { color: var(--accent); background: var(--accent-soft); }
 .dl.meta { color: var(--muted); }
+
+/* ---------- start gate checks ---------- */
+
+.picker { display: flex; gap: 8px; }
+.picker input { flex: 1; }
+.wide { width: 100%; }
+
+.checks { list-style: none; margin: 14px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.checks li { display: flex; align-items: baseline; gap: 8px; }
+.checks .tick { width: 1em; }
+.checks li.ok .tick { color: var(--ok); }
+.checks li.missing .tick { color: var(--muted); }
+
+button.link {
+  border: none;
+  background: none;
+  color: var(--accent);
+  padding: 0;
+  text-decoration: underline;
+  font-size: 13px;
+}
+
+/* A role whose backend is missing reads as present but inert, not hidden. */
+.fleet li.unavailable .role-name { text-decoration: line-through; }
+.fleet li.unavailable { opacity: 0.65; }

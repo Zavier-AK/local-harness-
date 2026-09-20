@@ -252,14 +252,37 @@ async fn main() -> Result<()> {
     match &cli.command {
         Command::Roles => {
             drop(rx);
-            for role in harness.list_roles() {
-                println!(
-                    "{:<16} {:<14} {:<10} {}",
-                    role.name,
-                    format!("{}{}", role.provider, role.model.as_ref().map(|m| format!("/{m}")).unwrap_or_default()),
-                    role.isolation,
-                    if role.can_edit_files { "can edit" } else { "read-only" }
+            let roles = harness.list_roles_probed().await;
+            let width = roles.iter().map(|r| r.name.len()).max().unwrap_or(8).max(8);
+
+            for role in &roles {
+                let backend = format!(
+                    "{}{}",
+                    role.provider,
+                    role.model.as_ref().map(|m| format!("/{m}")).unwrap_or_default()
                 );
+                println!(
+                    "{:<width$}  {:<24} {:<9} {:<10} {}",
+                    role.name,
+                    backend,
+                    role.isolation,
+                    if role.can_edit_files { "can edit" } else { "read-only" },
+                    if role.available == Some(false) { "UNAVAILABLE" } else { "ready" },
+                    width = width,
+                );
+            }
+
+            // The reasons are the actionable part: each one names what to install or start.
+            let blocked: Vec<_> = roles.iter().filter(|r| r.available == Some(false)).collect();
+            if !blocked.is_empty() {
+                println!("\n{} role(s) cannot run:", blocked.len());
+                for role in blocked {
+                    println!(
+                        "  {}: {}",
+                        role.name,
+                        role.unavailable_reason.as_deref().unwrap_or("backend not reachable")
+                    );
+                }
             }
         }
 
