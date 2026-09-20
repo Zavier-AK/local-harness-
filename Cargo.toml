@@ -1,5 +1,8 @@
 [workspace]
 members = ["crates/harness-core", "crates/harness-cli"]
+# The Tauri app is its own workspace: it pulls a large, platform-specific dependency
+# tree that would otherwise be built whenever the engine is tested.
+exclude = ["app/src-tauri"]
 resolver = "2"
 
 [workspace.package]
