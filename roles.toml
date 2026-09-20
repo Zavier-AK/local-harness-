@@ -1,0 +1,83 @@
+# The fleet.
+#
+# Isolation is per-role on purpose: builders get their own worktree, evaluators and
+# testers are read-only, and anything that must work in the repo proper uses `shared`,
+# which the engine serializes so two such workers cannot clobber each other.
+#
+# Cost shape: Claude is the planner and the escalation path, not the router. Frequent
+# and cheap work goes to local models, which have no rate limit and no context floor.
+
+default_role = "builder"
+
+# ---------------------------------------------------------------------------
+# Claude Pro — rare, high-value calls.
+# ---------------------------------------------------------------------------
+
+[roles.architect]
+provider  = "claude"
+model     = "opus"
+isolation = "readonly"
+tools     = ["Read", "Grep", "Glob"]
+brief     = "Break a problem into delegatable units and identify risks. Do not write code."
+max_turns = 30
+
+[roles.builder]
+provider        = "claude"
+model           = "sonnet"
+isolation       = "worktree"
+tools           = ["Read", "Edit", "Write", "Bash", "Grep", "Glob"]
+permission_mode = "acceptEdits"
+brief           = "Implement the change in your worktree. Run the project's tests before reporting done."
+fallback_role   = "local_builder"
+max_turns       = 60
+
+# ---------------------------------------------------------------------------
+# ChatGPT Plus — the second opinion, and the host for local models.
+# ---------------------------------------------------------------------------
+
+[roles.reviewer]
+provider  = "codex"
+isolation = "readonly"
+tools     = ["Read", "Bash"]
+brief     = "Review the change for correctness and risk. Report findings; do not fix them."
+max_turns = 30
+
+# ---------------------------------------------------------------------------
+# Local — free, unlimited, and agentic via Codex's built-in `ollama` provider.
+# Swap model_provider to "lmstudio" to use LM Studio's server instead.
+# ---------------------------------------------------------------------------
+
+[roles.local_builder]
+provider      = "codex"
+model         = "qwen3.6:35b-a3b"
+isolation     = "worktree"
+tools         = ["Read", "Edit", "Write", "Bash"]
+brief         = "Implement the change in your worktree. Keep it minimal."
+provider_opts = { model_provider = "ollama" }
+max_turns     = 60
+
+[roles.tester]
+provider      = "codex"
+model         = "qwen3.6:35b-a3b"
+isolation     = "readonly"
+tools         = ["Read", "Bash"]
+brief         = "Run the tests and report exactly what failed. Do not fix anything."
+provider_opts = { model_provider = "ollama" }
+max_turns     = 30
+
+# No agent loop, no filesystem: pure text in, text out. The cheapest tier.
+[roles.summarizer]
+provider  = "openai_compat"
+base_url  = "http://localhost:11434/v1"
+model     = "gemma4:12b"
+isolation = "none"
+brief     = "Summarize what you are given. Be terse and concrete."
+
+# ---------------------------------------------------------------------------
+# Deterministic stand-in for tests and dry runs. No network, no subscription.
+# ---------------------------------------------------------------------------
+
+[roles.mock]
+provider  = "mock"
+isolation = "worktree"
+tools     = ["Read", "Write"]
