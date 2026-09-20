@@ -28,7 +28,11 @@ export default function WorkerRail({ workers, roles, selected, onSelect }: Props
           <h3>Fleet</h3>
           <ul className="fleet">
             {roles.map((role) => (
-              <li key={role.name}>
+              <li
+                key={role.name}
+                className={role.available ? "" : "unavailable"}
+                title={role.unavailable_reason ?? undefined}
+              >
                 <span className="role-name">{role.name}</span>
                 <span className="muted mono">
                   {role.provider}
@@ -37,6 +41,7 @@ export default function WorkerRail({ workers, roles, selected, onSelect }: Props
                 <span className={`badge ${role.can_edit_files ? "write" : "read"}`}>
                   {role.isolation}
                 </span>
+                {!role.available && <span className="badge limited">unavailable</span>}
               </li>
             ))}
           </ul>

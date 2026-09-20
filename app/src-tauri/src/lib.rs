@@ -20,6 +20,10 @@ use tokio::sync::Mutex;
 /// Event channel the UI subscribes to.
 const EVENT_CHANNEL: &str = "harness://event";
 
+/// The default fleet, baked in so a project without a `roles.toml` can be given one
+/// without the user hunting for a template.
+const DEFAULT_ROLES: &str = include_str!("../../../roles.toml");
+
 #[derive(Default)]
 pub struct AppState {
     session: Mutex<Option<Session>>,
@@ -46,6 +50,17 @@ pub struct RoleView {
     isolation: String,
     can_edit_files: bool,
     brief: Option<String>,
+    available: bool,
+    unavailable_reason: Option<String>,
+}
+
+/// What a directory offers before a session is started, so the UI can explain a problem
+/// rather than failing with a raw error once the user has committed to starting.
+#[derive(Serialize)]
+pub struct ProjectStatus {
+    exists: bool,
+    is_git_repo: bool,
+    has_roles_file: bool,
 }
 
 #[derive(Serialize)]
@@ -77,6 +92,31 @@ fn forward_events(
     });
 }
 
+/// Inspect a candidate project directory.
+#[tauri::command]
+async fn inspect_project(project_root: String) -> ProjectStatus {
+    let project = PathBuf::from(&project_root);
+    ProjectStatus {
+        exists: project.is_dir(),
+        // Worktree isolation needs a repository; without one, only `none`-isolation
+        // roles could run, which is not worth starting a session over.
+        is_git_repo: project.join(".git").exists(),
+        has_roles_file: project.join("roles.toml").is_file(),
+    }
+}
+
+/// Write the default fleet into a project that has none.
+#[tauri::command]
+async fn write_default_roles(project_root: String) -> Result<String, String> {
+    let target = PathBuf::from(&project_root).join("roles.toml");
+    if target.exists() {
+        return Err(format!("{} already exists", target.display()));
+    }
+
+    std::fs::write(&target, DEFAULT_ROLES).map_err(|e| format!("{e}"))?;
+    Ok(target.display().to_string())
+}
+
 #[tauri::command]
 async fn start_session(
     app: AppHandle,
@@ -95,6 +135,9 @@ async fn start_session(
         .map(PathBuf::from)
         .unwrap_or_else(|| project.join("roles.toml"));
 
+    if !roles_file.is_file() {
+        return Err(format!("no roles.toml in {}", project.display()));
+    }
     let registry = RoleRegistry::load(&roles_file).map_err(|e| format!("{e:#}"))?;
 
     // The session database lives beside the project, so history survives app restarts.
@@ -130,7 +173,8 @@ async fn start_session(
         project_root: project.display().to_string(),
         mcp_url: orchestrator.mcp_url(),
         roles: harness
-            .list_roles()
+            .list_roles_probed()
+            .await
             .into_iter()
             .map(|r| RoleView {
                 name: r.name,
@@ -139,6 +183,8 @@ async fn start_session(
                 isolation: r.isolation,
                 can_edit_files: r.can_edit_files,
                 brief: r.brief,
+                available: r.available.unwrap_or(true),
+                unavailable_reason: r.unavailable_reason,
             })
             .collect(),
     };
@@ -253,11 +299,14 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             app.manage(AppState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            inspect_project,
+            write_default_roles,
             start_session,
             send_turn,
             list_workers,

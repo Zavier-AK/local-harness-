@@ -55,6 +55,9 @@ pub struct RoleSummary {
     pub isolation: String,
     pub can_edit_files: bool,
     pub brief: Option<String>,
+    /// False when the backend is missing or unreachable. Delegating anyway will fail.
+    pub available: bool,
+    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -113,13 +116,16 @@ impl HarnessTools {
     #[tool(
         name = "list_roles",
         description = "List the worker roles available for delegation, with the model \
-                       behind each, whether it can edit files, and what it is for. Call \
-                       this before delegating if you are unsure which role fits."
+                       behind each, whether it can edit files, and what it is for. Roles \
+                       marked available=false have a missing or unreachable backend and \
+                       will fail if you delegate to them. Call this before delegating if \
+                       you are unsure which role fits."
     )]
     async fn list_roles(&self) -> Json<Vec<RoleSummary>> {
         Json(
             self.harness
-                .list_roles()
+                .list_roles_probed()
+                .await
                 .into_iter()
                 .map(|r| RoleSummary {
                     name: r.name,
@@ -128,6 +134,8 @@ impl HarnessTools {
                     isolation: r.isolation,
                     can_edit_files: r.can_edit_files,
                     brief: r.brief,
+                    available: r.available.unwrap_or(true),
+                    unavailable_reason: r.unavailable_reason,
                 })
                 .collect(),
         )

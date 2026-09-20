@@ -27,7 +27,13 @@ pub const ORCHESTRATOR_TOOLS: &[&str] = &["Read", "Grep", "Glob"];
 
 /// The brief appended to the head agent's system prompt.
 pub fn orchestrator_brief(roles: &[crate::engine::RoleInfo]) -> String {
-    let fleet = roles
+    // A role whose backend is missing cannot do work, and naming it only invites the
+    // head agent to spend a turn discovering that. Probed-unavailable roles are held
+    // back; unprobed roles (available: None) are listed, since we do not know otherwise.
+    let (usable, unusable): (Vec<_>, Vec<_>) =
+        roles.iter().partition(|r| r.available.unwrap_or(true));
+
+    let fleet = usable
         .iter()
         .map(|r| {
             format!(
@@ -43,10 +49,27 @@ pub fn orchestrator_brief(roles: &[crate::engine::RoleInfo]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
+    let unavailable = if unusable.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nUnavailable right now — do NOT delegate to these, they will fail:\n{}",
+            unusable
+                .iter()
+                .map(|r| format!(
+                    "- {} ({})",
+                    r.name,
+                    r.unavailable_reason.as_deref().unwrap_or("backend not reachable")
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+
     format!(
         "You are the orchestrator of a local multi-agent harness. You plan and delegate; \
          you do not write code yourself.\n\n\
-         Your fleet:\n{fleet}\n\n\
+         Your fleet:\n{fleet}{unavailable}\n\n\
          How to work:\n\
          - Delegate with the `delegate` tool. Prefer delegating over answering from your \
          own context: workers run in their own context windows and cost far less of your \
@@ -100,7 +123,8 @@ impl Orchestrator {
     ) -> Result<(Self, UnboundedReceiver<HarnessEvent>)> {
         let mcp = mcp::serve(Arc::clone(&harness)).await?;
         let role = orchestrator_role(model, max_turns);
-        let brief = orchestrator_brief(&harness.list_roles());
+        // Probe before briefing, so the head agent never plans around a dead backend.
+        let brief = orchestrator_brief(&harness.list_roles_probed().await);
 
         let run_id = format!("orchestrator-{}", harness.session_id());
         harness.register_orchestrator(&run_id, role.model.as_deref()).await;
@@ -151,6 +175,8 @@ mod tests {
                 isolation: "worktree".into(),
                 can_edit_files: true,
                 brief: Some("Implements changes.".into()),
+                available: Some(true),
+                unavailable_reason: None,
             },
             RoleInfo {
                 name: "reviewer".into(),
@@ -159,6 +185,8 @@ mod tests {
                 isolation: "readonly".into(),
                 can_edit_files: false,
                 brief: None,
+                available: Some(true),
+                unavailable_reason: None,
             },
         ]
     }
@@ -194,6 +222,35 @@ mod tests {
         assert!(brief.contains("builder (claude/sonnet, isolation: worktree, can edit files)"));
         assert!(brief.contains("reviewer (codex, isolation: readonly, read-only)"));
         assert!(brief.contains("Implements changes."));
+    }
+
+    #[test]
+    fn unavailable_roles_are_withheld_and_called_out() {
+        let mut roles = fleet();
+        roles[1].available = Some(false);
+        roles[1].unavailable_reason = Some("the `codex` CLI is not on PATH".into());
+
+        let brief = orchestrator_brief(&roles);
+
+        // The usable role is still offered...
+        assert!(brief.contains("builder (claude/sonnet"));
+        // ...the unusable one is not listed as part of the fleet...
+        assert!(!brief.contains("reviewer (codex"));
+        // ...but is named explicitly, so the agent does not try to reach for it.
+        assert!(brief.contains("do NOT delegate"));
+        assert!(brief.contains("reviewer (the `codex` CLI is not on PATH)"));
+    }
+
+    #[test]
+    fn unprobed_roles_are_treated_as_usable() {
+        let mut roles = fleet();
+        roles[0].available = None;
+        roles[1].available = None;
+
+        let brief = orchestrator_brief(&roles);
+        assert!(brief.contains("builder"));
+        assert!(brief.contains("reviewer"));
+        assert!(!brief.contains("do NOT delegate"));
     }
 
     #[test]
