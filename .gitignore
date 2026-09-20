@@ -1,0 +1,9 @@
+/target
+/.harness
+node_modules
+dist
+*.db
+*.db-wal
+*.db-shm
+app/src-tauri/target
+app/src-tauri/gen

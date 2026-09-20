@@ -1,0 +1,33 @@
+[package]
+name = "harness-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Engine for a hierarchical multi-agent harness driving subscription-authenticated agent CLIs."
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+time.workspace = true
+rusqlite.workspace = true
+reqwest.workspace = true
+axum.workspace = true
+futures.workspace = true
+rand.workspace = true
+rmcp = { version = "3", features = [
+    "server", "macros", "schemars",
+    "transport-streamable-http-server", "transport-streamable-http-server-session",
+] }
+schemars = "1"
+tower-service = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+futures.workspace = true
+tracing-subscriber.workspace = true
