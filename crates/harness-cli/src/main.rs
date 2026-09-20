@@ -10,6 +10,7 @@ use harness_core::event::HarnessEvent;
 use harness_core::isolation::Workspaces;
 use harness_core::mcp;
 use harness_core::orchestrator::Orchestrator;
+use harness_core::engine::RoleInfo as RoleRow;
 use harness_core::roles::RoleRegistry;
 use harness_core::store::Store;
 use std::path::PathBuf;
@@ -253,22 +254,30 @@ async fn main() -> Result<()> {
         Command::Roles => {
             drop(rx);
             let roles = harness.list_roles_probed().await;
-            let width = roles.iter().map(|r| r.name.len()).max().unwrap_or(8).max(8);
 
-            for role in &roles {
-                let backend = format!(
-                    "{}{}",
-                    role.provider,
-                    role.model.as_ref().map(|m| format!("/{m}")).unwrap_or_default()
-                );
+            let rows: Vec<(String, String, &RoleRow)> = roles
+                .iter()
+                .map(|role| {
+                    let backend = format!(
+                        "{}{}",
+                        role.provider,
+                        role.model.as_ref().map(|m| format!("/{m}")).unwrap_or_default()
+                    );
+                    (role.name.clone(), backend, role)
+                })
+                .collect();
+
+            // Size both columns to their contents; a long provider/model pair such as
+            // `openai_compat/qwen3.6-35b-a3b` otherwise shunts every later column right.
+            let name_w = rows.iter().map(|(n, _, _)| n.len()).max().unwrap_or(8).max(8);
+            let backend_w = rows.iter().map(|(_, b, _)| b.len()).max().unwrap_or(10).max(10);
+
+            for (name, backend, role) in &rows {
                 println!(
-                    "{:<width$}  {:<24} {:<9} {:<10} {}",
-                    role.name,
-                    backend,
+                    "{name:<name_w$}  {backend:<backend_w$}  {:<9} {:<10} {}",
                     role.isolation,
                     if role.can_edit_files { "can edit" } else { "read-only" },
                     if role.available == Some(false) { "UNAVAILABLE" } else { "ready" },
-                    width = width,
                 );
             }
 

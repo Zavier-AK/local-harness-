@@ -43,35 +43,102 @@ brief     = "Review the change for correctness and risk. Report findings; do not
 max_turns = 30
 
 # ---------------------------------------------------------------------------
-# Local — free, unlimited, and agentic via Codex's built-in `ollama` provider.
-# Swap model_provider to "lmstudio" to use LM Studio's server instead.
+# Local — free, unlimited, and no subscription quota.
+#
+# `local` works today over plain chat completions: no tools, no filesystem,
+# so it summarizes, classifies, drafts and gives second opinions.
+#
+# The two `codex` roles below are the same model with a real agent loop —
+# tools, sandboxing, its own worktree — which Codex supplies for free. They
+# need the Codex CLI installed; until then they report unavailable and the
+# orchestrator is told not to reach for them.
+#
+# `lmstudio` and `ollama` are Codex built-ins pointing at :1234 and :11434
+# respectively. A server on another machine needs its own provider id — see
+# the block further down.
+#
+# NOTE: `model` must match what the server reports. Check with:
+#   curl -s http://localhost:1234/v1/models | python3 -m json.tool
+# An embedding model in that list (nomic-embed-text and friends) cannot serve
+# as a worker — it has no chat completion endpoint.
 # ---------------------------------------------------------------------------
+
+[roles.local]
+provider  = "openai_compat"
+base_url  = "http://localhost:1234/v1"
+model     = "qwen/qwen3-coder-30b"
+isolation = "none"
+brief     = "Answer concisely and concretely. No preamble."
 
 [roles.local_builder]
 provider      = "codex"
-model         = "qwen3.6:35b-a3b"
+model         = "qwen/qwen3-coder-30b"
 isolation     = "worktree"
 tools         = ["Read", "Edit", "Write", "Bash"]
 brief         = "Implement the change in your worktree. Keep it minimal."
-provider_opts = { model_provider = "ollama" }
-max_turns     = 60
+provider_opts = { model_provider = "lmstudio" }
+# Deliberately low: local inference is slow and heavy on the host, so a runaway
+# loop costs real time on the machine rather than tokens. Raise once trusted.
+max_turns     = 15
 
 [roles.tester]
 provider      = "codex"
-model         = "qwen3.6:35b-a3b"
+model         = "qwen/qwen3-coder-30b"
 isolation     = "readonly"
 tools         = ["Read", "Bash"]
 brief         = "Run the tests and report exactly what failed. Do not fix anything."
-provider_opts = { model_provider = "ollama" }
-max_turns     = 30
+provider_opts = { model_provider = "lmstudio" }
+max_turns     = 10
 
-# No agent loop, no filesystem: pure text in, text out. The cheapest tier.
-[roles.summarizer]
-provider  = "openai_compat"
-base_url  = "http://localhost:11434/v1"
-model     = "gemma4:12b"
-isolation = "none"
-brief     = "Summarize what you are given. Be terse and concrete."
+# Same shape as `local`, for an Ollama server instead of LM Studio.
+# [roles.ollama_local]
+# provider  = "openai_compat"
+# base_url  = "http://localhost:11434/v1"
+# model     = "gemma4:12b"
+# isolation = "none"
+# brief     = "Summarize what you are given. Be terse and concrete."
+
+# ---------------------------------------------------------------------------
+# A model server on another machine.
+#
+# Both `provider` choices below reach the same server; they differ in what the
+# worker can do once it gets there.
+#
+#   openai_compat — plain chat completions. No tools, no filesystem. Right for
+#                   summarize / classify / draft / second-opinion work.
+#
+#   codex         — a real agent loop with tools and sandboxing, for free.
+#                   Needs a matching provider block in ~/.codex/config.toml:
+#
+#                     [model_providers.bionic]
+#                     name = "bionic"
+#                     base_url = "http://bionic.local:11434/v1"
+#                     wire_api = "chat"
+#
+#                   The id must NOT be `ollama` or `lmstudio` — Codex reserves
+#                   those for its built-ins and refuses to let them be
+#                   overridden, so a remote server needs its own name.
+#
+# `base_url` on a codex role is not passed to the CLI; it tells the harness
+# where to health-check, so a reachable remote server is not reported as down.
+# ---------------------------------------------------------------------------
+
+# [roles.remote_summarizer]
+# provider  = "openai_compat"
+# base_url  = "http://bionic.local:11434/v1"
+# model     = "qwen3.6:35b-a3b"
+# isolation = "none"
+# brief     = "Summarize what you are given. Be terse and concrete."
+
+# [roles.remote_builder]
+# provider      = "codex"
+# model         = "qwen/qwen3-coder-30b"
+# isolation     = "worktree"
+# tools         = ["Read", "Edit", "Write", "Bash"]
+# base_url      = "http://bionic.local:11434/v1"   # health check only
+# provider_opts = { model_provider = "bionic" }
+# brief         = "Implement the change in your worktree. Keep it minimal."
+# max_turns     = 60
 
 # ---------------------------------------------------------------------------
 # Deterministic stand-in for tests and dry runs. No network, no subscription.

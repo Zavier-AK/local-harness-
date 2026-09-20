@@ -115,10 +115,68 @@ On Linux the desktop app additionally needs `libgtk-3-dev`, `libwebkit2gtk-4.1-d
 `libayatana-appindicator3-dev` and `librsvg2-dev`. macOS needs none of these — it uses
 WKWebView.
 
+## Attaching a local model
+
+Two ways in, reaching the same server but differing in what the worker can do.
+
+**Tool-free** — plain chat completions, for summarize/classify/draft work. This is the
+shipped `local` role, pointed at LM Studio:
+
+```toml
+[roles.local]
+provider  = "openai_compat"
+base_url  = "http://localhost:1234/v1"    # LM Studio; Ollama serves :11434
+model     = "qwen3.6-35b-a3b"
+isolation = "none"
+```
+
+LM Studio does not start its server automatically — open the **Developer** tab and start
+it, or nothing is listening. `model` must match what the server reports:
+
+```bash
+curl -s http://localhost:1234/v1/models | python3 -m json.tool
+```
+
+**Agentic** — a real tool loop with sandboxing, via Codex, no code required:
+
+```toml
+[roles.local_builder]
+provider      = "codex"
+model         = "qwen3.6:35b-a3b"
+isolation     = "worktree"
+tools         = ["Read", "Edit", "Write", "Bash"]
+provider_opts = { model_provider = "lmstudio" }
+```
+
+`lmstudio` and `ollama` are Codex built-ins pointing at `localhost:11434` and
+`localhost:1234`. **A server on another machine needs its own provider id**, because Codex
+reserves those two names and refuses to override them. In `~/.codex/config.toml`:
+
+```toml
+[model_providers.bionic]
+name = "bionic"
+base_url = "http://bionic.local:11434/v1"
+wire_api = "chat"
+```
+
+Then `provider_opts = { model_provider = "bionic" }`, plus `base_url` on the role so the
+harness health-checks the right host rather than assuming localhost. `base_url` on a
+`codex` role is used only for that check; it is never passed to the CLI.
+
+Confirm what the harness can actually reach:
+
+```bash
+cargo run -p harness-cli -- roles
+```
+
+`wire_api` is worth a try both ways — `"chat"` for `/v1/chat/completions`, `"responses"`
+for `/v1/responses`. Which one a given server speaks varies, and the 2026 Codex docs
+default to `responses` while most Ollama-compatible endpoints still want `chat`.
+
 ## Testing
 
 ```bash
-cargo test                        # engine: 79 tests, no network, no CLI login needed
+cargo test                        # engine: 81 tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 

@@ -80,11 +80,24 @@ pub async fn probe(role: &Role) -> Availability {
                 );
             }
 
-            // A Codex role pointed at a local provider also needs that server running.
-            match role.provider_opts.get("model_provider").map(String::as_str) {
-                Some("ollama") => probe_http("http://localhost:11434", "Ollama").await,
-                Some("lmstudio") => probe_http("http://localhost:1234", "LM Studio").await,
-                _ => Availability::yes(),
+            // A Codex role pointed at a model server also needs that server running.
+            //
+            // `base_url` wins where it is set, because the server need not be on this
+            // machine: a role can target another host on the network, and assuming
+            // localhost would report it unavailable while it is serving perfectly well.
+            // The built-in provider ids imply their own default ports; anything else is
+            // a custom provider whose endpoint lives in the user's Codex config, which
+            // this cannot see, so it is left alone rather than guessed at.
+            let model_provider = role.provider_opts.get("model_provider").map(String::as_str);
+
+            match (role.base_url.as_deref(), model_provider) {
+                (Some(base_url), _) => {
+                    let root = base_url.trim_end_matches('/').trim_end_matches("/v1");
+                    probe_http(root, "the model server").await
+                }
+                (None, Some("ollama")) => probe_http("http://localhost:11434", "Ollama").await,
+                (None, Some("lmstudio")) => probe_http("http://localhost:1234", "LM Studio").await,
+                (None, _) => Availability::yes(),
             }
         }
 
@@ -190,6 +203,34 @@ mod tests {
         let result = probe(&local).await;
         assert!(!result.available);
         assert!(result.reason.unwrap().contains("127.0.0.1:1"));
+    }
+
+    #[tokio::test]
+    async fn a_codex_role_probes_its_own_base_url_when_given_one() {
+        if !binary_on_path("codex") {
+            // The probe short-circuits on a missing CLI, so this assertion needs one.
+            return;
+        }
+        let mut remote = role(Provider::Codex);
+        remote.provider_opts.insert("model_provider".into(), "bionic".into());
+        remote.base_url = Some("http://127.0.0.1:1/v1".into());
+
+        let result = probe(&remote).await;
+        assert!(!result.available);
+        assert!(result.reason.unwrap().contains("127.0.0.1:1"));
+    }
+
+    #[tokio::test]
+    async fn a_custom_codex_provider_without_a_base_url_is_not_guessed_at() {
+        if !binary_on_path("codex") {
+            return;
+        }
+        let mut custom = role(Provider::Codex);
+        // Its endpoint lives in the user's Codex config, which we cannot read. Assuming
+        // localhost here would mark a working remote model server as broken.
+        custom.provider_opts.insert("model_provider".into(), "bionic".into());
+
+        assert!(probe(&custom).await.available);
     }
 
     #[tokio::test]
