@@ -74,6 +74,48 @@ isolation = "none"
 brief     = "Summarize what you are given. Be terse and concrete."
 
 # ---------------------------------------------------------------------------
+# A model server on another machine.
+#
+# Both `provider` choices below reach the same server; they differ in what the
+# worker can do once it gets there.
+#
+#   openai_compat — plain chat completions. No tools, no filesystem. Right for
+#                   summarize / classify / draft / second-opinion work.
+#
+#   codex         — a real agent loop with tools and sandboxing, for free.
+#                   Needs a matching provider block in ~/.codex/config.toml:
+#
+#                     [model_providers.bionic]
+#                     name = "bionic"
+#                     base_url = "http://bionic.local:11434/v1"
+#                     wire_api = "chat"
+#
+#                   The id must NOT be `ollama` or `lmstudio` — Codex reserves
+#                   those for its built-ins and refuses to let them be
+#                   overridden, so a remote server needs its own name.
+#
+# `base_url` on a codex role is not passed to the CLI; it tells the harness
+# where to health-check, so a reachable remote server is not reported as down.
+# ---------------------------------------------------------------------------
+
+# [roles.remote_summarizer]
+# provider  = "openai_compat"
+# base_url  = "http://bionic.local:11434/v1"
+# model     = "qwen3.6:35b-a3b"
+# isolation = "none"
+# brief     = "Summarize what you are given. Be terse and concrete."
+
+# [roles.remote_builder]
+# provider      = "codex"
+# model         = "qwen3.6:35b-a3b"
+# isolation     = "worktree"
+# tools         = ["Read", "Edit", "Write", "Bash"]
+# base_url      = "http://bionic.local:11434/v1"   # health check only
+# provider_opts = { model_provider = "bionic" }
+# brief         = "Implement the change in your worktree. Keep it minimal."
+# max_turns     = 60
+
+# ---------------------------------------------------------------------------
 # Deterministic stand-in for tests and dry runs. No network, no subscription.
 # ---------------------------------------------------------------------------
 
