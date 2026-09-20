@@ -6,7 +6,7 @@ import HeadChat from "./HeadChat";
 import WorkerRail from "./WorkerRail";
 import DiffDrawer from "./DiffDrawer";
 import BudgetMeter from "./BudgetMeter";
-import type { ChatItem, HarnessEvent, SessionInfo, UsageRow, Worker } from "./types";
+import type { ChatItem, HarnessEvent, Role, SessionInfo, UsageRow, Worker } from "./types";
 
 export default function App() {
   const [session, setSession] = useState<SessionInfo | null>(null);
@@ -45,6 +45,10 @@ export default function App() {
       }
       if (payload.type === "worker_finished") void refreshUsage();
     });
+
+    // The five-hour window may already have burn in it from an earlier session in this
+    // project, so show it on open rather than only after the first run finishes.
+    void refreshUsage();
 
     return () => {
       void unlisten.then((off) => off());
@@ -97,17 +101,9 @@ export default function App() {
               text: `Session up. ${info.roles.length - blocked.length} of ${info.roles.length} roles ready.`,
             },
             // Surfaced here rather than discovered mid-delegation, which costs a turn.
-            ...(blocked.length
-              ? ([
-                  {
-                    kind: "notice" as const,
-                    tone: "warn" as const,
-                    text: `Unavailable: ${blocked
-                      .map((r) => `${r.name} (${r.unavailable_reason ?? "backend not reachable"})`)
-                      .join("; ")}`,
-                  },
-                ] as ChatItem[])
-              : []),
+            // Grouped by reason: four roles blocked on one missing CLI is one problem
+            // to fix, not four, and repeating the same sentence per role buries that.
+            ...groupByReason(blocked),
           ]);
         }}
       />
@@ -145,6 +141,27 @@ export default function App() {
       )}
     </div>
   );
+}
+
+/**
+ * One notice per distinct cause, naming the roles it blocks.
+ *
+ * Several roles usually share a backend, so listing a reason per role repeats the same
+ * remedy and hides how few things actually need fixing.
+ */
+function groupByReason(blocked: Role[]): ChatItem[] {
+  const byReason = new Map<string, string[]>();
+
+  for (const role of blocked) {
+    const reason = role.unavailable_reason ?? "backend not reachable";
+    byReason.set(reason, [...(byReason.get(reason) ?? []), role.name]);
+  }
+
+  return [...byReason].map(([reason, names]) => ({
+    kind: "notice" as const,
+    tone: "warn" as const,
+    text: `${names.join(", ")} unavailable — ${reason}`,
+  }));
 }
 
 /** Fold an event into the head transcript. */

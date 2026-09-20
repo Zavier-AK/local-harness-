@@ -1,42 +1,61 @@
+/*
+ * Cherry blossom on a dark plum base, over a vibrancy layer.
+ *
+ * Every surface carries alpha rather than a solid colour: the window is transparent and
+ * macOS draws an NSVisualEffectView behind it, so whatever the page does not paint shows
+ * the desktop through frosted glass. Anything opaque here would punch a flat hole in that.
+ *
+ * All colour lives in these tokens. Retheming is editing this block and nothing else —
+ * which is what makes user themes a later config change rather than a rewrite.
+ */
 :root {
-  --bg: #fbfbfd;
-  --panel: #ffffff;
-  --border: #e4e4ea;
-  --text: #17171c;
-  --muted: #71717f;
-  --accent: #4f46e5;
-  --accent-soft: #eef2ff;
-  --warn: #b45309;
-  --warn-soft: #fffbeb;
-  --error: #b91c1c;
-  --error-soft: #fef2f2;
-  --ok: #15803d;
-  --radius: 10px;
-  --mono: ui-monospace, "SF Mono", Menlo, monospace;
-}
+  /* Base tint. Kept dark and slightly plum so pink reads as deliberate, not as a
+     stray hue on neutral grey. */
+  --bg: rgba(22, 18, 26, 0.55);
+  --panel: rgba(34, 27, 40, 0.58);
+  --panel-strong: rgba(30, 24, 36, 0.86);
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #131317;
-    --panel: #1a1a20;
-    --border: #2b2b34;
-    --text: #ececf1;
-    --muted: #8f8fa0;
-    --accent: #818cf8;
-    --accent-soft: #23233a;
-    --warn: #fbbf24;
-    --warn-soft: #2a2312;
-    --error: #f87171;
-    --error-soft: #2c1618;
-    --ok: #4ade80;
-  }
+  --border: rgba(255, 183, 202, 0.14);
+  --border-strong: rgba(255, 183, 202, 0.26);
+
+  --text: #f5eaef;
+  --muted: #b09aa5;
+
+  /* Sakura. --accent is the interactive colour; --on-accent rides on top of it, so it
+     is dark rather than white — pink this light will not carry white text. */
+  --accent: #ff9ebb;
+  --accent-strong: #ff7ea6;
+  --accent-soft: rgba(255, 158, 187, 0.15);
+  --on-accent: #2a1520;
+
+  --ok: #8fd6a8;
+  --warn: #f3c67c;
+  --warn-soft: rgba(243, 198, 124, 0.13);
+  --error: #ff8a94;
+  --error-soft: rgba(255, 138, 148, 0.13);
+
+  --radius: 12px;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --blur: saturate(140%) blur(18px);
 }
 
 * { box-sizing: border-box; }
 
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background:
+    radial-gradient(60% 45% at 12% 0%, rgba(255, 158, 187, 0.10), transparent 70%),
+    radial-gradient(50% 40% at 100% 100%, rgba(186, 120, 200, 0.08), transparent 70%);
+}
+
+html, body { background: transparent; }
+
 body {
   margin: 0;
-  background: var(--bg);
   color: var(--text);
   font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -54,12 +73,20 @@ button {
   border-radius: 8px;
   padding: 7px 14px;
   cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
-button:hover:not(:disabled) { border-color: var(--accent); }
-button:disabled { opacity: 0.45; cursor: default; }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:hover:not(:disabled) { border-color: var(--border-strong); background: var(--accent-soft); }
+button:disabled { opacity: 0.4; cursor: default; }
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+button.primary:hover:not(:disabled) { background: var(--accent-strong); border-color: var(--accent-strong); }
 button.danger { color: var(--error); }
 button.ghost { border: none; background: none; color: var(--muted); }
+button.ghost:hover:not(:disabled) { background: var(--accent-soft); color: var(--text); }
 
 input, textarea {
   font: inherit;
@@ -67,16 +94,22 @@ input, textarea {
   padding: 9px 11px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--bg);
+  background: rgba(0, 0, 0, 0.22);
   color: var(--text);
   resize: none;
 }
+input::placeholder, textarea::placeholder { color: var(--muted); }
 input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+::selection { background: var(--accent-soft); }
 
 /* ---------- start gate ---------- */
 
 .gate { display: grid; place-items: center; height: 100vh; padding: 24px; }
 .gate-card {
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.38);
   width: min(460px, 100%);
   background: var(--panel);
   border: 1px solid var(--border);
@@ -86,7 +119,7 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .gate-card h1 { margin: 0 0 6px; font-size: 22px; }
 .gate-card p { margin: 0 0 18px; }
 .gate-card label { display: block; font-weight: 600; margin-bottom: 6px; }
-.gate-card button { width: 100%; margin-top: 16px; }
+.gate-card button.wide { margin-top: 16px; }
 .hint { font-size: 12px; color: var(--muted); margin-top: 8px !important; }
 
 /* ---------- shell ---------- */
@@ -94,10 +127,13 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .app { display: flex; flex-direction: column; height: 100vh; }
 
 .titlebar {
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 10px 16px 10px 84px; /* clears the macOS traffic lights */
+  padding: 10px 22px 10px 92px; /* clears the macOS traffic lights */
+  min-height: 46px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
 }
@@ -118,7 +154,7 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.bubble.user { align-self: flex-end; background: var(--accent); color: #fff; }
+.bubble.user { align-self: flex-end; background: var(--accent); color: var(--on-accent); }
 .bubble.assistant { background: var(--panel); border: 1px solid var(--border); }
 
 .thinking { display: flex; gap: 5px; align-items: center; }
@@ -156,6 +192,8 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .notice.error { border-color: var(--error); background: var(--error-soft); color: var(--error); }
 
 .composer {
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
   display: flex;
   gap: 10px;
   padding: 14px 20px 18px;
@@ -167,6 +205,8 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 /* ---------- worker rail ---------- */
 
 .rail {
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
   border-left: 1px solid var(--border);
   background: var(--panel);
   overflow-y: auto;
@@ -175,8 +215,15 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .rail h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
 .rail h3 { margin: 18px 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
 
-.fleet { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.fleet li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.fleet { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+
+/* Two rows, not two columns: sharing one line with the badges left model names like
+   `codex/qwen3.6:35b-a3b` truncated to nothing useful. On its own line the name gets
+   the rail's full width. */
+.fleet li { display: flex; flex-direction: column; gap: 1px; }
+.fleet-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fleet-badges { display: flex; gap: 4px; white-space: nowrap; flex: 0 0 auto; }
+.fleet-backend { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .role-name { font-weight: 600; }
 
 .badge {
@@ -226,7 +273,7 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 
 /* ---------- budget meter ---------- */
 
-.meter { display: flex; align-items: center; gap: 16px; }
+.meter { display: flex; align-items: center; gap: 16px; flex: 0 0 auto; }
 .meter-item { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.25; }
 .meter-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
 
@@ -235,11 +282,13 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .drawer-scrim {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.35);
+  background: rgba(10, 6, 12, 0.5);
   display: flex;
   justify-content: flex-end;
 }
 .drawer {
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
   width: min(520px, 100%);
   height: 100%;
   background: var(--panel);
@@ -256,7 +305,7 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .drawer p { margin: 0; }
 
 .file-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.file-list li { padding: 4px 8px; background: var(--bg); border-radius: 6px; }
+.file-list li { padding: 4px 8px; background: rgba(0, 0, 0, 0.22); border-radius: 6px; }
 
 .drawer footer { margin-top: auto; border-top: 1px solid var(--border); padding-top: 16px; }
 .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 12px; }
@@ -270,7 +319,7 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
   padding: 0;
   max-height: 46vh;
   overflow: auto;
-  background: var(--bg);
+  background: rgba(0, 0, 0, 0.28);
   border: 1px solid var(--border);
   border-radius: 8px;
   font-family: var(--mono);
@@ -288,8 +337,11 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 
 /* ---------- start gate checks ---------- */
 
-.picker { display: flex; gap: 8px; }
-.picker input { flex: 1; }
+.picker { display: flex; gap: 8px; align-items: stretch; }
+/* min-width:0 lets the field actually shrink-and-grow inside the flex row rather than
+   being held at its intrinsic width while the button eats the space. */
+.picker input { flex: 1 1 auto; min-width: 0; }
+.picker button { flex: 0 0 auto; }
 .wide { width: 100%; }
 
 .checks { list-style: none; margin: 14px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
@@ -310,3 +362,16 @@ button.link {
 /* A role whose backend is missing reads as present but inert, not hidden. */
 .fleet li.unavailable .role-name { text-decoration: line-through; }
 .fleet li.unavailable { opacity: 0.65; }
+
+
+/* ---------- scrollbars ---------- */
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 183, 202, 0.18);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 183, 202, 0.3); background-clip: padding-box; }
