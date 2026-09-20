@@ -59,32 +59,36 @@ max_turns = 30
 #
 # NOTE: `model` must match what the server reports. Check with:
 #   curl -s http://localhost:1234/v1/models | python3 -m json.tool
+# An embedding model in that list (nomic-embed-text and friends) cannot serve
+# as a worker — it has no chat completion endpoint.
 # ---------------------------------------------------------------------------
 
 [roles.local]
 provider  = "openai_compat"
 base_url  = "http://localhost:1234/v1"
-model     = "qwen3.6-35b-a3b"
+model     = "qwen/qwen3-coder-30b"
 isolation = "none"
 brief     = "Answer concisely and concretely. No preamble."
 
 [roles.local_builder]
 provider      = "codex"
-model         = "qwen3.6:35b-a3b"
+model         = "qwen/qwen3-coder-30b"
 isolation     = "worktree"
 tools         = ["Read", "Edit", "Write", "Bash"]
 brief         = "Implement the change in your worktree. Keep it minimal."
 provider_opts = { model_provider = "lmstudio" }
-max_turns     = 60
+# Deliberately low: local inference is slow and heavy on the host, so a runaway
+# loop costs real time on the machine rather than tokens. Raise once trusted.
+max_turns     = 15
 
 [roles.tester]
 provider      = "codex"
-model         = "qwen3.6:35b-a3b"
+model         = "qwen/qwen3-coder-30b"
 isolation     = "readonly"
 tools         = ["Read", "Bash"]
 brief         = "Run the tests and report exactly what failed. Do not fix anything."
 provider_opts = { model_provider = "lmstudio" }
-max_turns     = 30
+max_turns     = 10
 
 # Same shape as `local`, for an Ollama server instead of LM Studio.
 # [roles.ollama_local]
@@ -128,7 +132,7 @@ max_turns     = 30
 
 # [roles.remote_builder]
 # provider      = "codex"
-# model         = "qwen3.6:35b-a3b"
+# model         = "qwen/qwen3-coder-30b"
 # isolation     = "worktree"
 # tools         = ["Read", "Edit", "Write", "Bash"]
 # base_url      = "http://bionic.local:11434/v1"   # health check only
