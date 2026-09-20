@@ -46,6 +46,10 @@ export default function App() {
       if (payload.type === "worker_finished") void refreshUsage();
     });
 
+    // The five-hour window may already have burn in it from an earlier session in this
+    // project, so show it on open rather than only after the first run finishes.
+    void refreshUsage();
+
     return () => {
       void unlisten.then((off) => off());
     };

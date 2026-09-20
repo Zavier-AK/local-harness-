@@ -33,19 +33,19 @@ export default function WorkerRail({ workers, roles, selected, onSelect }: Props
                 className={role.available ? "" : "unavailable"}
                 title={role.unavailable_reason ?? role.brief ?? undefined}
               >
-                <div className="fleet-main">
+                <div className="fleet-row">
                   <span className="role-name">{role.name}</span>
-                  <span className="muted mono fleet-backend">
-                    {role.provider}
-                    {role.model ? `/${role.model}` : ""}
-                  </span>
+                  <div className="fleet-badges">
+                    <span className={`badge ${role.can_edit_files ? "write" : "read"}`}>
+                      {role.isolation}
+                    </span>
+                    {!role.available && <span className="badge limited">unavailable</span>}
+                  </div>
                 </div>
-                <div className="fleet-badges">
-                  <span className={`badge ${role.can_edit_files ? "write" : "read"}`}>
-                    {role.isolation}
-                  </span>
-                  {!role.available && <span className="badge limited">unavailable</span>}
-                </div>
+                <span className="muted mono fleet-backend">
+                  {role.provider}
+                  {role.model ? `/${role.model}` : ""}
+                </span>
               </li>
             ))}
           </ul>
