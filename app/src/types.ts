@@ -171,3 +171,31 @@ export type ProjectView = {
  * worker ids, so without this tag two projects' streams could not be told apart.
  */
 export type ProjectHarnessEvent = HarnessEvent & { project: string };
+
+export type QuotaState = "available" | "stale" | "missing";
+
+export type QuotaWindow = {
+  label: string;
+  used_percent: number;
+  /** Unix seconds when the window resets, when the vendor says. */
+  resets_at: number | null;
+};
+
+/**
+ * What a provider says is left.
+ *
+ * `missing` is rendered as unknown, never as zero — Claude exposes no readable quota, so
+ * a percentage for it would be invented rather than measured.
+ */
+export type ProviderQuota = {
+  provider: string;
+  state: QuotaState;
+  observed_at: number | null;
+  windows: QuotaWindow[];
+  note: string | null;
+};
+
+export type QuotaReport = {
+  providers: ProviderQuota[];
+  rate_limited: string[];
+};

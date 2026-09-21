@@ -115,6 +115,28 @@ On Linux the desktop app additionally needs `libgtk-3-dev`, `libwebkit2gtk-4.1-d
 `libayatana-appindicator3-dev` and `librsvg2-dev`. macOS needs none of these — it uses
 WKWebView.
 
+## What the limits panel can and cannot tell you
+
+Clicking the budget meter opens it. Two different kinds of number live there, kept
+visibly apart because conflating them would be worse than showing nothing:
+
+- **Codex reports real limits.** It writes a server-reported used-percentage and reset
+  time for both its five-hour and weekly windows into its session rollout files, and the
+  panel reads them. They are a snapshot from Codex's last turn rather than live, so each
+  is shown with when it was observed and goes **stale** rather than quietly ageing.
+- **Claude reports none.** There is no `claude usage` subcommand, `/usage` is
+  interactive-only, and `--output-format stream-json` carries no limit or reset field.
+  The documented `rate_limits` block reaches statusLine scripts only, and statusLine does
+  not run under `-p`, which is how this harness drives the CLI. So the panel shows no
+  Claude percentage. It shows what the harness itself has spent, labelled as spend.
+
+The one piece of real Claude limit information available is the `api_retry` event, which
+says you have *already* hit a wall. That is surfaced plainly, along with which providers
+are currently shedding to their fallback roles.
+
+Quota states are `available`, `stale` and `missing`, borrowed from Codex's own `/status`.
+A meter that says unknown is more useful than one that says 0%.
+
 ## Working on several projects
 
 The sidebar keeps more than one project open at once. Each gets its own engine, its own
@@ -198,7 +220,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 108 engine tests, no network, no CLI login needed
+cargo test                        # 115 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -213,7 +235,7 @@ Preview discovery and URL-safety tests run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **108 engine tests, 116 including the Tauri shell** — worth stating explicitly,
+That makes **115 engine tests, 123 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats

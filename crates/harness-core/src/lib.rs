@@ -17,6 +17,7 @@ pub mod event;
 pub mod isolation;
 pub mod mcp;
 pub mod orchestrator;
+pub mod quota;
 pub mod roles;
 pub mod roles_patch;
 pub mod store;
