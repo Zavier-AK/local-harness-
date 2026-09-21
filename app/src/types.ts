@@ -16,6 +16,7 @@ export type DiffStat = {
 export type WorkerStatus =
   | "queued"
   | "blocked"
+  | "preparing"
   | "running"
   | "done"
   | "failed"

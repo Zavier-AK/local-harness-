@@ -255,7 +255,7 @@ async fn drain(renderer: tokio::task::JoinHandle<()>) {
     }
 }
 
-fn build_harness(cli: &Cli, events: harness_core::agents::EventSink) -> Result<Arc<Harness>> {
+async fn build_harness(cli: &Cli, events: harness_core::agents::EventSink) -> Result<Arc<Harness>> {
     let registry = RoleRegistry::load(&cli.roles)
         .with_context(|| format!("loading roles from {}", cli.roles.display()))?;
 
@@ -271,9 +271,15 @@ fn build_harness(cli: &Cli, events: harness_core::agents::EventSink) -> Result<A
     let session_id = format!("s-{}", uuid_like());
     store.create_session(&session_id, None, &project.display().to_string())?;
 
+    let workspaces = Workspaces::with_setup(project.clone(), registry.worktree.clone());
+    // Worker worktrees live under the project; keep them out of its `git status`.
+    if let Err(error) = workspaces.ensure_git_exclude().await {
+        tracing::warn!("could not update .git/info/exclude: {error:#}");
+    }
+
     Ok(Arc::new(Harness::new(
         registry,
-        Workspaces::new(project),
+        workspaces,
         store,
         session_id,
         events,
@@ -304,7 +310,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let harness = build_harness(&cli, tx)?;
+    let harness = build_harness(&cli, tx).await?;
 
     match &cli.command {
         Command::Roles => {

@@ -133,6 +133,67 @@ impl Role {
     }
 }
 
+/// How a fresh worktree is made usable before a worker starts in it.
+///
+/// `git worktree add` checks out tracked files and nothing else: no `.env`, no
+/// `node_modules`, no build output. A builder told to "run the tests" in such a tree
+/// fails on its first command, so a project that needs bootstrapping declares it here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeSetup {
+    /// Gitignored files to copy in from the project root, e.g. `.env`. Missing entries
+    /// are skipped rather than failing: not every project has every file.
+    ///
+    /// Copied, never symlinked — a symlinked `.env` means a worker editing it silently
+    /// rewrites the real one.
+    #[serde(default)]
+    pub copy: Vec<String>,
+
+    /// Shell commands run in the worktree, in order, after `copy`.
+    ///
+    /// Install dependencies here (`npm ci`, `uv sync`). Do not symlink `node_modules`
+    /// from the project root: bundlers reject module paths outside the tree.
+    #[serde(default)]
+    pub setup: Vec<String>,
+
+    /// Ceiling for each `setup` command. A cold `npm ci` is slow, but a command that
+    /// waits on a prompt would otherwise hang the worker forever.
+    #[serde(default = "default_setup_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_setup_timeout() -> u64 {
+    600
+}
+
+impl Default for WorktreeSetup {
+    fn default() -> Self {
+        Self { copy: Vec::new(), setup: Vec::new(), timeout_secs: default_setup_timeout() }
+    }
+}
+
+impl WorktreeSetup {
+    pub fn is_empty(&self) -> bool {
+        self.copy.is_empty() && self.setup.is_empty()
+    }
+
+    fn validate(&self) -> Result<()> {
+        for entry in &self.copy {
+            let path = Path::new(entry);
+            if path.is_absolute() {
+                bail!("worktree.copy entry `{entry}` must be relative to the project root");
+            }
+            // A `..` entry would pull files from outside the project into every worktree.
+            if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                bail!("worktree.copy entry `{entry}` may not escape the project root with `..`");
+            }
+        }
+        if self.timeout_secs == 0 {
+            bail!("worktree.timeout_secs must be greater than zero");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoleRegistry {
     #[serde(default)]
@@ -141,6 +202,10 @@ pub struct RoleRegistry {
     /// Which role the head chat delegates through by default when it names none.
     #[serde(default)]
     pub default_role: Option<String>,
+
+    /// Bootstrap applied to every worktree this project creates.
+    #[serde(default)]
+    pub worktree: WorktreeSetup,
 }
 
 impl RoleRegistry {
@@ -198,6 +263,8 @@ impl RoleRegistry {
                 bail!("default_role `{default}` is not defined");
             }
         }
+
+        self.worktree.validate()?;
 
         Ok(())
     }
@@ -313,6 +380,58 @@ isolation = "none"
         )
         .unwrap_err();
         assert!(looped.to_string().contains("falls back to itself"), "{looped}");
+    }
+
+    #[test]
+    fn parses_the_worktree_bootstrap_block() {
+        let registry = RoleRegistry::from_toml(
+            r#"
+default_role = "builder"
+
+[worktree]
+copy = [".env", ".env.local"]
+setup = ["npm ci"]
+
+[roles.builder]
+provider = "claude"
+isolation = "worktree"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(registry.worktree.copy, [".env", ".env.local"]);
+        assert_eq!(registry.worktree.setup, ["npm ci"]);
+        assert_eq!(registry.worktree.timeout_secs, 600, "should fall back to the default");
+    }
+
+    #[test]
+    fn a_fleet_without_a_worktree_block_bootstraps_nothing() {
+        let registry = RoleRegistry::from_toml(SAMPLE).unwrap();
+        assert!(registry.worktree.is_empty());
+    }
+
+    #[test]
+    fn rejects_copy_entries_that_escape_the_project() {
+        // `..` would pull files from outside the project into every worker's tree.
+        for entry in ["../../.ssh/id_rsa", "/etc/passwd"] {
+            let source = format!(
+                r#"
+[worktree]
+copy = ["{entry}"]
+
+[roles.builder]
+provider = "claude"
+isolation = "worktree"
+"#
+            );
+            let error = RoleRegistry::from_toml(&source)
+                .expect_err("should reject `{entry}`")
+                .to_string();
+            assert!(
+                error.contains("escape the project root") || error.contains("must be relative"),
+                "got: {error}"
+            );
+        }
     }
 
     #[test]

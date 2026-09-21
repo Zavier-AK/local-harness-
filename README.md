@@ -176,7 +176,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 94 engine tests, no network, no CLI login needed
+cargo test                        # 101 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -191,7 +191,7 @@ Preview discovery and URL-safety tests run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **94 engine tests, 99 including the Tauri shell** — worth stating explicitly,
+That makes **101 engine tests, 106 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats
@@ -214,3 +214,11 @@ because the two numbers measure different things and have drifted apart before.
 - **Stream schemas are not stable contracts.** Both CLIs' JSON output is parsed leniently:
   unrecognized lines yield no events rather than failing a run, and parsing is covered by
   fixture tests.
+
+## Credits
+
+The worktree bootstrap in `[worktree]` exists because of the `git-worktree` skill in
+[David Ondrej's agent skills](https://github.com/davidondrej/skills) (MIT). Its
+"complete the setup" checklist — env files, dependencies, ports, generated output —
+named a gap this harness had: `git worktree add` checks out tracked files only, so
+builders were being told to run tests in a tree with no dependencies installed.

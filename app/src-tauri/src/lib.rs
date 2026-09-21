@@ -238,9 +238,14 @@ async fn start_session(
         .map_err(|e| format!("{e:#}"))?;
 
     let (tx, worker_events) = tokio::sync::mpsc::unbounded_channel();
+    let workspaces = Workspaces::with_setup(project.clone(), registry.worktree.clone());
+    // Worker worktrees live under the project; keep them out of its `git status`.
+    if let Err(error) = workspaces.ensure_git_exclude().await {
+        tracing::warn!("could not update .git/info/exclude: {error:#}");
+    }
     let harness = Arc::new(Harness::new(
         registry,
-        Workspaces::new(project.clone()),
+        workspaces,
         store,
         session_id.clone(),
         tx,

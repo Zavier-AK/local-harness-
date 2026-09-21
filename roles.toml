@@ -10,6 +10,35 @@
 default_role = "builder"
 
 # ---------------------------------------------------------------------------
+# Worktree bootstrap.
+#
+# `git worktree add` checks out tracked files and nothing else — no .env, no
+# node_modules, no build output. A builder told to "run the tests" in a tree
+# like that fails on its first command, so declare here whatever the project
+# needs before work can start. Both lists are optional and empty by default.
+#
+#   copy  — gitignored files to bring in from the project root. Copied, never
+#           symlinked: a symlinked .env means a worker editing it rewrites the
+#           real one. Entries that do not exist are skipped.
+#   setup — shell commands run in the worktree, in order, after `copy`.
+#           Install dependencies here. Do NOT symlink node_modules from the
+#           project root; bundlers reject module paths outside the tree.
+#
+# Each command gets `timeout_secs` (default 600) so a command that stops to ask
+# a question cannot hang the worker forever. A failing command fails the worker
+# and the half-built worktree is torn down.
+#
+# Two builders both running `npm run dev` will fight over the same port; give
+# per-worktree ports if your setup starts long-running servers.
+# ---------------------------------------------------------------------------
+
+[worktree]
+copy  = [".env", ".env.local"]
+setup = []
+# setup = ["npm ci"]
+# timeout_secs = 600
+
+# ---------------------------------------------------------------------------
 # Claude Pro — rare, high-value calls.
 # ---------------------------------------------------------------------------
 

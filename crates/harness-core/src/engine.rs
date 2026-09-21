@@ -256,6 +256,15 @@ impl Harness {
             self.set_status(&worker_id, WorkerStatus::Blocked).await;
         }
 
+        // Bootstrapping a worktree can take minutes on a cold `npm ci`; without a status
+        // of its own the worker just looks hung.
+        if matches!(
+            role.isolation,
+            crate::roles::Isolation::Worktree | crate::roles::Isolation::Readonly
+        ) {
+            self.set_status(&worker_id, WorkerStatus::Preparing).await;
+        }
+
         let workspace = self
             .workspaces
             .prepare(&worker_id, role.isolation)
