@@ -85,6 +85,8 @@ export type DetectedBackend = {
 };
 
 export type ModelOption = {
+  /** Codex `-c key=value` overrides this option implies, e.g. model_provider. */
+  provider_opts?: Record<string, string>;
   id: string;
   label: string;
   provider: string;
@@ -108,6 +110,9 @@ export type FleetInspection = {
 };
 
 export type RoleModelPatch = {
+  /** Move the role onto a different backend. Omitted keeps the current one. */
+  provider?: string | null;
+  provider_opts?: Record<string, string>;
   role_name: string;
   model: string;
   base_url: string | null;

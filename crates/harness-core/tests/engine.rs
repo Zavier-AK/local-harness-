@@ -413,3 +413,90 @@ async fn shared_workers_are_serialized_while_worktree_workers_are_not() {
     assert_eq!(tokio::fs::read_to_string(f.root.join("a.txt")).await.unwrap(), "a");
     assert_eq!(tokio::fs::read_to_string(f.root.join("b.txt")).await.unwrap(), "b");
 }
+
+/// The fleet is editable while a session runs.
+///
+/// Workers are spawned per delegation, so a swap needs no process restarted — the next
+/// delegation simply resolves against the new registry. This is the property the fleet
+/// editor depends on, so it is asserted against a real delegation rather than by reading
+/// the registry back.
+#[tokio::test]
+async fn swapping_a_role_changes_what_the_next_delegation_spawns() {
+    let mut fixture = fixture().await;
+
+    // `reviewer` starts readonly on the mock backend.
+    let before = fixture.harness.delegate("reviewer", "look", Vec::new()).await.unwrap();
+    assert!(!before.is_error);
+    let spawned_before = drain(&mut fixture.events)
+        .into_iter()
+        .find_map(|event| match event {
+            HarnessEvent::WorkerSpawned { role, isolation, .. } => Some((role, isolation)),
+            _ => None,
+        })
+        .expect("a worker should have been spawned");
+    assert_eq!(spawned_before, ("reviewer".to_string(), "readonly".to_string()));
+
+    // Move it into its own worktree, the way the fleet editor would.
+    let swapped = RoleRegistry::from_toml(
+        r#"
+default_role = "builder"
+
+[roles.builder]
+provider = "mock"
+isolation = "worktree"
+
+[roles.reviewer]
+provider = "mock"
+isolation = "worktree"
+tools = ["Read", "Write"]
+"#,
+    )
+    .unwrap();
+    fixture.harness.swap_registry(swapped).await;
+
+    let after = fixture.harness.delegate("reviewer", "look again", Vec::new()).await.unwrap();
+    assert!(!after.is_error);
+    let spawned_after = drain(&mut fixture.events)
+        .into_iter()
+        .find_map(|event| match event {
+            HarnessEvent::WorkerSpawned { role, isolation, .. } => Some((role, isolation)),
+            _ => None,
+        })
+        .expect("a worker should have been spawned");
+    assert_eq!(
+        spawned_after,
+        ("reviewer".to_string(), "worktree".to_string()),
+        "the delegation after a swap must use the new fleet"
+    );
+
+    // A worktree role can be merged; the readonly one it replaced could not.
+    assert!(after.branch.is_some(), "the swapped role should now produce a landable branch");
+    assert!(before.branch.is_none());
+}
+
+/// A role that disappears in a swap stops being delegable, rather than silently running
+/// under its old definition.
+#[tokio::test]
+async fn a_role_removed_by_a_swap_is_no_longer_delegable() {
+    let fixture = fixture().await;
+    fixture.harness.delegate("reviewer", "look", Vec::new()).await.unwrap();
+
+    let without_reviewer = RoleRegistry::from_toml(
+        r#"
+default_role = "builder"
+
+[roles.builder]
+provider = "mock"
+isolation = "worktree"
+"#,
+    )
+    .unwrap();
+    fixture.harness.swap_registry(without_reviewer).await;
+
+    let error = fixture
+        .harness
+        .delegate("reviewer", "look again", Vec::new())
+        .await
+        .expect_err("a role the fleet no longer defines must not run");
+    assert!(error.to_string().contains("no role named"), "got: {error}");
+}

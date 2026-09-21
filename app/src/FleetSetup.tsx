@@ -39,6 +39,9 @@ export default function FleetSetup({ projectRoot, inspection, onSaved }: Props) 
             role_name: roleName,
             model: option.model,
             base_url: option.base_url,
+            // Carried so a role can move between backends, not just between models.
+            provider: option.provider,
+            provider_opts: option.provider_opts ?? {},
           },
         ];
       },
@@ -111,6 +114,7 @@ export default function FleetSetup({ projectRoot, inspection, onSaved }: Props) 
                 roleName={role.name}
                 currentModel={role.model}
                 currentBaseUrl={role.base_url}
+                currentProvider={role.provider}
                 options={role.options}
                 blockedReason={role.blocked_reason}
                 selected={selected[role.name] ?? ""}
@@ -141,6 +145,7 @@ function RoleSelect({
   roleName,
   currentModel,
   currentBaseUrl,
+  currentProvider,
   options,
   blockedReason,
   selected,
@@ -149,6 +154,7 @@ function RoleSelect({
   roleName: string;
   currentModel: string | null;
   currentBaseUrl: string | null;
+  currentProvider: string;
   options: ModelOption[];
   blockedReason: string | null;
   selected: string;
@@ -163,7 +169,10 @@ function RoleSelect({
   }
 
   const current = options.find(
-    (option) => option.model === currentModel && option.base_url === currentBaseUrl,
+    (option) =>
+      option.model === currentModel &&
+      option.base_url === currentBaseUrl &&
+      option.provider === currentProvider,
   );
 
   return (

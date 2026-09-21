@@ -5,12 +5,14 @@
 //! reporting that no local model exists merely because a role still points at another
 //! local server.
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 
 use crate::availability::binary_on_path;
-use crate::roles::{Provider, RoleRegistry};
+use crate::roles::{Isolation, Provider, Role, RoleRegistry};
+use std::collections::BTreeMap;
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(1_500);
 const LM_STUDIO_URL: &str = "http://localhost:1234/v1";
@@ -39,6 +41,10 @@ pub struct ModelOption {
     pub provider: String,
     pub model: String,
     pub base_url: Option<String>,
+    /// `-c key=value` overrides this option implies, e.g. `model_provider = "lmstudio"`.
+    /// This is what gives a local model a real agent loop under Codex.
+    #[serde(default)]
+    pub provider_opts: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +69,12 @@ pub struct RoleModelPatch {
     pub role_name: String,
     pub model: String,
     pub base_url: Option<String>,
+    /// The backend to move this role onto. `None` keeps the role's current provider,
+    /// so payloads written before cross-backend swapping still mean what they said.
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub provider_opts: BTreeMap<String, String>,
 }
 
 pub async fn detect_backends() -> Vec<DetectedBackend> {
@@ -197,6 +209,11 @@ fn models_from_openai_json(value: &Value) -> Vec<DetectedModel> {
     models
 }
 
+/// What each role could be reassigned to, given what is installed right now.
+///
+/// Options are gated on what the role's isolation *needs*, not on the backend it
+/// happens to use today — that is what makes swapping a builder from Claude onto a
+/// local model a config change rather than an edit.
 fn configurable_roles(
     registry: &RoleRegistry,
     backends: &[DetectedBackend],
@@ -206,42 +223,37 @@ fn configurable_roles(
         .iter()
         .map(|(name, role)| {
             let (options, blocked_reason) = match role.provider {
-                Provider::Claude => {
-                    let options = backend_options(backends, "claude", Provider::Claude.as_str());
-                    let reason = options.is_empty().then(|| "Claude CLI is not available".into());
-                    (options, reason)
-                }
-                Provider::OpenaiCompat if role.isolation == crate::roles::Isolation::None => {
-                    let mut options = backend_options(
-                        backends,
-                        "lmstudio",
-                        Provider::OpenaiCompat.as_str(),
-                    );
-                    options.extend(backend_options(
-                        backends,
-                        "ollama",
-                        Provider::OpenaiCompat.as_str(),
-                    ));
+                // The mock backend exists to be deterministic; reassigning it would
+                // defeat the point.
+                Provider::Mock => (
+                    Vec::new(),
+                    Some("The deterministic mock backend has no selectable model".into()),
+                ),
+
+                // A role with no filesystem is a raw chat completion, so only the
+                // OpenAI-compatible endpoints can serve it.
+                _ if role.isolation == Isolation::None => {
+                    let mut options = local_chat_options(backends);
+                    options.retain(|option| option.provider == Provider::OpenaiCompat.as_str());
                     let reason = options
                         .is_empty()
                         .then(|| "No compatible local chat models were detected".into());
                     (options, reason)
                 }
-                Provider::Codex => (
-                    Vec::new(),
-                    Some(
-                        "Codex setup is deferred; local tool-enabled roles cannot be reassigned yet"
-                            .into(),
-                    ),
-                ),
-                Provider::OpenaiCompat => (
-                    Vec::new(),
-                    Some("Raw local models can only back text-only (`none`) roles".into()),
-                ),
-                Provider::Mock => (
-                    Vec::new(),
-                    Some("The deterministic mock backend has no selectable model".into()),
-                ),
+
+                // Everything else needs tools and a working directory, which means one
+                // of the two agent CLIs. Codex is also how a local model gets a real
+                // agent loop, so local models appear here too — via Codex, not raw HTTP.
+                _ => {
+                    let mut options = backend_options(backends, "claude", Provider::Claude.as_str());
+                    options.extend(codex_options(backends));
+                    let reason = options.is_empty().then(|| {
+                        "Neither the Claude nor the Codex CLI is available, so this role \
+                         cannot be reassigned"
+                            .into()
+                    });
+                    (options, reason)
+                }
             };
 
             ConfigurableRole {
@@ -255,6 +267,42 @@ fn configurable_roles(
             }
         })
         .collect()
+}
+
+/// Local models reachable over plain chat completions.
+fn local_chat_options(backends: &[DetectedBackend]) -> Vec<ModelOption> {
+    let mut options = backend_options(backends, "lmstudio", Provider::OpenaiCompat.as_str());
+    options.extend(backend_options(backends, "ollama", Provider::OpenaiCompat.as_str()));
+    options
+}
+
+/// Codex-backed options: the CLI's own default, plus every detected local model wired
+/// through Codex's reserved provider ids, which is what gives them tools and sandboxing.
+fn codex_options(backends: &[DetectedBackend]) -> Vec<ModelOption> {
+    if !backends.iter().any(|b| b.id == "codex" && b.available) {
+        return Vec::new();
+    }
+
+    let mut options = Vec::new();
+    for local in backends
+        .iter()
+        .filter(|b| b.available && matches!(b.id.as_str(), "lmstudio" | "ollama"))
+    {
+        for model in local.models.iter().filter(|m| m.capability == "chat") {
+            options.push(ModelOption {
+                id: format!("codex:{}:{}", local.id, model.id),
+                label: format!("Codex · {} · {}", local.label, model.id),
+                provider: Provider::Codex.as_str().into(),
+                model: model.id.clone(),
+                // Health-check target only; Codex is told which provider to use below.
+                base_url: local.base_url.clone(),
+                provider_opts: BTreeMap::from([
+                    ("model_provider".to_string(), local.id.clone()),
+                ]),
+            });
+        }
+    }
+    options
 }
 
 fn backend_options(
@@ -279,10 +327,16 @@ fn backend_options(
             provider: provider.into(),
             model: model.id.clone(),
             base_url: backend.base_url.clone(),
+            provider_opts: BTreeMap::new(),
         })
         .collect()
 }
 
+/// Reject an assignment the machine cannot actually run, before it reaches roles.toml.
+///
+/// Two checks, because a provider swap can break a role in a way a model swap never
+/// could: the option has to be one discovery actually offered for that role, and the
+/// role that results has to still satisfy the registry's own rules.
 pub fn validate_patches(
     registry: &RoleRegistry,
     inspection: &FleetInspection,
@@ -296,19 +350,58 @@ pub fn validate_patches(
             .find(|candidate| candidate.name == patch.role_name)
             .ok_or_else(|| anyhow::anyhow!("role `{}` was not inspected", patch.role_name))?;
 
+        let provider = patch.provider.as_deref().unwrap_or(role.provider.as_str());
+
         let matches_option = view.options.iter().any(|option| {
-            option.provider == role.provider.as_str()
+            option.provider == provider
                 && option.model == patch.model
                 && option.base_url == patch.base_url
+                && option.provider_opts == patch.provider_opts
         });
         anyhow::ensure!(
             matches_option,
-            "model `{}` is not a detected compatible option for role `{}`",
+            "`{}` on `{provider}` is not a detected compatible option for role `{}`",
             patch.model,
             patch.role_name
         );
+
+        // The registry forbids combinations the backends cannot honour — an
+        // openai_compat role that claims filesystem isolation, for instance. Apply the
+        // patch to a copy and make it prove itself before anything is written.
+        apply_to_role(role, patch)?;
     }
     Ok(())
+}
+
+/// The role a patch would produce, validated the same way a parsed registry is.
+pub fn apply_to_role(role: &Role, patch: &RoleModelPatch) -> anyhow::Result<Role> {
+    let mut patched = role.clone();
+    if let Some(provider) = &patch.provider {
+        patched.provider = parse_provider(provider)?;
+    }
+    patched.model = Some(patch.model.clone());
+    patched.base_url = patch.base_url.clone();
+    patched.provider_opts = patch.provider_opts.clone();
+
+    // One role, checked in isolation: a single-entry registry reuses the real rules
+    // rather than restating them here and letting the two drift.
+    let mut probe = RoleRegistry::default();
+    probe.roles.insert(patch.role_name.clone(), patched.clone());
+    probe
+        .check()
+        .with_context(|| format!("role `{}` would become invalid", patch.role_name))?;
+
+    Ok(patched)
+}
+
+fn parse_provider(name: &str) -> anyhow::Result<Provider> {
+    match name {
+        "claude" => Ok(Provider::Claude),
+        "codex" => Ok(Provider::Codex),
+        "openai_compat" => Ok(Provider::OpenaiCompat),
+        "mock" => Ok(Provider::Mock),
+        other => anyhow::bail!("unknown provider `{other}`"),
+    }
 }
 
 #[cfg(test)]
@@ -363,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn local_models_are_only_offered_to_text_only_roles() {
+    fn options_are_gated_on_what_a_role_needs_not_on_its_current_backend() {
         let backends = vec![
             DetectedBackend {
                 id: "claude".into(),
@@ -371,10 +464,15 @@ mod tests {
                 available: true,
                 message: String::new(),
                 base_url: None,
-                models: vec![DetectedModel {
-                    id: "sonnet".into(),
-                    capability: "chat".into(),
-                }],
+                models: vec![DetectedModel { id: "sonnet".into(), capability: "chat".into() }],
+            },
+            DetectedBackend {
+                id: "codex".into(),
+                label: "Codex CLI".into(),
+                available: true,
+                message: String::new(),
+                base_url: None,
+                models: Vec::new(),
             },
             DetectedBackend {
                 id: "lmstudio".into(),
@@ -382,36 +480,109 @@ mod tests {
                 available: true,
                 message: String::new(),
                 base_url: Some(LM_STUDIO_URL.into()),
-                models: vec![DetectedModel {
-                    id: "qwen".into(),
-                    capability: "chat".into(),
-                }],
+                models: vec![DetectedModel { id: "qwen".into(), capability: "chat".into() }],
             },
         ];
         let roles = configurable_roles(&registry(), &backends);
-        assert_eq!(
-            roles
-                .iter()
-                .find(|r| r.name == "local")
-                .unwrap()
-                .options
-                .len(),
-            1
+        let options_for = |name: &str| {
+            roles.iter().find(|r| r.name == name).unwrap().options.clone()
+        };
+
+        // A `none` role is a raw chat completion, so only the HTTP endpoints can serve
+        // it — offering it an agent CLI would produce a role the registry rejects.
+        let local = options_for("local");
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].provider, "openai_compat");
+
+        // A worktree role needs tools, so it gets both agent CLIs — and, crucially, can
+        // move between them. This is the swap the fleet editor exists for.
+        let builder = options_for("builder");
+        assert!(
+            builder.iter().any(|o| o.provider == "claude" && o.model == "sonnet"),
+            "a Claude builder should still be offered Claude models: {builder:?}"
         );
-        assert!(roles
+        let via_codex = builder
             .iter()
-            .find(|r| r.name == "local_builder")
-            .unwrap()
-            .options
-            .is_empty());
-        assert!(roles
-            .iter()
-            .find(|r| r.name == "local_builder")
-            .unwrap()
-            .blocked_reason
-            .as_deref()
-            .unwrap()
-            .contains("Codex"));
+            .find(|o| o.provider == "codex")
+            .expect("a Claude builder should be offered Codex too");
+        assert_eq!(via_codex.model, "qwen");
+        assert_eq!(
+            via_codex.provider_opts.get("model_provider").map(String::as_str),
+            Some("lmstudio"),
+            "a local model under Codex needs the provider id that gives it a tool loop"
+        );
+
+        // Symmetrically, a Codex-backed role can move onto Claude.
+        assert!(
+            options_for("local_builder").iter().any(|o| o.provider == "claude"),
+            "a Codex builder should be able to move back onto Claude"
+        );
+    }
+
+    #[test]
+    fn a_worktree_role_is_blocked_when_neither_agent_cli_is_installed() {
+        // Local models alone cannot back a role that needs a filesystem: without an
+        // agent CLI there is no tool loop to give them.
+        let backends = vec![DetectedBackend {
+            id: "lmstudio".into(),
+            label: "LM Studio".into(),
+            available: true,
+            message: String::new(),
+            base_url: Some(LM_STUDIO_URL.into()),
+            models: vec![DetectedModel { id: "qwen".into(), capability: "chat".into() }],
+        }];
+
+        let roles = configurable_roles(&registry(), &backends);
+        let builder = roles.iter().find(|r| r.name == "builder").unwrap();
+        assert!(builder.options.is_empty());
+        assert!(builder.blocked_reason.as_deref().unwrap().contains("cannot be reassigned"));
+    }
+
+    #[test]
+    fn a_provider_swap_that_would_break_the_role_is_refused() {
+        // openai_compat has no filesystem, so moving a worktree role onto it would
+        // produce a registry the loader would reject. Catch it before it is written.
+        let registry = registry();
+        let role = registry.get("builder").unwrap();
+        let error = apply_to_role(
+            role,
+            &RoleModelPatch {
+                role_name: "builder".into(),
+                model: "qwen".into(),
+                base_url: Some(LM_STUDIO_URL.into()),
+                provider: Some("openai_compat".into()),
+                provider_opts: Default::default(),
+            },
+        )
+        .expect_err("a worktree role on openai_compat must be refused")
+        .to_string();
+        assert!(error.contains("would become invalid"), "got: {error}");
+    }
+
+    #[test]
+    fn a_provider_swap_rewrites_the_backend_and_its_options() {
+        let registry = registry();
+        let role = registry.get("builder").unwrap();
+        let patched = apply_to_role(
+            role,
+            &RoleModelPatch {
+                role_name: "builder".into(),
+                model: "qwen".into(),
+                base_url: None,
+                provider: Some("codex".into()),
+                provider_opts: BTreeMap::from([
+                    ("model_provider".to_string(), "lmstudio".to_string()),
+                ]),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(patched.provider, Provider::Codex);
+        assert_eq!(patched.model.as_deref(), Some("qwen"));
+        assert_eq!(patched.provider_opts.get("model_provider").map(String::as_str), Some("lmstudio"));
+        // Policy is not the model picker's business: isolation and tools survive a swap.
+        assert_eq!(patched.isolation, role.isolation);
+        assert_eq!(patched.tools, role.tools);
     }
 
     #[test]
@@ -428,6 +599,8 @@ mod tests {
                 role_name: "local".into(),
                 model: "made-up".into(),
                 base_url: Some(LM_STUDIO_URL.into()),
+                provider: None,
+                provider_opts: Default::default(),
             }],
         )
         .unwrap_err();

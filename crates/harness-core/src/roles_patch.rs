@@ -27,18 +27,36 @@ pub fn apply_role_patches(source: &str, patches: &[RoleModelPatch]) -> Result<St
             .map(|offset| start + 1 + offset)
             .unwrap_or(lines.len());
 
+        // `provider` first: it is the field the others are inserted relative to, so
+        // rewriting it before them keeps a provider swap from landing out of order.
+        if let Some(provider) = &patch.provider {
+            set_string_field(&mut lines, start, end, "provider", provider)?;
+        }
+
+        let end = table_end(&lines, start);
         set_string_field(&mut lines, start, end, "model", &patch.model)?;
 
-        let refreshed_end = lines[start + 1..]
-            .iter()
-            .position(|line| line.trim_start().starts_with('['))
-            .map(|offset| start + 1 + offset)
-            .unwrap_or(lines.len());
+        let end = table_end(&lines, start);
         match &patch.base_url {
-            Some(base_url) => {
-                set_string_field(&mut lines, start, refreshed_end, "base_url", base_url)?
-            }
-            None => remove_field(&mut lines, start, refreshed_end, "base_url"),
+            Some(base_url) => set_string_field(&mut lines, start, end, "base_url", base_url)?,
+            None => remove_field(&mut lines, start, end, "base_url"),
+        }
+
+        // Written as an inline table, matching how roles.toml already spells it. An
+        // empty map removes the key rather than leaving `provider_opts = {}` behind.
+        let end = table_end(&lines, start);
+        if patch.provider_opts.is_empty() {
+            remove_field(&mut lines, start, end, "provider_opts");
+        } else {
+            let rendered = patch
+                .provider_opts
+                .iter()
+                .map(|(key, value)| {
+                    format!("{key} = {}", toml::Value::String(value.clone()))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            set_raw_field(&mut lines, start, end, "provider_opts", &format!("{{ {rendered} }}"))?;
         }
     }
 
@@ -48,6 +66,15 @@ pub fn apply_role_patches(source: &str, patches: &[RoleModelPatch]) -> Result<St
     }
     RoleRegistry::from_toml(&patched).context("validating updated roles.toml")?;
     Ok(patched)
+}
+
+/// Where the role's table ends: the next table header, or end of file.
+fn table_end(lines: &[String], table_start: usize) -> usize {
+    lines[table_start + 1..]
+        .iter()
+        .position(|line| line.trim_start().starts_with('['))
+        .map(|offset| table_start + 1 + offset)
+        .unwrap_or(lines.len())
 }
 
 fn set_string_field(
@@ -61,7 +88,17 @@ fn set_string_field(
         bail!("role field `{key}` cannot contain a newline");
     }
     let encoded = toml::Value::String(value.to_string()).to_string();
+    set_raw_field(lines, table_start, table_end, key, &encoded)
+}
 
+/// Same, for a value that is already TOML source (an inline table, a number).
+fn set_raw_field(
+    lines: &mut Vec<String>,
+    table_start: usize,
+    table_end: usize,
+    key: &str,
+    encoded: &str,
+) -> Result<()> {
     if let Some(index) = find_field(lines, table_start, table_end, key) {
         let indent: String = lines[index]
             .chars()
@@ -160,6 +197,8 @@ isolation = "none"
                 role_name: "local".into(),
                 model: "qwen/qwen3-coder-30b".into(),
                 base_url: Some("http://localhost:1234/v1".into()),
+                provider: None,
+                provider_opts: Default::default(),
             }],
         )
         .unwrap();
@@ -183,10 +222,66 @@ isolation = "readonly"
                 role_name: "x".into(),
                 model: "opus".into(),
                 base_url: None,
+                provider: None,
+                provider_opts: Default::default(),
             }],
         )
         .unwrap();
         assert!(patched.contains("provider = \"claude\"\nmodel = \"opus\"\nisolation"));
+    }
+
+    #[test]
+    fn a_provider_swap_rewrites_provider_and_adds_its_options() {
+        let patched = apply_role_patches(
+            SOURCE,
+            &[RoleModelPatch {
+                role_name: "builder".into(),
+                model: "qwen/qwen3-coder-30b".into(),
+                base_url: None,
+                provider: Some("codex".into()),
+                provider_opts: std::collections::BTreeMap::from([(
+                    "model_provider".to_string(),
+                    "lmstudio".to_string(),
+                )]),
+            }],
+        )
+        .unwrap();
+
+        assert!(patched.contains("provider = \"codex\""));
+        assert!(patched.contains("model = \"qwen/qwen3-coder-30b\""));
+        assert!(
+            patched.contains("provider_opts = { model_provider = \"lmstudio\" }"),
+            "got: {patched}"
+        );
+        // Policy and documentation are not the model picker's business.
+        assert!(patched.contains("isolation = \"worktree\""));
+        assert!(patched.contains("# Fleet documentation stays."));
+    }
+
+    #[test]
+    fn swapping_back_clears_the_options_the_old_backend_needed() {
+        let source = r#"[roles.builder]
+provider = "codex"
+model = "qwen"
+isolation = "worktree"
+provider_opts = { model_provider = "lmstudio" }
+"#;
+        let patched = apply_role_patches(
+            source,
+            &[RoleModelPatch {
+                role_name: "builder".into(),
+                model: "sonnet".into(),
+                base_url: None,
+                provider: Some("claude".into()),
+                provider_opts: Default::default(),
+            }],
+        )
+        .unwrap();
+
+        // A leftover `model_provider` would send the Claude CLI a flag it cannot use.
+        assert!(!patched.contains("provider_opts"), "got: {patched}");
+        assert!(patched.contains("provider = \"claude\""));
+        assert!(patched.contains("model = \"sonnet\""));
     }
 
     #[test]
@@ -197,6 +292,8 @@ isolation = "readonly"
                 role_name: "missing".into(),
                 model: "opus".into(),
                 base_url: None,
+                provider: None,
+                provider_opts: Default::default(),
             }],
         )
         .unwrap_err();
