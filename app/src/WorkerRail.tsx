@@ -12,6 +12,7 @@ type Props = {
 const STATUS_LABEL: Record<Worker["status"], string> = {
   queued: "queued",
   blocked: "waiting for the shared lock",
+  preparing: "preparing worktree",
   running: "running",
   done: "done",
   failed: "failed",

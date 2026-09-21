@@ -19,13 +19,16 @@ use tokio::process::Command;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::event::DiffStat;
-use crate::roles::Isolation;
+use crate::roles::{Isolation, WorktreeSetup};
 
 /// Directory under the project root holding worker worktrees.
 pub const WORKTREE_DIR: &str = ".harness/worktrees";
 
 /// Prefix for branches the harness creates.
 pub const BRANCH_PREFIX: &str = "harness";
+
+/// The line written into `.git/info/exclude`.
+const HARNESS_EXCLUDE: &str = ".harness/";
 
 async fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
@@ -149,6 +152,8 @@ impl Workspace {
 #[derive(Clone)]
 pub struct Workspaces {
     project_root: PathBuf,
+    /// Bootstrap applied to each new worktree. Empty by default.
+    setup: WorktreeSetup,
     shared_lock: Arc<Mutex<()>>,
     /// Serializes git's worktree bookkeeping.
     ///
@@ -167,13 +172,106 @@ impl Workspaces {
     pub fn new(project_root: impl Into<PathBuf>) -> Self {
         Self {
             project_root: project_root.into(),
+            setup: WorktreeSetup::default(),
             shared_lock: Arc::new(Mutex::new(())),
             git_lock: Arc::new(Mutex::new(())),
         }
     }
 
+    /// Same, with the project's worktree bootstrap attached.
+    pub fn with_setup(project_root: impl Into<PathBuf>, setup: WorktreeSetup) -> Self {
+        Self { setup, ..Self::new(project_root) }
+    }
+
     pub fn project_root(&self) -> &Path {
         &self.project_root
+    }
+
+    /// Keep worker worktrees out of the project's `git status`.
+    ///
+    /// Worktrees are created under `<project>/.harness/`, which is inside the repository.
+    /// Unless the project happens to ignore that path, every worker's checkout shows up as
+    /// untracked files in the parent repo — and a `shared`-isolation worker running
+    /// `git add -A` would commit another worker's entire tree.
+    ///
+    /// Written to `.git/info/exclude` rather than `.gitignore`: the exclusion is this
+    /// machine's business, not a change to the user's tracked files.
+    pub async fn ensure_git_exclude(&self) -> Result<()> {
+        let git_dir = git(&self.project_root, &["rev-parse", "--git-common-dir"]).await?;
+        let git_dir = {
+            let path = PathBuf::from(&git_dir);
+            if path.is_absolute() { path } else { self.project_root.join(path) }
+        };
+
+        let exclude = git_dir.join("info").join("exclude");
+        if let Some(parent) = exclude.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let current = tokio::fs::read_to_string(&exclude).await.unwrap_or_default();
+        if current.lines().any(|line| line.trim() == HARNESS_EXCLUDE) {
+            return Ok(());
+        }
+
+        let mut updated = current;
+        if !updated.is_empty() && !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        updated.push_str(&format!("# added by local-harness\n{HARNESS_EXCLUDE}\n"));
+        tokio::fs::write(&exclude, updated)
+            .await
+            .with_context(|| format!("writing {}", exclude.display()))?;
+        Ok(())
+    }
+
+    /// Copy declared files in, then run the project's setup commands.
+    ///
+    /// Failure here is fatal to the worker on purpose: a builder that starts in a tree
+    /// with no dependencies fails later anyway, with a far more confusing message.
+    async fn bootstrap(&self, cwd: &Path) -> Result<()> {
+        for entry in &self.setup.copy {
+            let from = self.project_root.join(entry);
+            if !from.exists() {
+                continue;
+            }
+            let to = cwd.join(entry);
+            if let Some(parent) = to.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::copy(&from, &to)
+                .await
+                .with_context(|| format!("copying {entry} into the worktree"))?;
+        }
+
+        for command in &self.setup.setup {
+            let run = Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .current_dir(cwd)
+                .output();
+
+            let output = tokio::time::timeout(
+                std::time::Duration::from_secs(self.setup.timeout_secs),
+                run,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "worktree setup `{command}` exceeded {}s",
+                    self.setup.timeout_secs
+                )
+            })?
+            .with_context(|| format!("running worktree setup `{command}`"))?;
+
+            if !output.status.success() {
+                bail!(
+                    "worktree setup `{command}` failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// Prepare a workspace for one worker.
@@ -222,6 +320,18 @@ impl Workspaces {
                     )
                     .await
                     .context("creating the worker's worktree")?;
+                }
+
+                // A half-built worktree is worse than none: tear it down rather than
+                // handing a worker a tree that is missing its dependencies.
+                if let Err(error) = self.bootstrap(&path).await {
+                    let _guard = self.git_lock.lock().await;
+                    let _ = git(
+                        &self.project_root,
+                        &["worktree", "remove", "--force", &path.to_string_lossy()],
+                    )
+                    .await;
+                    return Err(error);
                 }
 
                 Ok(Workspace {
@@ -313,6 +423,98 @@ mod tests {
 
         let workspaces = Workspaces::new(root);
         (dir, workspaces)
+    }
+
+    /// Same scratch repo, but with a bootstrap attached.
+    async fn scratch_repo_with(setup: WorktreeSetup) -> (tempfile::TempDir, Workspaces) {
+        let (dir, workspaces) = scratch_repo().await;
+        let workspaces = Workspaces::with_setup(workspaces.project_root().to_path_buf(), setup);
+        (dir, workspaces)
+    }
+
+    #[tokio::test]
+    async fn bootstrap_copies_untracked_files_and_runs_setup_commands() {
+        let setup = WorktreeSetup {
+            copy: vec![".env".into(), "missing.txt".into()],
+            setup: vec!["echo installed > deps.txt".into()],
+            timeout_secs: 60,
+        };
+        let (dir, workspaces) = scratch_repo_with(setup).await;
+
+        // Gitignored, so `git worktree add` will not carry it across on its own.
+        tokio::fs::write(dir.path().join(".env"), "SECRET=1\n").await.unwrap();
+
+        let workspace = workspaces.prepare("w-boot", Isolation::Worktree).await.unwrap();
+
+        let env = tokio::fs::read_to_string(workspace.cwd.join(".env")).await.unwrap();
+        assert_eq!(env, "SECRET=1\n", "declared file should be copied into the worktree");
+        assert!(
+            workspace.cwd.join("deps.txt").exists(),
+            "setup commands should run inside the worktree"
+        );
+        // A missing entry is skipped, not fatal.
+        assert!(!workspace.cwd.join("missing.txt").exists());
+
+        // Copied, not symlinked: editing it in the worktree must not touch the original.
+        tokio::fs::write(workspace.cwd.join(".env"), "SECRET=2\n").await.unwrap();
+        let original = tokio::fs::read_to_string(dir.path().join(".env")).await.unwrap();
+        assert_eq!(original, "SECRET=1\n", "the project's own .env must be untouched");
+    }
+
+    #[tokio::test]
+    async fn failed_setup_removes_the_half_built_worktree() {
+        let setup = WorktreeSetup {
+            copy: Vec::new(),
+            setup: vec!["exit 3".into()],
+            timeout_secs: 60,
+        };
+        let (dir, workspaces) = scratch_repo_with(setup).await;
+
+        let error = match workspaces.prepare("w-fail", Isolation::Worktree).await {
+            Err(error) => error,
+            Ok(_) => panic!("a failing setup command must fail the workspace"),
+        };
+        assert!(error.to_string().contains("exit 3"), "got: {error}");
+
+        // Handing a worker a tree with no dependencies is worse than handing it nothing.
+        assert!(
+            !dir.path().join(WORKTREE_DIR).join("w-fail").exists(),
+            "the worktree should have been torn down"
+        );
+        let listed = git(dir.path(), &["worktree", "list"]).await.unwrap();
+        assert!(!listed.contains("w-fail"), "git should not still track it: {listed}");
+    }
+
+    #[tokio::test]
+    async fn bootstrap_is_skipped_when_nothing_is_declared() {
+        let (_dir, workspaces) = scratch_repo().await;
+        assert!(WorktreeSetup::default().is_empty());
+
+        // The default path must stay exactly as it was before bootstrapping existed.
+        let workspace = workspaces.prepare("w-plain", Isolation::Worktree).await.unwrap();
+        assert!(workspace.cwd.join("README.md").exists());
+    }
+
+    #[tokio::test]
+    async fn git_exclude_hides_worker_worktrees_and_is_idempotent() {
+        let (dir, workspaces) = scratch_repo().await;
+
+        workspaces.ensure_git_exclude().await.unwrap();
+        workspaces.ensure_git_exclude().await.unwrap();
+
+        let exclude = tokio::fs::read_to_string(dir.path().join(".git/info/exclude"))
+            .await
+            .unwrap();
+        assert_eq!(
+            exclude.lines().filter(|l| l.trim() == ".harness/").count(),
+            1,
+            "the rule should be written once, not appended on every session: {exclude}"
+        );
+
+        // The point of the rule: a worker's worktree must not show up as untracked.
+        workspaces.prepare("w-hidden", Isolation::Worktree).await.unwrap();
+        let status = git(dir.path(), &["status", "--porcelain"]).await.unwrap();
+        assert!(status.is_empty(), "project should still look clean, got: {status}");
     }
 
     #[tokio::test]

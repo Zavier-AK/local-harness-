@@ -41,6 +41,8 @@ pub enum WorkerStatus {
     Queued,
     /// Waiting on the shared-isolation advisory lock.
     Blocked,
+    /// Building the worktree: copying files in and installing dependencies.
+    Preparing,
     Running,
     Done,
     Failed,
