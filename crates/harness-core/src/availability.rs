@@ -6,6 +6,7 @@
 //! being unconfigured. Probing up front turns that into a fact the UI can show and the
 //! head agent can plan around.
 
+use std::ffi::OsStr;
 use std::path::Path;
 use std::time::Duration;
 
@@ -32,19 +33,26 @@ impl Availability {
     }
 }
 
-/// Whether an executable is resolvable on `PATH`.
+/// Whether `name` resolves to an executable within the given `PATH` value.
+///
+/// Takes the search path as an argument rather than reading it. `PATH` is process-global
+/// and shared by every thread, so a test that rewrites it to exercise this function
+/// breaks any *other* test spawning a subprocess at that moment — which is how a third
+/// of this suite could fail at random under `cargo test`. Keeping the lookup pure means
+/// the tests never touch the environment at all.
 ///
 /// Done by hand rather than by spawning `which`, so probing a fleet costs no processes.
-pub fn binary_on_path(name: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-
-    std::env::split_paths(&path).any(|dir| {
+pub fn binary_in_path(name: &str, path_value: &OsStr) -> bool {
+    std::env::split_paths(path_value).any(|dir| {
         let candidate = dir.join(name);
         // A directory named `claude` on PATH should not count as the CLI.
         candidate.is_file() && is_executable(&candidate)
     })
+}
+
+/// [`binary_in_path`] against the current process's `PATH`.
+pub fn binary_on_path(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| binary_in_path(name, &path))
 }
 
 #[cfg(unix)]
@@ -62,11 +70,17 @@ fn is_executable(_path: &Path) -> bool {
 
 /// Probe one role's backend.
 pub async fn probe(role: &Role) -> Availability {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    probe_in_path(role, &path).await
+}
+
+/// [`probe`] against an explicit `PATH`, so tests need not mutate the environment.
+pub async fn probe_in_path(role: &Role, path_value: &OsStr) -> Availability {
     match role.provider {
         Provider::Mock => Availability::yes(),
 
         Provider::Claude => {
-            if binary_on_path("claude") {
+            if binary_in_path("claude", path_value) {
                 Availability::yes()
             } else {
                 Availability::no("the `claude` CLI is not on PATH — install Claude Code and run `claude /login`")
@@ -74,7 +88,7 @@ pub async fn probe(role: &Role) -> Availability {
         }
 
         Provider::Codex => {
-            if !binary_on_path("codex") {
+            if !binary_in_path("codex", path_value) {
                 return Availability::no(
                     "the `codex` CLI is not on PATH — install Codex and run `codex login`",
                 );
@@ -146,11 +160,36 @@ mod tests {
         }
     }
 
+    use std::ffi::OsString;
+
+    /// A PATH containing one directory, built without touching the process environment.
+    fn path_of(dir: &Path) -> OsString {
+        std::env::join_paths([dir]).expect("join_paths")
+    }
+
+    fn write_executable(dir: &Path, name: &str) {
+        let target = dir.join(name);
+        std::fs::write(&target, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
     #[test]
-    fn finds_a_real_binary_and_rejects_a_made_up_one() {
-        // `sh` exists on every platform this runs on.
-        assert!(binary_on_path("sh"));
-        assert!(!binary_on_path("definitely-not-a-real-binary-xyzzy"));
+    fn finds_an_executable_and_rejects_a_made_up_one() {
+        let dir = tempfile::tempdir().unwrap();
+        write_executable(dir.path(), "claude");
+        let path = path_of(dir.path());
+
+        assert!(binary_in_path("claude", &path));
+        assert!(!binary_in_path("definitely-not-a-real-binary-xyzzy", &path));
+    }
+
+    #[test]
+    fn an_empty_path_resolves_nothing() {
+        assert!(!binary_in_path("claude", OsStr::new("")));
     }
 
     #[test]
@@ -158,40 +197,50 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("codex")).unwrap();
 
-        let original = std::env::var_os("PATH");
-        std::env::set_var("PATH", dir.path());
-        let found = binary_on_path("codex");
-        match original {
-            Some(path) => std::env::set_var("PATH", path),
-            None => std::env::remove_var("PATH"),
-        }
+        assert!(
+            !binary_in_path("codex", &path_of(dir.path())),
+            "a directory must not be mistaken for the CLI"
+        );
+    }
 
-        assert!(!found, "a directory must not be mistaken for the CLI");
+    #[cfg(unix)]
+    #[test]
+    fn a_non_executable_file_does_not_count() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("codex"), "not executable").unwrap();
+
+        assert!(!binary_in_path("codex", &path_of(dir.path())));
     }
 
     #[tokio::test]
     async fn mock_is_always_available() {
-        assert_eq!(probe(&role(Provider::Mock)).await, Availability::yes());
+        assert_eq!(
+            probe_in_path(&role(Provider::Mock), OsStr::new("")).await,
+            Availability::yes()
+        );
     }
 
     #[tokio::test]
     async fn a_missing_cli_explains_how_to_get_it() {
-        // Nothing is on PATH, so every CLI-backed role is unavailable.
-        let original = std::env::var_os("PATH");
-        std::env::set_var("PATH", "");
+        // An empty search path means no CLI resolves, without disturbing the real one.
+        let empty = OsStr::new("");
 
-        let claude = probe(&role(Provider::Claude)).await;
-        let codex = probe(&role(Provider::Codex)).await;
-
-        match original {
-            Some(path) => std::env::set_var("PATH", path),
-            None => std::env::remove_var("PATH"),
-        }
-
+        let claude = probe_in_path(&role(Provider::Claude), empty).await;
         assert!(!claude.available);
         assert!(claude.reason.unwrap().contains("claude /login"));
+
+        let codex = probe_in_path(&role(Provider::Codex), empty).await;
         assert!(!codex.available);
         assert!(codex.reason.unwrap().contains("codex login"));
+    }
+
+    #[tokio::test]
+    async fn a_present_cli_with_no_model_server_is_available() {
+        let dir = tempfile::tempdir().unwrap();
+        write_executable(dir.path(), "claude");
+
+        let result = probe_in_path(&role(Provider::Claude), &path_of(dir.path())).await;
+        assert!(result.available, "{result:?}");
     }
 
     #[tokio::test]
@@ -200,42 +249,43 @@ mod tests {
         // Port 1 is reserved and nothing will be listening on it.
         local.base_url = Some("http://127.0.0.1:1/v1".into());
 
-        let result = probe(&local).await;
+        let result = probe_in_path(&local, OsStr::new("")).await;
         assert!(!result.available);
         assert!(result.reason.unwrap().contains("127.0.0.1:1"));
     }
 
     #[tokio::test]
     async fn a_codex_role_probes_its_own_base_url_when_given_one() {
-        if !binary_on_path("codex") {
-            // The probe short-circuits on a missing CLI, so this assertion needs one.
-            return;
-        }
+        // A stub `codex` on a synthetic PATH, so this no longer depends on the CLI
+        // actually being installed — it used to skip itself on most machines.
+        let dir = tempfile::tempdir().unwrap();
+        write_executable(dir.path(), "codex");
+
         let mut remote = role(Provider::Codex);
         remote.provider_opts.insert("model_provider".into(), "bionic".into());
         remote.base_url = Some("http://127.0.0.1:1/v1".into());
 
-        let result = probe(&remote).await;
+        let result = probe_in_path(&remote, &path_of(dir.path())).await;
         assert!(!result.available);
         assert!(result.reason.unwrap().contains("127.0.0.1:1"));
     }
 
     #[tokio::test]
     async fn a_custom_codex_provider_without_a_base_url_is_not_guessed_at() {
-        if !binary_on_path("codex") {
-            return;
-        }
+        let dir = tempfile::tempdir().unwrap();
+        write_executable(dir.path(), "codex");
+
         let mut custom = role(Provider::Codex);
         // Its endpoint lives in the user's Codex config, which we cannot read. Assuming
         // localhost here would mark a working remote model server as broken.
         custom.provider_opts.insert("model_provider".into(), "bionic".into());
 
-        assert!(probe(&custom).await.available);
+        assert!(probe_in_path(&custom, &path_of(dir.path())).await.available);
     }
 
     #[tokio::test]
     async fn openai_compat_without_a_base_url_is_unavailable() {
-        let result = probe(&role(Provider::OpenaiCompat)).await;
+        let result = probe_in_path(&role(Provider::OpenaiCompat), OsStr::new("")).await;
         assert!(!result.available);
     }
 }

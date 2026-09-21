@@ -67,6 +67,8 @@ pub struct Workspace {
     project_root: PathBuf,
     /// Held for the lifetime of a `Shared` worker; this is what serializes them.
     _shared_guard: Option<OwnedMutexGuard<()>>,
+    /// Guards git's worktree bookkeeping during teardown. See [`Workspaces::git_lock`].
+    git_lock: Arc<Mutex<()>>,
 }
 
 impl Workspace {
@@ -130,6 +132,8 @@ impl Workspace {
             return Ok(());
         }
 
+        // Teardown mutates the same bookkeeping that creation does.
+        let _guard = self.git_lock.lock().await;
         git(
             &self.project_root,
             &["worktree", "remove", "--force", &self.cwd.to_string_lossy()],
@@ -146,6 +150,17 @@ impl Workspace {
 pub struct Workspaces {
     project_root: PathBuf,
     shared_lock: Arc<Mutex<()>>,
+    /// Serializes git's worktree bookkeeping.
+    ///
+    /// `git worktree add` and `git worktree remove` both mutate `.git/worktrees/`, and
+    /// concurrent invocations against one repository corrupt each other's administrative
+    /// files — surfacing as `failed to read .git/worktrees/<id>/commondir`. Fanning
+    /// several builders out at once is the normal case here, so this is a real failure
+    /// mode rather than a theoretical one.
+    ///
+    /// Held only across the metadata operation, which takes milliseconds. Workers
+    /// themselves still run fully in parallel.
+    git_lock: Arc<Mutex<()>>,
 }
 
 impl Workspaces {
@@ -153,6 +168,7 @@ impl Workspaces {
         Self {
             project_root: project_root.into(),
             shared_lock: Arc::new(Mutex::new(())),
+            git_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -173,6 +189,7 @@ impl Workspaces {
                 branch: None,
                 project_root: self.project_root.clone(),
                 _shared_guard: None,
+                git_lock: Arc::clone(&self.git_lock),
             }),
 
             Isolation::Shared => {
@@ -183,6 +200,7 @@ impl Workspaces {
                     branch: None,
                     project_root: self.project_root.clone(),
                     _shared_guard: Some(guard),
+                    git_lock: Arc::clone(&self.git_lock),
                 })
             }
 
@@ -194,12 +212,17 @@ impl Workspaces {
                     tokio::fs::create_dir_all(parent).await?;
                 }
 
-                git(
-                    &self.project_root,
-                    &["worktree", "add", "-b", &branch, &path.to_string_lossy(), "HEAD"],
-                )
-                .await
-                .context("creating the worker's worktree")?;
+                {
+                    // Serialized: two concurrent `worktree add` calls leave git's
+                    // administrative directory inconsistent.
+                    let _guard = self.git_lock.lock().await;
+                    git(
+                        &self.project_root,
+                        &["worktree", "add", "-b", &branch, &path.to_string_lossy(), "HEAD"],
+                    )
+                    .await
+                    .context("creating the worker's worktree")?;
+                }
 
                 Ok(Workspace {
                     cwd: path,
@@ -207,6 +230,7 @@ impl Workspaces {
                     branch: Some(branch),
                     project_root: self.project_root.clone(),
                     _shared_guard: None,
+                    git_lock: Arc::clone(&self.git_lock),
                 })
             }
         }
@@ -324,6 +348,37 @@ mod tests {
         assert_eq!(tokio::fs::read_to_string(a.cwd.join("same.txt")).await.unwrap(), "from a");
         assert_eq!(tokio::fs::read_to_string(b.cwd.join("same.txt")).await.unwrap(), "from b");
         assert_ne!(a.branch, b.branch);
+    }
+
+    #[tokio::test]
+    async fn many_worktrees_can_be_prepared_concurrently() {
+        // Fanning builders out is the normal case for `delegate_async`, and concurrent
+        // `git worktree add` against one repository used to corrupt git's bookkeeping:
+        // `fatal: failed to read .git/worktrees/<id>/commondir`. Creation is serialized
+        // now; this is the regression guard.
+        let (_dir, ws) = scratch_repo().await;
+
+        let mut handles = Vec::new();
+        for n in 0..8 {
+            let ws = ws.clone();
+            handles.push(tokio::spawn(async move {
+                let workspace = ws.prepare(&format!("w{n}"), Isolation::Worktree).await?;
+                tokio::fs::write(workspace.cwd.join("f.txt"), format!("{n}")).await?;
+                workspace.commit(&format!("worker {n}")).await?;
+                let branch = workspace.branch.clone().unwrap();
+                workspace.release().await?;
+                anyhow::Ok(branch)
+            }));
+        }
+
+        let mut branches = Vec::new();
+        for handle in handles {
+            branches.push(handle.await.unwrap().expect("worktree lifecycle must not race"));
+        }
+
+        branches.sort();
+        branches.dedup();
+        assert_eq!(branches.len(), 8, "every worker should get its own branch");
     }
 
     #[tokio::test]
