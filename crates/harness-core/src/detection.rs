@@ -433,4 +433,31 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("not a detected compatible option"));
     }
+
+    #[tokio::test]
+    async fn enumerates_models_from_a_live_openai_compatible_server() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = r#"{"data":[{"id":"qwen-local"},{"id":"embed-local"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let backend =
+            detect_openai_backend("test", "Test server", &format!("http://{address}/v1")).await;
+
+        assert!(backend.available);
+        assert_eq!(backend.models.len(), 2);
+        assert!(backend.message.contains("1 chat model"));
+    }
 }
