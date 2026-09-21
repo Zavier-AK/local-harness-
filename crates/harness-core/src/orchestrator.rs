@@ -40,10 +40,20 @@ pub fn orchestrator_brief(roles: &[crate::engine::RoleInfo]) -> String {
                 "- {} ({}{}, isolation: {}{}){}",
                 r.name,
                 r.provider,
-                r.model.as_ref().map(|m| format!("/{m}")).unwrap_or_default(),
+                r.model
+                    .as_ref()
+                    .map(|m| format!("/{m}"))
+                    .unwrap_or_default(),
                 r.isolation,
-                if r.can_edit_files { ", can edit files" } else { ", read-only" },
-                r.brief.as_ref().map(|b| format!(" — {b}")).unwrap_or_default(),
+                if r.can_edit_files {
+                    ", can edit files"
+                } else {
+                    ", read-only"
+                },
+                r.brief
+                    .as_ref()
+                    .map(|b| format!(" — {b}"))
+                    .unwrap_or_default(),
             )
         })
         .collect::<Vec<_>>()
@@ -59,7 +69,9 @@ pub fn orchestrator_brief(roles: &[crate::engine::RoleInfo]) -> String {
                 .map(|r| format!(
                     "- {} ({})",
                     r.name,
-                    r.unavailable_reason.as_deref().unwrap_or("backend not reachable")
+                    r.unavailable_reason
+                        .as_deref()
+                        .unwrap_or("backend not reachable")
                 ))
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -111,6 +123,7 @@ pub struct Orchestrator {
     session: ClaudeSession,
     mcp: McpServer,
     harness: Arc<Harness>,
+    resumed_backend_session: bool,
 }
 
 impl Orchestrator {
@@ -120,6 +133,7 @@ impl Orchestrator {
         project_root: &Path,
         model: Option<String>,
         max_turns: Option<u32>,
+        resume_session_id: Option<String>,
     ) -> Result<(Self, UnboundedReceiver<HarnessEvent>)> {
         let mcp = mcp::serve(Arc::clone(&harness)).await?;
         let role = orchestrator_role(model, max_turns);
@@ -127,7 +141,9 @@ impl Orchestrator {
         let brief = orchestrator_brief(&harness.list_roles_probed().await);
 
         let run_id = format!("orchestrator-{}", harness.session_id());
-        harness.register_orchestrator(&run_id, role.model.as_deref()).await;
+        harness
+            .register_orchestrator(&run_id, role.model.as_deref())
+            .await;
 
         let (session, events) = ClaudeSession::start(
             run_id,
@@ -135,10 +151,19 @@ impl Orchestrator {
             &role,
             Some(&mcp.claude_mcp_config()),
             Some(&brief),
+            resume_session_id.as_deref(),
         )
         .await?;
 
-        Ok((Self { session, mcp, harness }, events))
+        Ok((
+            Self {
+                session,
+                mcp,
+                harness,
+                resumed_backend_session: resume_session_id.is_some(),
+            },
+            events,
+        ))
     }
 
     pub fn harness(&self) -> &Arc<Harness> {
@@ -147,6 +172,10 @@ impl Orchestrator {
 
     pub fn mcp_url(&self) -> String {
         self.mcp.url()
+    }
+
+    pub fn resumed_backend_session(&self) -> bool {
+        self.resumed_backend_session
     }
 
     /// Queue a user turn. The reply arrives on the event stream.
@@ -204,8 +233,15 @@ mod tests {
     #[test]
     fn orchestrator_gets_the_delegation_tools() {
         let tools = orchestrator_role(None, None).effective_tools();
-        for expected in ["mcp__harness__delegate", "mcp__harness__list_roles", "mcp__harness__request_merge"] {
-            assert!(tools.iter().any(|t| t == expected), "missing {expected} in {tools:?}");
+        for expected in [
+            "mcp__harness__delegate",
+            "mcp__harness__list_roles",
+            "mcp__harness__request_merge",
+        ] {
+            assert!(
+                tools.iter().any(|t| t == expected),
+                "missing {expected} in {tools:?}"
+            );
         }
     }
 

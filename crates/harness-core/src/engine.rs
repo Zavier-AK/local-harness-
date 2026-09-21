@@ -121,7 +121,12 @@ impl Harness {
 
     /// Persist an event as well as broadcasting it, so a session can be replayed.
     async fn record(&self, event: HarnessEvent) {
-        if let Err(err) = self.store.lock().await.append_event(&self.session_id, &event) {
+        if let Err(err) = self
+            .store
+            .lock()
+            .await
+            .append_event(&self.session_id, &event)
+        {
             tracing::warn!("failed to persist event: {err}");
         }
         self.emit(event);
@@ -136,7 +141,10 @@ impl Harness {
                 provider: role.provider.as_str().to_string(),
                 model: role.model.clone(),
                 isolation: role.isolation.as_str().to_string(),
-                can_edit_files: role.effective_tools().iter().any(|t| t == "Edit" || t == "Write"),
+                can_edit_files: role
+                    .effective_tools()
+                    .iter()
+                    .any(|t| t == "Edit" || t == "Write"),
                 brief: role.brief.clone(),
                 available: None,
                 unavailable_reason: None,
@@ -314,7 +322,10 @@ impl Harness {
         }
         let workspace_cwd = workspace.cwd.clone();
         if let Err(err) = workspace.release().await {
-            tracing::warn!("failed to release workspace {}: {err:#}", workspace_cwd.display());
+            tracing::warn!(
+                "failed to release workspace {}: {err:#}",
+                workspace_cwd.display()
+            );
         }
 
         {
@@ -333,14 +344,20 @@ impl Harness {
                 .finish_run(&worker_id, if outcome.is_error { "failed" } else { "done" })
                 .ok();
             if let Some(backend_session_id) = &outcome.backend_session_id {
-                store.set_backend_session_id(&worker_id, backend_session_id).ok();
+                store
+                    .set_backend_session_id(&worker_id, backend_session_id)
+                    .ok();
             }
         }
 
         let record = WorkerRecord {
             id: worker_id.clone(),
             role: role_name,
-            status: if outcome.is_error { WorkerStatus::Failed } else { WorkerStatus::Done },
+            status: if outcome.is_error {
+                WorkerStatus::Failed
+            } else {
+                WorkerStatus::Done
+            },
             task: task.to_string(),
             summary: outcome.text.clone(),
             usage: outcome.usage,
@@ -433,9 +450,7 @@ impl Harness {
             .with_context(|| format!("no worker `{worker_id}`"))?;
 
         let branch = record.branch.clone().with_context(|| {
-            format!(
-                "worker `{worker_id}` ran with isolation that produces nothing mergeable"
-            )
+            format!("worker `{worker_id}` ran with isolation that produces nothing mergeable")
         })?;
 
         let diff = record.diff.clone().unwrap_or_default();
@@ -493,7 +508,11 @@ impl Harness {
     }
 
     /// The diff a worker left on its branch, for review before it is landed.
-    pub async fn worker_patch(&self, worker_id: &str, max_lines: usize) -> Result<crate::isolation::Patch> {
+    pub async fn worker_patch(
+        &self,
+        worker_id: &str,
+        max_lines: usize,
+    ) -> Result<crate::isolation::Patch> {
         let record = self
             .worker(worker_id)
             .await
@@ -521,12 +540,38 @@ impl Harness {
     /// into something the engine reacts to.
     pub async fn note_event(&self, event: &HarnessEvent) {
         match event {
+            HarnessEvent::SessionStarted {
+                run_id,
+                backend_session_id: Some(backend_session_id),
+                ..
+            } => {
+                let is_orchestrator = self
+                    .orchestrator_run
+                    .read()
+                    .await
+                    .as_deref()
+                    .is_some_and(|id| id == run_id);
+                if is_orchestrator {
+                    self.store
+                        .lock()
+                        .await
+                        .set_backend_session_id(run_id, backend_session_id)
+                        .ok();
+                }
+            }
+
             HarnessEvent::ApiRetry { error, .. } if error == "rate_limit" => {
                 self.mark_rate_limited(Provider::Claude.as_str()).await;
             }
 
             // A successful turn means the limit, if we had noted one, has lifted.
-            HarnessEvent::RunFinished { run_id, usage, cost_usd, is_error: false, .. } => {
+            HarnessEvent::RunFinished {
+                run_id,
+                usage,
+                cost_usd,
+                is_error: false,
+                ..
+            } => {
                 self.clear_rate_limit(Provider::Claude.as_str()).await;
 
                 let is_orchestrator = self

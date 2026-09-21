@@ -1,25 +1,49 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { ProjectStatus, SessionInfo } from "./types";
+import FleetSetup from "./FleetSetup";
+import type { FleetInspection, ProjectStatus, SessionInfo } from "./types";
 
 type Props = { onStarted: (info: SessionInfo) => void };
 
 export default function StartGate({ onStarted }: Props) {
   const [projectRoot, setProjectRoot] = useState("");
   const [status, setStatus] = useState<ProjectStatus | null>(null);
+  const [fleet, setFleet] = useState<FleetInspection | null>(null);
+  const [detecting, setDetecting] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const inspect = useCallback(async (path: string) => {
     if (!path.trim()) {
       setStatus(null);
+      setFleet(null);
       return;
     }
     try {
-      setStatus(await invoke<ProjectStatus>("inspect_project", { projectRoot: path.trim() }));
+      const projectStatus = await invoke<ProjectStatus>("inspect_project", {
+        projectRoot: path.trim(),
+      });
+      setStatus(projectStatus);
+      if (projectStatus.exists && projectStatus.has_roles_file) {
+        setDetecting(true);
+        try {
+          setFleet(
+            await invoke<FleetInspection>("inspect_fleet", {
+              projectRoot: path.trim(),
+              rolesPath: null,
+            }),
+          );
+        } finally {
+          setDetecting(false);
+        }
+      } else {
+        setFleet(null);
+      }
     } catch {
       setStatus(null);
+      setFleet(null);
+      setDetecting(false);
     }
   }, []);
 
@@ -109,6 +133,15 @@ export default function StartGate({ onStarted }: Props) {
               }
             />
           </ul>
+        )}
+
+        {detecting && <p className="muted detecting">Detecting CLIs and local models…</p>}
+        {fleet && (
+          <FleetSetup
+            projectRoot={projectRoot.trim()}
+            inspection={fleet}
+            onSaved={setFleet}
+          />
         )}
 
         <button className="primary wide" onClick={start} disabled={starting || !ready}>
