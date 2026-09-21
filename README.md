@@ -215,10 +215,26 @@ because the two numbers measure different things and have drifted apart before.
   unrecognized lines yield no events rather than failing a run, and parsing is covered by
   fixture tests.
 
+## Worker skills
+
+Every worktree-isolated worker gets a small set of skills materialized into
+`.claude/skills/harness-*`, where its CLI picks them up. They tell a worker what it can
+and cannot do here: that its worktree is disposable and harness-managed, that nothing it
+writes lands without a human approving the diff, how to report a review without
+generating noise, and when a change needs evidence rather than a passing test suite.
+
+They are **held out of the worker's commits** by pathspec, so they are visible to the
+agent and invisible to your diff. A project's own `.claude/skills/` is untouched by this
+and remains the worker's to change.
+
 ## Credits
 
-The worktree bootstrap in `[worktree]` exists because of the `git-worktree` skill in
-[David Ondrej's agent skills](https://github.com/davidondrej/skills) (MIT). Its
-"complete the setup" checklist — env files, dependencies, ports, generated output —
-named a gap this harness had: `git worktree add` checks out tracked files only, so
-builders were being told to run tests in a tree with no dependencies installed.
+The skills in [`skills/`](skills/) are adapted from
+[David Ondrej's agent skills](https://github.com/davidondrej/skills) (MIT). See
+[`skills/NOTICE.md`](skills/NOTICE.md) for the licence and exactly what was changed.
+
+That repository also earned its keep before any of it was vendored: the `git-worktree`
+skill's "complete the setup" checklist — env files, dependencies, ports, generated
+output — named a real gap here. `git worktree add` checks out tracked files only, so
+builders were being told to run tests in a tree with no dependencies installed. That is
+what the `[worktree]` block in `roles.toml` now fixes.
