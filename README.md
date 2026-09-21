@@ -176,7 +176,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # engine: 90 tests, no network, no CLI login needed
+cargo test                        # 94 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -184,8 +184,15 @@ The `mock` backend is a deterministic stand-in, so isolation, delegation, the me
 and rate-limit shedding are all tested without touching a subscription. `WRITE:<path>:<text>`
 makes a mock worker write a file; `FAIL:<reason>` makes it fail.
 
-The Tauri shell adds five Preview discovery and URL-safety tests, for 95 tests across the
-repository.
+The Tauri shell is a separate cargo workspace, so `cargo test` does not reach it. Its five
+Preview discovery and URL-safety tests run on their own:
+
+```bash
+cargo test --manifest-path app/src-tauri/Cargo.toml
+```
+
+That makes **94 engine tests, 99 including the Tauri shell** — worth stating explicitly,
+because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats
 
