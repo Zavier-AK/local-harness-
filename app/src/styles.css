@@ -228,6 +228,7 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); ou
 .preview { display: flex; flex-direction: column; min-height: 0; height: 100%; }
 .preview-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
@@ -236,6 +237,7 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); ou
 }
 .preview-toolbar input { flex: 1 1 auto; min-width: 120px; }
 .preview-toolbar select { flex: 0 1 210px; min-width: 130px; }
+.preview-toolbar select:first-of-type { flex-basis: 145px; }
 .preview-toolbar button { flex: 0 0 auto; }
 .preview-error {
   padding: 7px 14px;

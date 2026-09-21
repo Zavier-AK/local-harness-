@@ -38,6 +38,10 @@ export default function PreviewPanel({
   const [servers, setServers] = useState<DevServer[]>([]);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [scopeRoot, setScopeRoot] = useState(projectRoot);
+  const scopeOptions = [projectRoot, ...workerRoots.filter((root) => root !== projectRoot)].filter(
+    (root, index, roots) => roots.indexOf(root) === index,
+  );
 
   const bounds = useCallback((): Bounds | null => {
     const element = viewport.current;
@@ -89,8 +93,8 @@ export default function PreviewPanel({
           : [];
       setServers(
         await invoke<DevServer[]>("probe_preview_servers", {
-          projectRoot,
-          workerRoots,
+          projectRoot: scopeRoot,
+          workerRoots: [],
           excludedPorts: ownPort,
         }),
       );
@@ -100,7 +104,7 @@ export default function PreviewPanel({
     } finally {
       setScanning(false);
     }
-  }, [projectRoot, workerRoots]);
+  }, [scopeRoot]);
 
   useEffect(() => {
     if (active && !scanned.current) {
@@ -203,6 +207,24 @@ export default function PreviewPanel({
         <button type="button" onClick={() => void reload()} disabled={!created.current} title="Reload">
           ↻
         </button>
+        <select
+          aria-label="Preview server scope"
+          value={scopeRoot}
+          onChange={(event) => {
+            scanned.current = false;
+            setServers([]);
+            setScopeRoot(event.target.value);
+          }}
+          title={scopeRoot}
+        >
+          {scopeOptions.map((root, index) => (
+            <option key={root} value={root}>
+              {index === 0
+                ? "Project root"
+                : `Worker · ${root.split(/[\\/]/).filter(Boolean).slice(-1)[0] ?? root}`}
+            </option>
+          ))}
+        </select>
         <select
           aria-label="Detected localhost servers"
           value=""

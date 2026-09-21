@@ -185,6 +185,7 @@ fn extract_explicit_ports(contents: &str) -> BTreeSet<u16> {
 
     for marker in [
         "--port",
+        " -p",
         " port",
         "\"port\"",
         "'port'",
@@ -307,6 +308,7 @@ mod tests {
         let contents = r#"
           vite --port 4310
           next dev --port=4311
+          next dev -p 4309
           const config = { port: 4312 };
           { "port": 4313, "url": "http://localhost:4314" }
           proxy=http://127.0.0.1:4315
@@ -316,7 +318,7 @@ mod tests {
 
         assert_eq!(
             extract_explicit_ports(contents),
-            BTreeSet::from([4310, 4311, 4312, 4313, 4314, 4315, 4316])
+            BTreeSet::from([4309, 4310, 4311, 4312, 4313, 4314, 4315, 4316])
         );
     }
 
