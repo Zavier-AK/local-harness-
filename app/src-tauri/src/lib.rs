@@ -774,6 +774,36 @@ fn set_webview_bounds(webview: &Webview, bounds: PreviewBounds) -> Result<(), St
         .map_err(|error| error.to_string())
 }
 
+/// Subscription headroom, as far as it is actually knowable.
+///
+/// Deliberately separate from `usage`: that reports what this harness has spent, which is
+/// a real measurement, while this reports what the vendors say is left, which only one of
+/// them tells us. Keeping them apart is what stops a token count being read as a limit.
+#[tauri::command]
+async fn quotas(state: State<'_, AppState>) -> Result<QuotaReport, String> {
+    let projects = state.projects.lock().await;
+    let mut limited: Vec<String> = Vec::new();
+    for session in projects.values() {
+        for provider in session.harness.rate_limited_providers().await {
+            if !limited.contains(&provider) {
+                limited.push(provider);
+            }
+        }
+    }
+
+    Ok(QuotaReport {
+        providers: harness_core::quota::all_quotas(),
+        rate_limited: limited,
+    })
+}
+
+#[derive(Serialize)]
+pub struct QuotaReport {
+    providers: Vec<harness_core::quota::ProviderQuota>,
+    /// Providers that have hit a wall and are shedding to fallbacks right now.
+    rate_limited: Vec<String>,
+}
+
 /// Every open project, for the switcher.
 ///
 /// The most-reported failure with tools like this is losing track of work — a session
@@ -906,6 +936,7 @@ pub fn run() {
             save_role_assignments,
             session_roles,
             list_projects,
+            quotas,
             focus_project,
             close_project,
             start_session,

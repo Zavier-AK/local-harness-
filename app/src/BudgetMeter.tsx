@@ -1,13 +1,13 @@
 import type { UsageRow } from "./types";
 
-type Props = { usage: UsageRow[]; rateLimited: boolean };
+type Props = { usage: UsageRow[]; rateLimited: boolean; onOpenLimits: () => void };
 
 /**
  * Burn over the rolling five-hour window, which is the constraint that actually binds a
  * Pro subscription. Dollar figures are shown only where they mean something: under
  * subscription auth the CLI's cost estimate is notional, and local inference is free.
  */
-export default function BudgetMeter({ usage, rateLimited }: Props) {
+export default function BudgetMeter({ usage, rateLimited, onOpenLimits }: Props) {
   const subscription = usage.filter((row) => row.provider === "claude" || row.provider === "codex");
   const local = usage.filter((row) => row.provider !== "claude" && row.provider !== "codex");
 
@@ -27,7 +27,11 @@ export default function BudgetMeter({ usage, rateLimited }: Props) {
   const reusePct = created + read > 0 ? Math.round((read / (created + read)) * 100) : null;
 
   return (
-    <div className="meter" title="Rolling 5-hour window">
+    <button
+      className="meter"
+      onClick={onOpenLimits}
+      title="Rolling 5-hour window — open limits"
+    >
       {rateLimited && <span className="badge limited">rate limited</span>}
 
       <span className="meter-item">
@@ -46,6 +50,6 @@ export default function BudgetMeter({ usage, rateLimited }: Props) {
           <span className="mono">{reusePct}%</span>
         </span>
       )}
-    </div>
+    </button>
   );
 }
