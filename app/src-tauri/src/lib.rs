@@ -23,6 +23,7 @@ use tauri::webview::{NewWindowResponse, WebviewBuilder};
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Webview, WebviewUrl,
 };
+use std::collections::HashMap;
 use tokio::sync::Mutex;
 
 /// Event channel the UI subscribes to.
@@ -35,13 +36,60 @@ const DEFAULT_ROLES: &str = include_str!("../../../roles.toml");
 
 #[derive(Default)]
 pub struct AppState {
-    session: Mutex<Option<Session>>,
+    /// Open projects, keyed by canonical path. Several can be open at once; exactly one
+    /// is in front.
+    projects: Mutex<HashMap<String, Session>>,
+    active: Mutex<Option<String>>,
     preview: std::sync::Mutex<Option<Webview>>,
 }
 
+/// One project's engine, plus what is needed to bring its head agent back after a
+/// suspension.
 struct Session {
-    orchestrator: Orchestrator,
     harness: Arc<Harness>,
+    head: Head,
+    project_root: PathBuf,
+    roles_file: PathBuf,
+    model: Option<String>,
+}
+
+/// The head agent is the expensive part of a project: a live `claude -p` process holding
+/// the context floor. A project the user is not looking at should not be paying for one,
+/// but its engine, worktrees and history stay put so switching back is cheap.
+enum Head {
+    Live(Box<Orchestrator>),
+    /// Shut down. The backend conversation id is in the project's own store, so resuming
+    /// picks the same conversation back up rather than starting over.
+    Suspended,
+}
+
+impl Session {
+    fn is_live(&self) -> bool {
+        matches!(self.head, Head::Live(_))
+    }
+
+    async fn has_running_workers(&self) -> bool {
+        self.harness
+            .workers()
+            .await
+            .iter()
+            .any(|worker| !worker.status.is_terminal())
+    }
+
+    /// Shut the head agent down, keeping everything else. Refuses while workers are still
+    /// running: their results are reported through this session.
+    async fn suspend(&mut self) -> bool {
+        if self.has_running_workers().await {
+            return false;
+        }
+        if let Head::Live(orchestrator) = std::mem::replace(&mut self.head, Head::Suspended) {
+            if let Err(error) = orchestrator.shutdown().await {
+                tracing::warn!("head agent did not shut down cleanly: {error:#}");
+            }
+            return true;
+        }
+        false
+    }
 }
 
 #[derive(Serialize)]
@@ -52,6 +100,18 @@ pub struct SessionInfo {
     roles: Vec<RoleView>,
     backends: Vec<DetectedBackend>,
     resumed_head_session: bool,
+}
+
+/// One open project, as the switcher sees it.
+#[derive(Serialize)]
+pub struct ProjectView {
+    project_root: String,
+    name: String,
+    active: bool,
+    /// Whether its head agent is up. A suspended project costs nothing until reopened.
+    live: bool,
+    running_workers: usize,
+    pending_merges: usize,
 }
 
 #[derive(Serialize)]
@@ -115,17 +175,32 @@ impl PreviewBounds {
 fn forward_events(
     app: AppHandle,
     harness: Arc<Harness>,
+    project: String,
     mut events: tokio::sync::mpsc::UnboundedReceiver<HarnessEvent>,
 ) {
     tokio::spawn(async move {
         while let Some(event) = events.recv().await {
             harness.note_event(&event).await;
-            if let Err(err) = app.emit(EVENT_CHANNEL, &event) {
+            if let Err(err) = app.emit(EVENT_CHANNEL, ProjectEvent { project: &project, event: &event })
+            {
                 tracing::warn!("dropping event, webview gone: {err}");
                 break;
             }
         }
     });
+}
+
+/// An engine event, tagged with the project it came from.
+///
+/// Every project emits on one channel, and `HarnessEvent` carries only run and worker
+/// ids — nothing that says which project a run belongs to. Without this tag two open
+/// projects' streams would interleave with no way to separate them. Flattened, so the
+/// event's own `type` discriminator is unchanged and existing handlers still match.
+#[derive(Serialize, Clone)]
+struct ProjectEvent<'a> {
+    project: &'a str,
+    #[serde(flatten)]
+    event: &'a HarnessEvent,
 }
 
 /// Inspect a candidate project directory.
@@ -194,9 +269,10 @@ async fn save_role_assignments(
 
     let updated = RoleRegistry::load(&roles_file).map_err(|e| format!("{e:#}"))?;
 
-    // Push the new fleet into the live session, if there is one.
-    let mut slot = state.session.lock().await;
-    if let Some(session) = slot.as_mut() {
+    // Push the new fleet into that project's live session, if it has one.
+    let key = project_key(&project_root);
+    let mut projects = state.projects.lock().await;
+    if let Some(session) = projects.get_mut(&key) {
         session.harness.swap_registry(updated.clone()).await;
 
         // The head agent's brief is baked into its process argv and cannot be rewritten,
@@ -226,8 +302,10 @@ async fn save_role_assignments(
                 "The fleet changed: {changed}. Call `list_roles` before your next \
                  delegation so you are planning against the current fleet."
             );
-            if let Err(error) = session.orchestrator.send(&notice).await {
-                tracing::warn!("could not notify the head agent of the fleet change: {error:#}");
+            if let Head::Live(orchestrator) = &mut session.head {
+                if let Err(error) = orchestrator.send(&notice).await {
+                    tracing::warn!("could not notify the head agent of the fleet change: {error:#}");
+                }
             }
         }
     }
@@ -243,9 +321,34 @@ async fn start_session(
     roles_path: Option<String>,
     model: Option<String>,
 ) -> Result<SessionInfo, String> {
-    let mut slot = state.session.lock().await;
-    if slot.is_some() {
-        return Err("a session is already running".into());
+    let key = project_key(&project_root);
+
+    // Already open: bring it to the front, waking its head agent if it was suspended.
+    {
+        let mut projects = state.projects.lock().await;
+        if let Some(session) = projects.get_mut(&key) {
+            if !session.is_live() {
+                let (orchestrator, events) = Orchestrator::start(
+                    Arc::clone(&session.harness),
+                    &session.project_root,
+                    session.model.clone(),
+                    Some(200),
+                    session
+                        .harness
+                        .resumable_backend_session()
+                        .await
+                        .map_err(|e| format!("{e:#}"))?,
+                )
+                .await
+                .map_err(|e| format!("{e:#}"))?;
+                forward_events(app.clone(), Arc::clone(&session.harness), key.clone(), events);
+                session.head = Head::Live(Box::new(orchestrator));
+            }
+            let info = describe(&key, session).await;
+            drop(projects);
+            *state.active.lock().await = Some(key);
+            return Ok(info);
+        }
     }
 
     let project = PathBuf::from(&project_root);
@@ -260,13 +363,8 @@ async fn start_session(
     let db_path = project.join(".harness").join("sessions.db");
     std::fs::create_dir_all(db_path.parent().unwrap()).map_err(|e| e.to_string())?;
     let store = Store::open(&db_path).map_err(|e| format!("{e:#}"))?;
-    let project_key = project
-        .canonicalize()
-        .unwrap_or_else(|_| project.clone())
-        .display()
-        .to_string();
     let resume_session_id = store
-        .latest_orchestrator_backend_session(&project_key)
+        .latest_orchestrator_backend_session(&key)
         .map_err(|e| format!("{e:#}"))?;
 
     let session_id = format!(
@@ -278,7 +376,7 @@ async fn start_session(
             .as_nanos()
     );
     store
-        .create_session(&session_id, None, &project_key)
+        .create_session(&session_id, None, &key)
         .map_err(|e| format!("{e:#}"))?;
 
     let (tx, worker_events) = tokio::sync::mpsc::unbounded_channel();
@@ -298,7 +396,7 @@ async fn start_session(
     let (orchestrator, orchestrator_events) = Orchestrator::start(
         Arc::clone(&harness),
         &project,
-        model,
+        model.clone(),
         Some(200),
         resume_session_id,
     )
@@ -306,13 +404,14 @@ async fn start_session(
     .map_err(|e| format!("{e:#}"))?;
     let resumed_head_session = orchestrator.resumed_backend_session();
 
-    // Worker and orchestrator streams are separate; the UI keys them apart by run id.
-    forward_events(app.clone(), Arc::clone(&harness), worker_events);
-    forward_events(app, Arc::clone(&harness), orchestrator_events);
+    // Worker and orchestrator streams are separate; the UI keys them apart by run id, and
+    // by project now that several can be open at once.
+    forward_events(app.clone(), Arc::clone(&harness), key.clone(), worker_events);
+    forward_events(app, Arc::clone(&harness), key.clone(), orchestrator_events);
 
     let info = SessionInfo {
         session_id,
-        project_root: project.display().to_string(),
+        project_root: key.clone(),
         mcp_url: orchestrator.mcp_url(),
         backends: harness_core::detection::detect_backends().await,
         resumed_head_session,
@@ -333,11 +432,69 @@ async fn start_session(
             .collect(),
     };
 
-    *slot = Some(Session {
-        orchestrator,
-        harness,
-    });
+    state.projects.lock().await.insert(
+        key.clone(),
+        Session {
+            harness,
+            head: Head::Live(Box::new(orchestrator)),
+            project_root: project,
+            roles_file,
+            model: model.clone(),
+            },
+    );
+    *state.active.lock().await = Some(key);
     Ok(info)
+}
+
+/// A `SessionInfo` for a project that is already open.
+async fn describe(key: &str, session: &Session) -> SessionInfo {
+    SessionInfo {
+        session_id: session.harness.session_id().to_string(),
+        project_root: key.to_string(),
+        mcp_url: match &session.head {
+            Head::Live(orchestrator) => orchestrator.mcp_url(),
+            Head::Suspended => String::new(),
+        },
+        backends: harness_core::detection::detect_backends().await,
+        // True only of a fresh start; re-focusing an open project is not a resume.
+        resumed_head_session: false,
+        roles: session
+            .harness
+            .list_roles_probed()
+            .await
+            .into_iter()
+            .map(|r| RoleView {
+                name: r.name,
+                provider: r.provider,
+                model: r.model,
+                isolation: r.isolation,
+                can_edit_files: r.can_edit_files,
+                brief: r.brief,
+                available: r.available.unwrap_or(true),
+                unavailable_reason: r.unavailable_reason,
+            })
+            .collect(),
+    }
+}
+
+/// Canonical key for a project path. Canonicalized so the same project reached by two
+/// spellings is one entry rather than two competing sessions over the same worktrees.
+fn project_key(path: &str) -> String {
+    let path = PathBuf::from(path);
+    path.canonicalize().unwrap_or(path).display().to_string()
+}
+
+/// Which project a command is about: the one it names, or the one in front.
+async fn key_for(state: &AppState, project: Option<String>) -> Result<String, String> {
+    match project {
+        Some(path) => Ok(project_key(&path)),
+        None => state
+            .active
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| "no project is open".to_string()),
+    }
 }
 
 /// The running session's fleet, re-probed.
@@ -345,9 +502,13 @@ async fn start_session(
 /// `SessionInfo.roles` is a snapshot from session start; once a role can be reassigned
 /// mid-session the UI needs to re-read it rather than trust that snapshot.
 #[tauri::command]
-async fn session_roles(state: State<'_, AppState>) -> Result<Vec<RoleView>, String> {
-    let slot = state.session.lock().await;
-    let session = slot.as_ref().ok_or("no session running")?;
+async fn session_roles(
+    state: State<'_, AppState>,
+    project: Option<String>,
+) -> Result<Vec<RoleView>, String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
     Ok(session
         .harness
         .list_roles_probed()
@@ -367,27 +528,43 @@ async fn session_roles(state: State<'_, AppState>) -> Result<Vec<RoleView>, Stri
 }
 
 #[tauri::command]
-async fn send_turn(state: State<'_, AppState>, text: String) -> Result<(), String> {
-    let mut slot = state.session.lock().await;
-    let session = slot.as_mut().ok_or("no session running")?;
-    session
-        .orchestrator
+async fn send_turn(
+    state: State<'_, AppState>,
+    text: String,
+    project: Option<String>,
+) -> Result<(), String> {
+    let key = key_for(&state, project).await?;
+    let mut projects = state.projects.lock().await;
+    let session = projects.get_mut(&key).ok_or("no session for that project")?;
+
+    let Head::Live(orchestrator) = &mut session.head else {
+        return Err("that project's head agent is suspended; open the project first".into());
+    };
+    orchestrator
         .send(&text)
         .await
         .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
-async fn list_workers(state: State<'_, AppState>) -> Result<Vec<WorkerRecord>, String> {
-    let slot = state.session.lock().await;
-    let session = slot.as_ref().ok_or("no session running")?;
+async fn list_workers(
+    state: State<'_, AppState>,
+    project: Option<String>,
+) -> Result<Vec<WorkerRecord>, String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
     Ok(session.harness.workers().await)
 }
 
 #[tauri::command]
-async fn pending_merges(state: State<'_, AppState>) -> Result<Vec<(String, String)>, String> {
-    let slot = state.session.lock().await;
-    let session = slot.as_ref().ok_or("no session running")?;
+async fn pending_merges(
+    state: State<'_, AppState>,
+    project: Option<String>,
+) -> Result<Vec<(String, String)>, String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
     Ok(session.harness.pending_merges().await)
 }
 
@@ -398,9 +575,11 @@ async fn pending_merges(state: State<'_, AppState>) -> Result<Vec<(String, Strin
 async fn worker_patch(
     state: State<'_, AppState>,
     worker_id: String,
+    project: Option<String>,
 ) -> Result<harness_core::isolation::Patch, String> {
-    let slot = state.session.lock().await;
-    let session = slot.as_ref().ok_or("no session running")?;
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
     session
         .harness
         .worker_patch(&worker_id, 2_000)
@@ -411,9 +590,14 @@ async fn worker_patch(
 /// Land a worker's branch. This is the only path that merges, and it exists only here —
 /// the model cannot reach it, by design.
 #[tauri::command]
-async fn approve_merge(state: State<'_, AppState>, worker_id: String) -> Result<String, String> {
-    let slot = state.session.lock().await;
-    let session = slot.as_ref().ok_or("no session running")?;
+async fn approve_merge(
+    state: State<'_, AppState>,
+    worker_id: String,
+    project: Option<String>,
+) -> Result<String, String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
     session
         .harness
         .approve_merge(&worker_id)
@@ -422,9 +606,14 @@ async fn approve_merge(state: State<'_, AppState>, worker_id: String) -> Result<
 }
 
 #[tauri::command]
-async fn reject_merge(state: State<'_, AppState>, worker_id: String) -> Result<(), String> {
-    let slot = state.session.lock().await;
-    let session = slot.as_ref().ok_or("no session running")?;
+async fn reject_merge(
+    state: State<'_, AppState>,
+    worker_id: String,
+    project: Option<String>,
+) -> Result<(), String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
     session
         .harness
         .reject_merge(&worker_id)
@@ -432,29 +621,47 @@ async fn reject_merge(state: State<'_, AppState>, worker_id: String) -> Result<(
         .map_err(|e| format!("{e:#}"))
 }
 
+/// Token burn over the trailing window, summed across every open project.
+///
+/// Each project keeps its own database, but the limit being measured is the
+/// subscription's, which is per account. Reporting one project's burn would understate
+/// it by however many other projects are open — which is exactly the situation the
+/// project switcher creates.
 #[tauri::command]
 async fn usage(state: State<'_, AppState>, hours: i64) -> Result<Vec<UsageView>, String> {
-    let slot = state.session.lock().await;
-    let session = slot.as_ref().ok_or("no session running")?;
+    let projects = state.projects.lock().await;
+    if projects.is_empty() {
+        return Err("no project is open".into());
+    }
 
-    let rows = session
-        .harness
-        .usage_window(hours * 3600)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+    let mut totals: std::collections::BTreeMap<String, UsageView> = Default::default();
+    for session in projects.values() {
+        let rows = session
+            .harness
+            .usage_window(hours * 3600)
+            .await
+            .map_err(|e| format!("{e:#}"))?;
 
-    Ok(rows
-        .into_iter()
-        .map(|r| UsageView {
-            provider: r.provider,
-            input_tokens: r.usage.input_tokens,
-            output_tokens: r.usage.output_tokens,
-            cache_creation_tokens: r.usage.cache_creation_input_tokens,
-            cache_read_tokens: r.usage.cache_read_input_tokens,
-            cost_usd: r.cost_usd,
-            runs: r.runs,
-        })
-        .collect())
+        for row in rows {
+            let entry = totals.entry(row.provider.clone()).or_insert_with(|| UsageView {
+                provider: row.provider.clone(),
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                cost_usd: 0.0,
+                runs: 0,
+            });
+            entry.input_tokens += row.usage.input_tokens;
+            entry.output_tokens += row.usage.output_tokens;
+            entry.cache_creation_tokens += row.usage.cache_creation_input_tokens;
+            entry.cache_read_tokens += row.usage.cache_read_input_tokens;
+            entry.cost_usd += row.cost_usd;
+            entry.runs += row.runs;
+        }
+    }
+
+    Ok(totals.into_values().collect())
 }
 
 /// Find already-running local HTTP servers. This command never manages server processes.
@@ -567,15 +774,112 @@ fn set_webview_bounds(webview: &Webview, bounds: PreviewBounds) -> Result<(), St
         .map_err(|error| error.to_string())
 }
 
+/// Every open project, for the switcher.
+///
+/// The most-reported failure with tools like this is losing track of work — a session
+/// left running in a project nobody is looking at. So this reports every project's live
+/// worker counts, not just the one in front.
 #[tauri::command]
-async fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
-    let mut slot = state.session.lock().await;
-    if let Some(session) = slot.take() {
-        session
-            .orchestrator
-            .shutdown()
+async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectView>, String> {
+    let active = state.active.lock().await.clone();
+    let projects = state.projects.lock().await;
+
+    let mut out = Vec::new();
+    for (key, session) in projects.iter() {
+        let workers = session.harness.workers().await;
+        out.push(ProjectView {
+            project_root: key.clone(),
+            name: PathBuf::from(key)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| key.clone()),
+            active: active.as_deref() == Some(key.as_str()),
+            live: session.is_live(),
+            running_workers: workers.iter().filter(|w| !w.status.is_terminal()).count(),
+            pending_merges: session.harness.pending_merges().await.len(),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// Bring a project to the front, suspending the one being left.
+///
+/// A project only suspends once its workers have settled: shutting the head agent down
+/// while a worker is still running would strand the result nobody is left to report.
+#[tauri::command]
+async fn focus_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project: String,
+) -> Result<SessionInfo, String> {
+    let key = project_key(&project);
+    let previous = state.active.lock().await.clone();
+
+    let mut projects = state.projects.lock().await;
+    if !projects.contains_key(&key) {
+        return Err("that project is not open".into());
+    }
+
+    if let Some(previous) = previous.filter(|previous| previous != &key) {
+        if let Some(leaving) = projects.get_mut(&previous) {
+            leaving.suspend().await;
+        }
+    }
+
+    let session = projects.get_mut(&key).ok_or("that project is not open")?;
+    if !session.is_live() {
+        let resume = session
+            .harness
+            .resumable_backend_session()
             .await
             .map_err(|e| format!("{e:#}"))?;
+        let (orchestrator, events) = Orchestrator::start(
+            Arc::clone(&session.harness),
+            &session.project_root,
+            session.model.clone(),
+            Some(200),
+            resume,
+        )
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+        forward_events(app, Arc::clone(&session.harness), key.clone(), events);
+        session.head = Head::Live(Box::new(orchestrator));
+    }
+
+    let info = describe(&key, session).await;
+    drop(projects);
+    *state.active.lock().await = Some(key);
+    Ok(info)
+}
+
+/// Close a project: shut its head agent down and forget it. Worktrees, branches and its
+/// database stay on disk, so reopening it resumes rather than restarts.
+#[tauri::command]
+async fn close_project(state: State<'_, AppState>, project: Option<String>) -> Result<(), String> {
+    let key = key_for(&state, project).await?;
+
+    let mut projects = state.projects.lock().await;
+    let Some(mut session) = projects.remove(&key) else {
+        return Ok(());
+    };
+    if let Head::Live(orchestrator) = std::mem::replace(&mut session.head, Head::Suspended) {
+        orchestrator.shutdown().await.map_err(|e| format!("{e:#}"))?;
+    }
+    drop(projects);
+
+    let mut active = state.active.lock().await;
+    if active.as_deref() == Some(key.as_str()) {
+        *active = None;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
+    let keys: Vec<String> = state.projects.lock().await.keys().cloned().collect();
+    for key in keys {
+        close_project(state.clone(), Some(key)).await?;
     }
     Ok(())
 }
@@ -601,6 +905,9 @@ pub fn run() {
             inspect_fleet,
             save_role_assignments,
             session_roles,
+            list_projects,
+            focus_project,
+            close_project,
             start_session,
             send_turn,
             list_workers,
@@ -619,4 +926,52 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running the harness app");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_project_is_keyed_by_its_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("nested")).unwrap();
+
+        let direct = project_key(&root.join("nested").display().to_string());
+        let roundabout = project_key(&root.join("nested/../nested").display().to_string());
+
+        // Two spellings of one project must not open two sessions racing over the same
+        // worktrees and the same database.
+        assert_eq!(direct, roundabout);
+    }
+
+    #[test]
+    fn an_unopenable_path_still_produces_a_stable_key() {
+        // Canonicalize fails on a path that does not exist. The key still has to be
+        // deterministic, or the error surfaced to the user changes between calls.
+        let key = project_key("/definitely/not/here");
+        assert_eq!(key, project_key("/definitely/not/here"));
+        assert!(key.contains("not/here"));
+    }
+
+    #[test]
+    fn events_are_tagged_with_their_project_without_disturbing_the_event() {
+        let event = HarnessEvent::WorkerStatusChanged {
+            worker_id: "w-1".into(),
+            status: harness_core::event::WorkerStatus::Running,
+        };
+        let json = serde_json::to_value(ProjectEvent {
+            project: "/tmp/demo",
+            event: &event,
+        })
+        .unwrap();
+
+        assert_eq!(json["project"], "/tmp/demo");
+        // Flattened: the discriminator and payload must be unchanged, or every existing
+        // handler in the UI stops matching.
+        assert_eq!(json["type"], "worker_status_changed");
+        assert_eq!(json["worker_id"], "w-1");
+        assert_eq!(json["status"], "running");
+    }
 }

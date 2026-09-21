@@ -115,6 +115,28 @@ On Linux the desktop app additionally needs `libgtk-3-dev`, `libwebkit2gtk-4.1-d
 `libayatana-appindicator3-dev` and `librsvg2-dev`. macOS needs none of these — it uses
 WKWebView.
 
+## Working on several projects
+
+The sidebar keeps more than one project open at once. Each gets its own engine, its own
+worktrees, its own `.harness/sessions.db`, and its own MCP server on its own port — the
+engine was already per-instance, so projects genuinely do not share state.
+
+What they do share is your subscription, so the design protects it:
+
+- **Only the project in front keeps a head agent running.** Switching away shuts the
+  other one down, which is the expensive part — a live `claude -p` process holding the
+  context floor. Switching back resumes the same conversation rather than starting over,
+  so the floor is not paid twice.
+- **A project will not suspend while its workers are running**, since their results are
+  reported through that session. It suspends once they settle.
+- **The budget meter sums every open project.** Each project's usage lives in its own
+  database, but the five-hour window being measured belongs to the account, so reporting
+  one project's burn would understate it by however many others are open.
+
+The sidebar shows running workers and waiting diffs for *every* project, not just the
+active one. That is deliberate: the most common way people lose work with tools like this
+is forgetting something is still running somewhere they navigated away from.
+
 ## Attaching a local model
 
 Two ways in, reaching the same server but differing in what the worker can do.
@@ -191,7 +213,7 @@ Preview discovery and URL-safety tests run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **108 engine tests, 113 including the Tauri shell** — worth stating explicitly,
+That makes **108 engine tests, 116 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats

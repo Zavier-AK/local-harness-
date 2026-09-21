@@ -6,9 +6,19 @@ import HeadChat from "./HeadChat";
 import WorkerRail from "./WorkerRail";
 import DiffDrawer from "./DiffDrawer";
 import FleetDrawer from "./FleetDrawer";
+import ProjectSidebar from "./ProjectSidebar";
 import BudgetMeter from "./BudgetMeter";
 import PreviewPanel from "./PreviewPanel";
-import type { ChatItem, HarnessEvent, Role, SessionInfo, UsageRow, Worker } from "./types";
+import type {
+  ChatItem,
+  HarnessEvent,
+  ProjectHarnessEvent,
+  ProjectView,
+  Role,
+  SessionInfo,
+  UsageRow,
+  Worker,
+} from "./types";
 
 export default function App() {
   const [session, setSession] = useState<SessionInfo | null>(null);
@@ -20,9 +30,58 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [activePane, setActivePane] = useState<"chat" | "preview">("chat");
   const [fleetOpen, setFleetOpen] = useState(false);
+  const [projects, setProjects] = useState<ProjectView[]>([]);
+  const [switching, setSwitching] = useState(false);
+  const [adding, setAdding] = useState(false);
 
   /** The orchestrator's run id, so its events are told apart from workers'. */
   const headRun = useRef<string | null>(null);
+
+  const refreshProjects = useCallback(async () => {
+    try {
+      setProjects(await invoke<ProjectView[]>("list_projects"));
+    } catch {
+      // The switcher is a readout; a failure here must not break the app.
+    }
+  }, []);
+
+  /** Switch projects, resetting the panes that belong to the one being left. */
+  const focusProject = useCallback(
+    async (projectRoot: string) => {
+      setSwitching(true);
+      try {
+        const info = await invoke<SessionInfo>("focus_project", { project: projectRoot });
+        headRun.current = null;
+        setChat([]);
+        setWorkers({});
+        setSelectedWorker(null);
+        setBusy(false);
+        setFleetOpen(false);
+        setSession(info);
+        await refreshProjects();
+      } catch (err) {
+        setChat((prev) => [...prev, { kind: "notice", text: String(err), tone: "error" }]);
+      } finally {
+        setSwitching(false);
+      }
+    },
+    [refreshProjects],
+  );
+
+  const closeProject = useCallback(
+    async (projectRoot: string) => {
+      await invoke("close_project", { project: projectRoot }).catch(() => {});
+      const remaining = await invoke<ProjectView[]>("list_projects").catch(() => []);
+      setProjects(remaining);
+      // Closing the project in front leaves nothing to show; fall back to another open
+      // one, or all the way to the start gate.
+      if (session?.project_root === projectRoot) {
+        if (remaining.length > 0) await focusProject(remaining[0].project_root);
+        else setSession(null);
+      }
+    },
+    [session, focusProject],
+  );
 
   const refreshUsage = useCallback(async () => {
     try {
@@ -35,7 +94,15 @@ export default function App() {
   useEffect(() => {
     if (!session) return;
 
-    const unlisten = listen<HarnessEvent>("harness://event", ({ payload }) => {
+    const unlisten = listen<ProjectHarnessEvent>("harness://event", ({ payload }) => {
+      // Every open project emits on this one channel. Another project's events must not
+      // land in this project's chat or worker rail — but they do change what the sidebar
+      // should say, which is the whole point of showing work happening elsewhere.
+      if (payload.project !== session.project_root) {
+        void refreshProjects();
+        return;
+      }
+
       setChat((prev) => reduceChat(prev, payload, headRun));
       setWorkers((prev) => reduceWorkers(prev, payload));
 
@@ -47,17 +114,24 @@ export default function App() {
         setRateLimited(false);
         void refreshUsage();
       }
-      if (payload.type === "worker_finished") void refreshUsage();
+      if (payload.type === "worker_finished") {
+        void refreshUsage();
+        void refreshProjects();
+      }
+      if (payload.type === "worker_spawned" || payload.type === "merge_requested") {
+        void refreshProjects();
+      }
     });
 
     // The five-hour window may already have burn in it from an earlier session in this
     // project, so show it on open rather than only after the first run finishes.
     void refreshUsage();
+    void refreshProjects();
 
     return () => {
       void unlisten.then((off) => off());
     };
-  }, [session, refreshUsage]);
+  }, [session, refreshUsage, refreshProjects]);
 
   async function send(text: string) {
     setChat((prev) => [...prev, { kind: "user", text }]);
@@ -128,7 +202,13 @@ export default function App() {
       </header>
 
       <div className="panes">
-        <main className="main-pane">
+        <ProjectSidebar
+          projects={projects}
+          onFocus={focusProject}
+          onClose={closeProject}
+          onAdd={() => setAdding(true)}
+        />
+        <main className={`main-pane ${switching ? "switching" : ""}`}>
           <nav className="pane-tabs" role="tablist" aria-label="Main pane">
             <button
               role="tab"
@@ -181,6 +261,19 @@ export default function App() {
           onChangeFleet={() => setFleetOpen(true)}
         />
       </div>
+
+      {adding && (
+        <div className="drawer-scrim" onClick={() => setAdding(false)}>
+          <div className="add-project" onClick={(event) => event.stopPropagation()}>
+            <StartGate
+              onStarted={(info) => {
+                setAdding(false);
+                void focusProject(info.project_root);
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       {fleetOpen && (
         <FleetDrawer
