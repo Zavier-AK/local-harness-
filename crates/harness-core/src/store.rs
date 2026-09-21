@@ -148,6 +148,32 @@ impl Store {
             .flatten())
     }
 
+    /// Most recent Claude conversation created by this harness for a project.
+    ///
+    /// This deliberately does not use Claude's global `--continue`: that could select an
+    /// unrelated manual conversation from the same directory. The persisted id lets the
+    /// next app process resume only a head session it owns.
+    pub fn latest_orchestrator_backend_session(
+        &self,
+        project_root: &str,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT runs.backend_session_id
+                 FROM runs
+                 JOIN sessions ON sessions.id = runs.session_id
+                 WHERE sessions.project_root = ?1
+                   AND runs.role = 'orchestrator'
+                   AND runs.backend_session_id IS NOT NULL
+                 ORDER BY runs.started_at DESC
+                 LIMIT 1",
+                params![project_root],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
     pub fn append_event(&self, session_id: &str, event: &HarnessEvent) -> Result<()> {
         self.conn.execute(
             "INSERT INTO events (session_id, stream_key, at, payload) VALUES (?1, ?2, ?3, ?4)",
@@ -264,7 +290,9 @@ mod tests {
 
     fn store_with_session() -> Store {
         let store = Store::in_memory().unwrap();
-        store.create_session("s1", Some("test"), "/tmp/project").unwrap();
+        store
+            .create_session("s1", Some("test"), "/tmp/project")
+            .unwrap();
         store
     }
 
@@ -285,8 +313,12 @@ mod tests {
     #[test]
     fn rolls_usage_up_per_provider() {
         let store = store_with_session();
-        store.create_run("r1", "s1", "planner", "claude", Some("opus"), "readonly").unwrap();
-        store.create_run("r2", "s1", "tester", "codex", None, "readonly").unwrap();
+        store
+            .create_run("r1", "s1", "planner", "claude", Some("opus"), "readonly")
+            .unwrap();
+        store
+            .create_run("r2", "s1", "tester", "codex", None, "readonly")
+            .unwrap();
 
         let claude_usage = Usage {
             input_tokens: 10,
@@ -294,8 +326,30 @@ mod tests {
             cache_creation_input_tokens: 15_105,
             cache_read_input_tokens: 18_766,
         };
-        store.record_usage("s1", "r1", "claude", Some("opus"), &claude_usage, Some(0.06)).unwrap();
-        store.record_usage("s1", "r2", "codex", None, &Usage { input_tokens: 5, output_tokens: 7, ..Default::default() }, None).unwrap();
+        store
+            .record_usage(
+                "s1",
+                "r1",
+                "claude",
+                Some("opus"),
+                &claude_usage,
+                Some(0.06),
+            )
+            .unwrap();
+        store
+            .record_usage(
+                "s1",
+                "r2",
+                "codex",
+                None,
+                &Usage {
+                    input_tokens: 5,
+                    output_tokens: 7,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
 
         let window = store.usage_window(3600).unwrap();
         assert_eq!(window.len(), 2);
@@ -315,11 +369,28 @@ mod tests {
     #[test]
     fn usage_window_excludes_older_rows() {
         let store = store_with_session();
-        store.create_run("r1", "s1", "planner", "claude", None, "readonly").unwrap();
-        store.record_usage("s1", "r1", "claude", None, &Usage { output_tokens: 1, ..Default::default() }, None).unwrap();
+        store
+            .create_run("r1", "s1", "planner", "claude", None, "readonly")
+            .unwrap();
+        store
+            .record_usage(
+                "s1",
+                "r1",
+                "claude",
+                None,
+                &Usage {
+                    output_tokens: 1,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
 
         // Backdate it past the window.
-        store.conn.execute("UPDATE usage SET at = at - 7200", []).unwrap();
+        store
+            .conn
+            .execute("UPDATE usage SET at = at - 7200", [])
+            .unwrap();
         assert!(store.usage_window(3600).unwrap().is_empty());
         // ...but it still counts toward the session total.
         assert_eq!(store.session_usage("s1").unwrap().runs, 1);
@@ -328,10 +399,45 @@ mod tests {
     #[test]
     fn round_trips_backend_session_id() {
         let store = store_with_session();
-        store.create_run("r1", "s1", "planner", "claude", None, "readonly").unwrap();
+        store
+            .create_run("r1", "s1", "planner", "claude", None, "readonly")
+            .unwrap();
         assert_eq!(store.backend_session_id("r1").unwrap(), None);
 
         store.set_backend_session_id("r1", "abc-123").unwrap();
-        assert_eq!(store.backend_session_id("r1").unwrap(), Some("abc-123".into()));
+        assert_eq!(
+            store.backend_session_id("r1").unwrap(),
+            Some("abc-123".into())
+        );
+    }
+
+    #[test]
+    fn finds_only_the_latest_harness_head_session_for_a_project() {
+        let store = store_with_session();
+        store
+            .create_run("worker", "s1", "builder", "claude", None, "worktree")
+            .unwrap();
+        store
+            .set_backend_session_id("worker", "worker-session")
+            .unwrap();
+        store
+            .create_run("head", "s1", "orchestrator", "claude", None, "readonly")
+            .unwrap();
+        store
+            .set_backend_session_id("head", "head-session")
+            .unwrap();
+
+        assert_eq!(
+            store
+                .latest_orchestrator_backend_session("/tmp/project")
+                .unwrap(),
+            Some("head-session".into())
+        );
+        assert_eq!(
+            store
+                .latest_orchestrator_backend_session("/tmp/other")
+                .unwrap(),
+            None
+        );
     }
 }

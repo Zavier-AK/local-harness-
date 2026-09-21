@@ -72,6 +72,29 @@ fn base_args(role: &Role, streaming_input: bool) -> Vec<String> {
     args
 }
 
+fn session_args(
+    role: &Role,
+    mcp_config: Option<&str>,
+    append_system_prompt: Option<&str>,
+    resume_session_id: Option<&str>,
+) -> Vec<String> {
+    let mut args = base_args(role, true);
+
+    if let Some(session_id) = resume_session_id {
+        args.push("--resume".into());
+        args.push(session_id.into());
+    }
+    if let Some(config) = mcp_config {
+        args.push("--mcp-config".into());
+        args.push(config.into());
+    }
+    if let Some(prompt) = append_system_prompt {
+        args.push("--append-system-prompt".into());
+        args.push(prompt.into());
+    }
+    args
+}
+
 fn spawn(cwd: &Path, args: &[String]) -> Result<Child> {
     let mut cmd = Command::new("claude");
     cmd.args(args)
@@ -180,19 +203,10 @@ impl ClaudeSession {
         role: &Role,
         mcp_config: Option<&str>,
         append_system_prompt: Option<&str>,
+        resume_session_id: Option<&str>,
     ) -> Result<(Self, UnboundedReceiver<HarnessEvent>)> {
         let run_id = run_id.into();
-        let mut args = base_args(role, true);
-
-        if let Some(config) = mcp_config {
-            args.push("--mcp-config".into());
-            args.push(config.to_string());
-        }
-
-        if let Some(prompt) = append_system_prompt {
-            args.push("--append-system-prompt".into());
-            args.push(prompt.to_string());
-        }
+        let args = session_args(role, mcp_config, append_system_prompt, resume_session_id);
 
         let mut child = spawn(cwd, &args)?;
         log_stderr(&mut child, run_id.clone());
@@ -220,7 +234,12 @@ impl ClaudeSession {
         });
 
         Ok((
-            Self { child, stdin, run_id, backend_session_id: None },
+            Self {
+                child,
+                stdin,
+                run_id,
+                backend_session_id: None,
+            },
             rx,
         ))
     }
@@ -308,6 +327,23 @@ mod tests {
         let args = base_args(&role(Isolation::Readonly, &["Read"]), true);
         assert_eq!(arg_value(&args, "--input-format"), Some("stream-json"));
         assert!(args.iter().any(|a| a == "--include-partial-messages"));
+    }
+
+    #[test]
+    fn orchestrator_resumes_only_the_requested_session() {
+        let role = role(Isolation::Readonly, &["Read"]);
+        let args = session_args(
+            &role,
+            Some(r#"{"mcpServers":{}}"#),
+            Some("delegate work"),
+            Some("harness-session-123"),
+        );
+        assert_eq!(arg_value(&args, "--resume"), Some("harness-session-123"));
+        assert!(!args.iter().any(|arg| arg == "--continue" || arg == "-c"));
+        assert_eq!(
+            arg_value(&args, "--mcp-config"),
+            Some(r#"{"mcpServers":{}}"#)
+        );
     }
 
     #[test]

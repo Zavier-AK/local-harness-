@@ -1,9 +1,10 @@
-import type { Role, Worker } from "./types";
+import type { DetectedBackend, Role, Worker } from "./types";
 import { totalInput } from "./types";
 
 type Props = {
   workers: Worker[];
   roles: Role[];
+  backends: DetectedBackend[];
   selected: string | null;
   onSelect: (id: string) => void;
 };
@@ -17,10 +18,30 @@ const STATUS_LABEL: Record<Worker["status"], string> = {
   cancelled: "cancelled",
 };
 
-export default function WorkerRail({ workers, roles, selected, onSelect }: Props) {
+export default function WorkerRail({ workers, roles, backends, selected, onSelect }: Props) {
   return (
     <aside className="rail">
       <h2>Workers</h2>
+
+      <h3 className="first">Detected</h3>
+      <ul className="backend-inventory">
+        {backends.map((backend) => (
+          <li key={backend.id} title={backend.message}>
+            <span className={`backend-dot ${backend.available ? "ready" : "down"}`} />
+            <span>
+              <span className="backend-label">{backend.label}</span>
+              <span className="muted mono fleet-backend">
+                {backend.available
+                  ? backend.models
+                      .filter((model) => model.capability === "chat")
+                      .map((model) => model.id)
+                      .join(", ") || "connected"
+                  : "not detected"}
+              </span>
+            </span>
+          </li>
+        ))}
+      </ul>
 
       {workers.length === 0 && (
         <div className="rail-empty">

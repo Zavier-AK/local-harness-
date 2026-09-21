@@ -6,11 +6,11 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use harness_core::engine::Harness;
+use harness_core::engine::RoleInfo as RoleRow;
 use harness_core::event::HarnessEvent;
 use harness_core::isolation::Workspaces;
 use harness_core::mcp;
 use harness_core::orchestrator::Orchestrator;
-use harness_core::engine::RoleInfo as RoleRow;
 use harness_core::roles::RoleRegistry;
 use harness_core::store::Store;
 use std::path::PathBuf;
@@ -24,7 +24,10 @@ const TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Parser)]
-#[command(name = "harness", about = "Hierarchical multi-agent harness over subscription CLIs")]
+#[command(
+    name = "harness",
+    about = "Hierarchical multi-agent harness over subscription CLIs"
+)]
 struct Cli {
     /// Project root. Workers' worktrees are created beneath it.
     #[arg(long, global = true, default_value = ".")]
@@ -100,7 +103,12 @@ fn render(event: &HarnessEvent, streaming: &mut bool) {
     };
 
     match event {
-        HarnessEvent::SessionStarted { provider, model, mcp_servers, .. } => {
+        HarnessEvent::SessionStarted {
+            provider,
+            model,
+            mcp_servers,
+            ..
+        } => {
             end_stream(streaming);
             println!(
                 "  · session up (provider: {}, model: {}, mcp: [{}])",
@@ -109,12 +117,20 @@ fn render(event: &HarnessEvent, streaming: &mut bool) {
                 mcp_servers.join(", ")
             );
         }
-        HarnessEvent::AssistantText { text, partial: true, .. } => {
+        HarnessEvent::AssistantText {
+            text,
+            partial: true,
+            ..
+        } => {
             print!("{text}");
             let _ = std::io::stdout().flush();
             *streaming = true;
         }
-        HarnessEvent::AssistantText { text, partial: false, .. } => {
+        HarnessEvent::AssistantText {
+            text,
+            partial: false,
+            ..
+        } => {
             // Already shown as deltas when partial messages are enabled.
             if !*streaming {
                 println!("{text}");
@@ -124,11 +140,23 @@ fn render(event: &HarnessEvent, streaming: &mut bool) {
             end_stream(streaming);
             println!("  → {name}");
         }
-        HarnessEvent::WorkerSpawned { worker_id, role, provider, isolation, .. } => {
+        HarnessEvent::WorkerSpawned {
+            worker_id,
+            role,
+            provider,
+            isolation,
+            ..
+        } => {
             end_stream(streaming);
             println!("  ⚙ worker {worker_id} [{role} via {provider}, {isolation}]");
         }
-        HarnessEvent::WorkerFinished { worker_id, usage, diff, is_error, .. } => {
+        HarnessEvent::WorkerFinished {
+            worker_id,
+            usage,
+            diff,
+            is_error,
+            ..
+        } => {
             end_stream(streaming);
             let files = diff.as_ref().map(|d| d.files_changed).unwrap_or(0);
             println!(
@@ -138,18 +166,35 @@ fn render(event: &HarnessEvent, streaming: &mut bool) {
                 usage.output_tokens
             );
         }
-        HarnessEvent::MergeRequested { worker_id, branch, diff } => {
+        HarnessEvent::MergeRequested {
+            worker_id,
+            branch,
+            diff,
+        } => {
             end_stream(streaming);
             println!(
                 "  ⏸ merge proposed for {worker_id} on {branch}: {} files, +{} -{} — awaiting approval",
                 diff.files_changed, diff.insertions, diff.deletions
             );
         }
-        HarnessEvent::ApiRetry { attempt, max_retries, error, retry_delay_ms, .. } => {
+        HarnessEvent::ApiRetry {
+            attempt,
+            max_retries,
+            error,
+            retry_delay_ms,
+            ..
+        } => {
             end_stream(streaming);
-            println!("  ! {error} (attempt {attempt}/{max_retries}, retrying in {retry_delay_ms}ms)");
+            println!(
+                "  ! {error} (attempt {attempt}/{max_retries}, retrying in {retry_delay_ms}ms)"
+            );
         }
-        HarnessEvent::RunFinished { usage, cost_usd, is_error, .. } => {
+        HarnessEvent::RunFinished {
+            usage,
+            cost_usd,
+            is_error,
+            ..
+        } => {
             end_stream(streaming);
             println!(
                 "  · turn finished{} — {} in ({} cache-create, {} cache-read) / {} out{}",
@@ -158,7 +203,9 @@ fn render(event: &HarnessEvent, streaming: &mut bool) {
                 usage.cache_creation_input_tokens,
                 usage.cache_read_input_tokens,
                 usage.output_tokens,
-                cost_usd.map(|c| format!(", notional ${c:.4}")).unwrap_or_default()
+                cost_usd
+                    .map(|c| format!(", notional ${c:.4}"))
+                    .unwrap_or_default()
             );
         }
         HarnessEvent::Error { message, .. } => {
@@ -217,7 +264,10 @@ fn build_harness(cli: &Cli, events: harness_core::agents::EventSink) -> Result<A
         None => Store::in_memory()?,
     };
 
-    let project = cli.project.canonicalize().unwrap_or_else(|_| cli.project.clone());
+    let project = cli
+        .project
+        .canonicalize()
+        .unwrap_or_else(|_| cli.project.clone());
     let session_id = format!("s-{}", uuid_like());
     store.create_session(&session_id, None, &project.display().to_string())?;
 
@@ -233,7 +283,13 @@ fn build_harness(cli: &Cli, events: harness_core::agents::EventSink) -> Result<A
 /// Small unique id without pulling uuid into this crate's surface.
 fn uuid_like() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    format!("{:x}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos())
+    format!(
+        "{:x}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    )
 }
 
 #[tokio::main]
@@ -261,7 +317,10 @@ async fn main() -> Result<()> {
                     let backend = format!(
                         "{}{}",
                         role.provider,
-                        role.model.as_ref().map(|m| format!("/{m}")).unwrap_or_default()
+                        role.model
+                            .as_ref()
+                            .map(|m| format!("/{m}"))
+                            .unwrap_or_default()
                     );
                     (role.name.clone(), backend, role)
                 })
@@ -269,33 +328,61 @@ async fn main() -> Result<()> {
 
             // Size both columns to their contents; a long provider/model pair such as
             // `openai_compat/qwen3.6-35b-a3b` otherwise shunts every later column right.
-            let name_w = rows.iter().map(|(n, _, _)| n.len()).max().unwrap_or(8).max(8);
-            let backend_w = rows.iter().map(|(_, b, _)| b.len()).max().unwrap_or(10).max(10);
+            let name_w = rows
+                .iter()
+                .map(|(n, _, _)| n.len())
+                .max()
+                .unwrap_or(8)
+                .max(8);
+            let backend_w = rows
+                .iter()
+                .map(|(_, b, _)| b.len())
+                .max()
+                .unwrap_or(10)
+                .max(10);
 
             for (name, backend, role) in &rows {
                 println!(
                     "{name:<name_w$}  {backend:<backend_w$}  {:<9} {:<10} {}",
                     role.isolation,
-                    if role.can_edit_files { "can edit" } else { "read-only" },
-                    if role.available == Some(false) { "UNAVAILABLE" } else { "ready" },
+                    if role.can_edit_files {
+                        "can edit"
+                    } else {
+                        "read-only"
+                    },
+                    if role.available == Some(false) {
+                        "UNAVAILABLE"
+                    } else {
+                        "ready"
+                    },
                 );
             }
 
             // The reasons are the actionable part: each one names what to install or start.
-            let blocked: Vec<_> = roles.iter().filter(|r| r.available == Some(false)).collect();
+            let blocked: Vec<_> = roles
+                .iter()
+                .filter(|r| r.available == Some(false))
+                .collect();
             if !blocked.is_empty() {
                 println!("\n{} role(s) cannot run:", blocked.len());
                 for role in blocked {
                     println!(
                         "  {}: {}",
                         role.name,
-                        role.unavailable_reason.as_deref().unwrap_or("backend not reachable")
+                        role.unavailable_reason
+                            .as_deref()
+                            .unwrap_or("backend not reachable")
                     );
                 }
             }
         }
 
-        Command::RunWorker { role, task, context_file, patch } => {
+        Command::RunWorker {
+            role,
+            task,
+            context_file,
+            patch,
+        } => {
             let renderer = spawn_renderer(rx, Arc::downgrade(&harness), None);
             let record = harness.delegate(role, task, context_file.clone()).await?;
 
@@ -327,7 +414,11 @@ async fn main() -> Result<()> {
             drain(renderer).await;
         }
 
-        Command::Chat { turns, model, max_turns } => {
+        Command::Chat {
+            turns,
+            model,
+            max_turns,
+        } => {
             // The orchestrator's own stream is separate from the worker stream; merge
             // them onto one renderer so the transcript reads in order.
             let worker_events = rx;
@@ -336,6 +427,7 @@ async fn main() -> Result<()> {
                 &cli.project,
                 model.clone(),
                 Some(*max_turns),
+                None,
             )
             .await?;
 
