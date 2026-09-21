@@ -5,6 +5,8 @@
 //! commands the UI calls. Keeping it this small is what lets the same engine be driven
 //! headlessly by `harness-cli` and tested without a desktop.
 
+mod preview_probe;
+
 use harness_core::engine::{Harness, WorkerRecord};
 use harness_core::event::HarnessEvent;
 use harness_core::isolation::Workspaces;
@@ -12,14 +14,20 @@ use harness_core::orchestrator::Orchestrator;
 use harness_core::roles::RoleRegistry;
 use harness_core::store::Store;
 use harness_core::{DetectedBackend, FleetInspection, RoleModelPatch};
-use serde::Serialize;
+use preview_probe::{discover_dev_servers, parse_loopback_http_url, DevServer};
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::webview::{NewWindowResponse, WebviewBuilder};
+use tauri::{
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Webview, WebviewUrl,
+};
 use tokio::sync::Mutex;
 
 /// Event channel the UI subscribes to.
 const EVENT_CHANNEL: &str = "harness://event";
+const PREVIEW_LABEL: &str = "preview";
 
 /// The default fleet, baked in so a project without a `roles.toml` can be given one
 /// without the user hunting for a template.
@@ -28,6 +36,7 @@ const DEFAULT_ROLES: &str = include_str!("../../../roles.toml");
 #[derive(Default)]
 pub struct AppState {
     session: Mutex<Option<Session>>,
+    preview: std::sync::Mutex<Option<Webview>>,
 }
 
 struct Session {
@@ -75,6 +84,30 @@ pub struct UsageView {
     cache_read_tokens: u64,
     cost_usd: f64,
     runs: u64,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewBounds {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+impl PreviewBounds {
+    fn validate(self) -> Result<Self, String> {
+        let values = [self.x, self.y, self.width, self.height];
+        if values.iter().any(|value| !value.is_finite())
+            || self.x < 0.0
+            || self.y < 0.0
+            || self.width < 1.0
+            || self.height < 1.0
+        {
+            return Err("invalid preview bounds".into());
+        }
+        Ok(self)
+    }
 }
 
 /// Forward engine events to the webview, and feed them back to the engine so rate-limit
@@ -213,16 +246,15 @@ async fn start_session(
         tx,
     ));
 
-    let (orchestrator, orchestrator_events) =
-        Orchestrator::start(
-            Arc::clone(&harness),
-            &project,
-            model,
-            Some(200),
-            resume_session_id,
-        )
-            .await
-            .map_err(|e| format!("{e:#}"))?;
+    let (orchestrator, orchestrator_events) = Orchestrator::start(
+        Arc::clone(&harness),
+        &project,
+        model,
+        Some(200),
+        resume_session_id,
+    )
+    .await
+    .map_err(|e| format!("{e:#}"))?;
     let resumed_head_session = orchestrator.resumed_backend_session();
 
     // Worker and orchestrator streams are separate; the UI keys them apart by run id.
@@ -252,7 +284,10 @@ async fn start_session(
             .collect(),
     };
 
-    *slot = Some(Session { orchestrator, harness });
+    *slot = Some(Session {
+        orchestrator,
+        harness,
+    });
     Ok(info)
 }
 
@@ -260,7 +295,11 @@ async fn start_session(
 async fn send_turn(state: State<'_, AppState>, text: String) -> Result<(), String> {
     let mut slot = state.session.lock().await;
     let session = slot.as_mut().ok_or("no session running")?;
-    session.orchestrator.send(&text).await.map_err(|e| format!("{e:#}"))
+    session
+        .orchestrator
+        .send(&text)
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -343,11 +382,125 @@ async fn usage(state: State<'_, AppState>, hours: i64) -> Result<Vec<UsageView>,
         .collect())
 }
 
+/// Find already-running local HTTP servers. This command never manages server processes.
+#[tauri::command]
+async fn probe_preview_servers(
+    project_root: String,
+    worker_roots: Vec<String>,
+    excluded_ports: Vec<u16>,
+) -> Vec<DevServer> {
+    discover_dev_servers(
+        PathBuf::from(project_root),
+        worker_roots.into_iter().map(PathBuf::from).collect(),
+        excluded_ports.into_iter().collect::<HashSet<_>>(),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn create_preview(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+    bounds: PreviewBounds,
+) -> Result<String, String> {
+    let url = parse_loopback_http_url(&url)?;
+    let bounds = bounds.validate()?;
+    let mut slot = state.preview.lock().map_err(|_| "preview lock poisoned")?;
+
+    let webview = if let Some(webview) = slot.as_ref() {
+        webview.clone()
+    } else {
+        let window = app
+            .get_window("main")
+            .ok_or_else(|| "main window is unavailable".to_string())?;
+        let builder = WebviewBuilder::new(PREVIEW_LABEL, WebviewUrl::External(url.clone()))
+            .on_navigation(preview_probe::is_loopback_http_url)
+            .on_new_window(|_, _| NewWindowResponse::Deny);
+        let webview = window
+            .add_child(
+                builder,
+                LogicalPosition::new(bounds.x, bounds.y),
+                LogicalSize::new(bounds.width, bounds.height),
+            )
+            .map_err(|error| error.to_string())?;
+        *slot = Some(webview.clone());
+        webview
+    };
+    drop(slot);
+
+    set_webview_bounds(&webview, bounds)?;
+    webview.show().map_err(|error| error.to_string())?;
+    Ok(url.to_string())
+}
+
+#[tauri::command]
+async fn set_preview_bounds(
+    state: State<'_, AppState>,
+    bounds: PreviewBounds,
+) -> Result<(), String> {
+    let bounds = bounds.validate()?;
+    let webview = preview_webview(&state)?;
+    set_webview_bounds(&webview, bounds)
+}
+
+#[tauri::command]
+async fn set_preview_visible(state: State<'_, AppState>, visible: bool) -> Result<(), String> {
+    let webview = match preview_webview(&state) {
+        Ok(webview) => webview,
+        // Hiding before the preview has been opened is already the desired state.
+        Err(_) if !visible => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if visible {
+        webview.show()
+    } else {
+        webview.hide()
+    }
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn navigate_preview(state: State<'_, AppState>, url: String) -> Result<String, String> {
+    let url = parse_loopback_http_url(&url)?;
+    preview_webview(&state)?
+        .navigate(url.clone())
+        .map_err(|error| error.to_string())?;
+    Ok(url.to_string())
+}
+
+#[tauri::command]
+async fn reload_preview(state: State<'_, AppState>) -> Result<(), String> {
+    preview_webview(&state)?
+        .reload()
+        .map_err(|error| error.to_string())
+}
+
+fn preview_webview(state: &State<'_, AppState>) -> Result<Webview, String> {
+    state
+        .preview
+        .lock()
+        .map_err(|_| "preview lock poisoned".to_string())?
+        .clone()
+        .ok_or_else(|| "open the Preview tab first".to_string())
+}
+
+fn set_webview_bounds(webview: &Webview, bounds: PreviewBounds) -> Result<(), String> {
+    webview
+        .set_position(LogicalPosition::new(bounds.x, bounds.y))
+        .and_then(|_| webview.set_size(LogicalSize::new(bounds.width, bounds.height)))
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 async fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
     let mut slot = state.session.lock().await;
     if let Some(session) = slot.take() {
-        session.orchestrator.shutdown().await.map_err(|e| format!("{e:#}"))?;
+        session
+            .orchestrator
+            .shutdown()
+            .await
+            .map_err(|e| format!("{e:#}"))?;
     }
     Ok(())
 }
@@ -380,6 +533,12 @@ pub fn run() {
             approve_merge,
             reject_merge,
             usage,
+            probe_preview_servers,
+            create_preview,
+            set_preview_bounds,
+            set_preview_visible,
+            navigate_preview,
+            reload_preview,
             stop_session,
         ])
         .run(tauri::generate_context!())

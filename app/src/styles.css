@@ -90,12 +90,14 @@ button.ghost:hover:not(:disabled) { background: var(--accent-soft); color: var(-
 
 input, textarea, select {
   font: inherit;
-  width: 100%;
   padding: 9px 11px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.22);
   color: var(--text);
+}
+input, textarea {
+  width: 100%;
   resize: none;
 }
 input::placeholder, textarea::placeholder { color: var(--muted); }
@@ -141,10 +143,29 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); ou
 .titlebar .mono { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .panes { flex: 1; display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
+.main-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.pane-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 7px 20px 6px;
+  min-height: 43px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.pane-tabs button {
+  border: 0;
+  border-radius: 6px;
+  padding: 4px 14px;
+  color: var(--muted);
+  background: transparent;
+}
+.pane-tabs button.active { color: var(--text); background: var(--accent-soft); }
+.tab-panel { flex: 1; min-height: 0; }
+.tab-panel.hidden { display: none; }
 
 /* ---------- head chat ---------- */
 
-.chat { display: flex; flex-direction: column; min-width: 0; }
+.chat { display: flex; flex-direction: column; min-width: 0; height: 100%; }
 .transcript { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 10px; }
 
 .bubble {
@@ -201,6 +222,37 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); ou
   background: var(--panel);
 }
 .composer button { align-self: flex-end; }
+
+/* ---------- preview ---------- */
+
+.preview { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.preview-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.preview-toolbar input { flex: 1 1 auto; min-width: 120px; }
+.preview-toolbar select { flex: 0 1 210px; min-width: 130px; }
+.preview-toolbar select:first-of-type { flex-basis: 145px; }
+.preview-toolbar button { flex: 0 0 auto; }
+.preview-error {
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--error);
+  background: var(--error-soft);
+  color: var(--error);
+  font-size: 12px;
+}
+.preview-viewport {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.18);
+}
 
 /* ---------- worker rail ---------- */
 

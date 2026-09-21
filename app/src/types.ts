@@ -117,6 +117,7 @@ export type Worker = {
   role: string;
   provider: string;
   isolation: string;
+  cwd: string;
   status: WorkerStatus;
   summary: string;
   usage: Usage;

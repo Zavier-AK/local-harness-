@@ -6,6 +6,7 @@ import HeadChat from "./HeadChat";
 import WorkerRail from "./WorkerRail";
 import DiffDrawer from "./DiffDrawer";
 import BudgetMeter from "./BudgetMeter";
+import PreviewPanel from "./PreviewPanel";
 import type { ChatItem, HarnessEvent, Role, SessionInfo, UsageRow, Worker } from "./types";
 
 export default function App() {
@@ -16,6 +17,7 @@ export default function App() {
   const [rateLimited, setRateLimited] = useState(false);
   const [selectedWorker, setSelectedWorker] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [activePane, setActivePane] = useState<"chat" | "preview">("chat");
 
   /** The orchestrator's run id, so its events are told apart from workers'. */
   const headRun = useRef<string | null>(null);
@@ -124,7 +126,50 @@ export default function App() {
       </header>
 
       <div className="panes">
-        <HeadChat items={chat} busy={busy} onSend={send} onSelectWorker={setSelectedWorker} />
+        <main className="main-pane">
+          <nav className="pane-tabs" role="tablist" aria-label="Main pane">
+            <button
+              role="tab"
+              aria-selected={activePane === "chat"}
+              className={activePane === "chat" ? "active" : ""}
+              onClick={() => setActivePane("chat")}
+            >
+              Chat
+            </button>
+            <button
+              role="tab"
+              aria-selected={activePane === "preview"}
+              className={activePane === "preview" ? "active" : ""}
+              onClick={() => setActivePane("preview")}
+            >
+              Preview
+            </button>
+          </nav>
+          <div
+            className={`tab-panel chat-panel ${activePane === "chat" ? "" : "hidden"}`}
+            role="tabpanel"
+            aria-hidden={activePane !== "chat"}
+          >
+            <HeadChat
+              items={chat}
+              busy={busy}
+              onSend={send}
+              onSelectWorker={setSelectedWorker}
+            />
+          </div>
+          <div
+            className={`tab-panel ${activePane === "preview" ? "" : "hidden"}`}
+            role="tabpanel"
+            aria-hidden={activePane !== "preview"}
+          >
+            <PreviewPanel
+              active={activePane === "preview"}
+              obscured={Boolean(selected)}
+              projectRoot={session.project_root}
+              workerRoots={workerList.map((worker) => worker.cwd)}
+            />
+          </div>
+        </main>
         <WorkerRail
           workers={workerList}
           roles={session.roles}
@@ -237,6 +282,7 @@ function reduceWorkers(
           role: event.role,
           provider: event.provider,
           isolation: event.isolation,
+          cwd: event.cwd,
           status: "running",
           summary: "",
           usage: {
