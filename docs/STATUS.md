@@ -64,7 +64,7 @@ output can merge anything.
 
 ### Working and verified
 
-- **81 tests**, no network or CLI login required.
+- **95 tests**, no network or CLI login required.
 - **Orchestrator** — live end-to-end against the real `claude` CLI: it called `list_roles`,
   then `delegate`, a worker wrote into its worktree, and it correctly reported the work as
   pending review rather than landed.
@@ -76,6 +76,8 @@ output can merge anything.
   root. Confirmed on the target machine, not just in CI.
 - **GUI** — launches, starts a session, head chat responds, fleet shows live availability.
   Dark cherry-blossom theme over a translucent vibrancy layer.
+- **Local model backend.** Verified against the running LM Studio model. Backend discovery
+  now enumerates the exact model ids independently from whichever endpoint a role uses.
 - **CLI** — all five subcommands working on the target machine.
 
 ### Not yet verified
@@ -83,13 +85,14 @@ output can merge anything.
 - **Codex backend.** The CLI is not installed. Its event parsing is covered only by unit
   tests over recorded output shapes; its vocabulary has shifted between releases, so the
   first real run is where that gets confirmed.
-- **Local model backend.** LM Studio is running `qwen/qwen3-coder-30b` on `:1234`, but the
-  harness has never called it.
 - **A real multi-step task.** Everything so far has been one delegation deep.
 - **Rate-limit shedding.** The code path exists and is unit-tested; it has never fired
   against an actual rate limit.
 - **The vibrancy effect itself.** Verified only that the page is properly translucent — no
   `NSVisualEffectView` exists off macOS.
+- **The embedded Preview webview on the target Mac.** URL validation, server discovery,
+  compilation, and frontend integration are tested; the native child-webview behavior
+  still needs its first target-platform GUI pass.
 
 ### Known gaps
 
@@ -108,30 +111,27 @@ output can merge anything.
 | MacBook Pro M5 Pro | Primary machine |
 | Claude Pro | Working — `architect` and `builder` roles are live |
 | ChatGPT Plus | Codex CLI **not yet installed** — 3 roles blocked on it |
-| LM Studio | Running `qwen/qwen3-coder-30b` on `:1234`. Heavy on the host; turn limits kept deliberately low |
+| LM Studio | Running and verified with `qwen/qwen3-coder-30b` on `:1234`. Heavy on the host; turn limits kept deliberately low |
 | Rust, Node | Installed and working |
 
 ## Next steps
 
 In the order that unblocks the most.
 
-1. **Test the local role.** The server is up and `roles.toml` now carries the real model id.
-   `cargo run -p harness-cli -- run-worker local "Say hi in five words."` — one short
-   generation, no subscription spent.
-2. **Install Codex** (`codex login`). This unlocks three roles at once: `reviewer` for
+1. **Install Codex when ready** (`codex login`). This unlocks three roles at once: `reviewer` for
    second opinions on ChatGPT Plus, and `local_builder` / `tester` which turn the local
    Qwen into a *real* agent with tools and its own worktree. Biggest single unlock
    available.
-3. **Run a real task through `chat`.** The untested question is behavioural, not
+2. **Run a real task through `chat`.** The untested question is behavioural, not
    mechanical: does the head agent actually delegate sensibly, or try to do the work
    itself? Nothing in the test suite can answer that.
-4. **Watch the burn.** `harness-cli usage --hours 5` through a working session answers the
+3. **Watch the burn.** `harness-cli usage --hours 5` through a working session answers the
    original open question — how hard does this hit the Pro window versus interactive use?
    If it is tight, that argues for Max rather than for API keys.
-5. **Tune the fleet from evidence.** Turn limits, which roles exist, which model backs
+4. **Tune the fleet from evidence.** Turn limits, which roles exist, which model backs
    each. The current values are educated guesses.
-6. **Add CI** when the schema-drift risk starts to bite.
-7. **Then the deferred UI work**: session reload, richer diff review, multi-project
+5. **Add CI** when the schema-drift risk starts to bite.
+6. **Then the deferred UI work**: session reload, richer diff review, multi-project
    workspaces.
 
 ## Risks worth tracking

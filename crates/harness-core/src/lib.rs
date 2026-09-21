@@ -11,17 +11,22 @@
 
 pub mod agents;
 pub mod availability;
+pub mod detection;
 pub mod engine;
 pub mod event;
 pub mod isolation;
 pub mod mcp;
 pub mod orchestrator;
 pub mod roles;
+pub mod roles_patch;
 pub mod store;
 
-pub use orchestrator::Orchestrator;
+pub use detection::{
+    ConfigurableRole, DetectedBackend, DetectedModel, FleetInspection, ModelOption, RoleModelPatch,
+};
 pub use engine::{Harness, RoleInfo, WorkerRecord};
-pub use isolation::{Workspace, Workspaces};
 pub use event::{DiffStat, HarnessEvent, Usage, WorkerStatus};
+pub use isolation::{Workspace, Workspaces};
+pub use orchestrator::Orchestrator;
 pub use roles::{Isolation, Provider, Role, RoleRegistry};
 pub use store::Store;

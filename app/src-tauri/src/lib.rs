@@ -13,6 +13,7 @@ use harness_core::isolation::Workspaces;
 use harness_core::orchestrator::Orchestrator;
 use harness_core::roles::RoleRegistry;
 use harness_core::store::Store;
+use harness_core::{DetectedBackend, FleetInspection, RoleModelPatch};
 use preview_probe::{discover_dev_servers, parse_loopback_http_url, DevServer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -49,6 +50,8 @@ pub struct SessionInfo {
     project_root: String,
     mcp_url: String,
     roles: Vec<RoleView>,
+    backends: Vec<DetectedBackend>,
+    resumed_head_session: bool,
 }
 
 #[derive(Serialize)]
@@ -150,6 +153,44 @@ async fn write_default_roles(project_root: String) -> Result<String, String> {
     Ok(target.display().to_string())
 }
 
+fn roles_file(project_root: &str, roles_path: Option<String>) -> PathBuf {
+    roles_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(project_root).join("roles.toml"))
+}
+
+/// Discover installed CLIs and local servers independently from the endpoints currently
+/// named in roles.toml, then build compatible assignment choices for every role.
+#[tauri::command]
+async fn inspect_fleet(
+    project_root: String,
+    roles_path: Option<String>,
+) -> Result<FleetInspection, String> {
+    let roles_file = roles_file(&project_root, roles_path);
+    let registry = RoleRegistry::load(&roles_file).map_err(|e| format!("{e:#}"))?;
+    Ok(harness_core::detection::inspect_fleet(&registry).await)
+}
+
+/// Persist exact model ids selected from discovery. The core validates compatibility and
+/// edits only model/base_url, preserving the project's comments and role policy.
+#[tauri::command]
+async fn save_role_assignments(
+    project_root: String,
+    roles_path: Option<String>,
+    patches: Vec<RoleModelPatch>,
+) -> Result<FleetInspection, String> {
+    let roles_file = roles_file(&project_root, roles_path);
+    let registry = RoleRegistry::load(&roles_file).map_err(|e| format!("{e:#}"))?;
+    let inspection = harness_core::detection::inspect_fleet(&registry).await;
+    harness_core::detection::validate_patches(&registry, &inspection, &patches)
+        .map_err(|e| format!("{e:#}"))?;
+    harness_core::roles_patch::apply_role_patches_file(&roles_file, &patches)
+        .map_err(|e| format!("{e:#}"))?;
+
+    let updated = RoleRegistry::load(&roles_file).map_err(|e| format!("{e:#}"))?;
+    Ok(harness_core::detection::inspect_fleet(&updated).await)
+}
+
 #[tauri::command]
 async fn start_session(
     app: AppHandle,
@@ -164,9 +205,7 @@ async fn start_session(
     }
 
     let project = PathBuf::from(&project_root);
-    let roles_file = roles_path
-        .map(PathBuf::from)
-        .unwrap_or_else(|| project.join("roles.toml"));
+    let roles_file = roles_file(&project_root, roles_path);
 
     if !roles_file.is_file() {
         return Err(format!("no roles.toml in {}", project.display()));
@@ -177,10 +216,25 @@ async fn start_session(
     let db_path = project.join(".harness").join("sessions.db");
     std::fs::create_dir_all(db_path.parent().unwrap()).map_err(|e| e.to_string())?;
     let store = Store::open(&db_path).map_err(|e| format!("{e:#}"))?;
+    let project_key = project
+        .canonicalize()
+        .unwrap_or_else(|_| project.clone())
+        .display()
+        .to_string();
+    let resume_session_id = store
+        .latest_orchestrator_backend_session(&project_key)
+        .map_err(|e| format!("{e:#}"))?;
 
-    let session_id = format!("s-{}", std::process::id());
+    let session_id = format!(
+        "s-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
     store
-        .create_session(&session_id, None, &project.display().to_string())
+        .create_session(&session_id, None, &project_key)
         .map_err(|e| format!("{e:#}"))?;
 
     let (tx, worker_events) = tokio::sync::mpsc::unbounded_channel();
@@ -192,10 +246,16 @@ async fn start_session(
         tx,
     ));
 
-    let (orchestrator, orchestrator_events) =
-        Orchestrator::start(Arc::clone(&harness), &project, model, Some(200))
-            .await
-            .map_err(|e| format!("{e:#}"))?;
+    let (orchestrator, orchestrator_events) = Orchestrator::start(
+        Arc::clone(&harness),
+        &project,
+        model,
+        Some(200),
+        resume_session_id,
+    )
+    .await
+    .map_err(|e| format!("{e:#}"))?;
+    let resumed_head_session = orchestrator.resumed_backend_session();
 
     // Worker and orchestrator streams are separate; the UI keys them apart by run id.
     forward_events(app.clone(), Arc::clone(&harness), worker_events);
@@ -205,6 +265,8 @@ async fn start_session(
         session_id,
         project_root: project.display().to_string(),
         mcp_url: orchestrator.mcp_url(),
+        backends: harness_core::detection::detect_backends().await,
+        resumed_head_session,
         roles: harness
             .list_roles_probed()
             .await
@@ -461,6 +523,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             inspect_project,
             write_default_roles,
+            inspect_fleet,
+            save_role_assignments,
             start_session,
             send_turn,
             list_workers,

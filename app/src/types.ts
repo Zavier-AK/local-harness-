@@ -22,7 +22,7 @@ export type WorkerStatus =
   | "cancelled";
 
 export type HarnessEvent =
-  | { type: "session_started"; run_id: string; provider: string | null; model: string | null; tools: string[]; mcp_servers: string[] }
+  | { type: "session_started"; run_id: string; backend_session_id: string | null; provider: string | null; model: string | null; tools: string[]; mcp_servers: string[] }
   | { type: "assistant_text"; run_id: string; text: string; partial: boolean }
   | { type: "thinking"; run_id: string; text: string }
   | { type: "tool_call"; run_id: string; tool_use_id: string; name: string; input: unknown }
@@ -65,6 +65,51 @@ export type SessionInfo = {
   project_root: string;
   mcp_url: string;
   roles: Role[];
+  backends: DetectedBackend[];
+  resumed_head_session: boolean;
+};
+
+export type DetectedModel = {
+  id: string;
+  capability: "chat" | "embedding";
+};
+
+export type DetectedBackend = {
+  id: string;
+  label: string;
+  available: boolean;
+  message: string;
+  base_url: string | null;
+  models: DetectedModel[];
+};
+
+export type ModelOption = {
+  id: string;
+  label: string;
+  provider: string;
+  model: string;
+  base_url: string | null;
+};
+
+export type ConfigurableRole = {
+  name: string;
+  provider: string;
+  model: string | null;
+  base_url: string | null;
+  isolation: string;
+  options: ModelOption[];
+  blocked_reason: string | null;
+};
+
+export type FleetInspection = {
+  backends: DetectedBackend[];
+  roles: ConfigurableRole[];
+};
+
+export type RoleModelPatch = {
+  role_name: string;
+  model: string;
+  base_url: string | null;
 };
 
 export type Worker = {

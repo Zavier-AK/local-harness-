@@ -100,7 +100,9 @@ export default function App() {
             {
               kind: "notice",
               tone: "info",
-              text: `Session up. ${info.roles.length - blocked.length} of ${info.roles.length} roles ready.`,
+              text: info.resumed_head_session
+                ? `Session up. Resumed the previous Harness-owned Claude conversation. ${info.roles.length - blocked.length} of ${info.roles.length} roles ready.`
+                : `Session up with a fresh Claude conversation. ${info.roles.length - blocked.length} of ${info.roles.length} roles ready.`,
             },
             // Surfaced here rather than discovered mid-delegation, which costs a turn.
             // Grouped by reason: four roles blocked on one missing CLI is one problem
@@ -171,6 +173,7 @@ export default function App() {
         <WorkerRail
           workers={workerList}
           roles={session.roles}
+          backends={session.backends}
           selected={selectedWorker}
           onSelect={setSelectedWorker}
         />
