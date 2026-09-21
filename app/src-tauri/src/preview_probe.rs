@@ -81,6 +81,7 @@ pub fn is_loopback_http_url(url: &Url) -> bool {
     };
     host.eq_ignore_ascii_case("localhost")
         || host
+            .trim_matches(['[', ']'])
             .parse::<IpAddr>()
             .is_ok_and(|address| address.is_loopback())
 }
@@ -196,8 +197,7 @@ fn extract_explicit_ports(contents: &str) -> BTreeSet<u16> {
             remainder = &remainder[index + marker.len()..];
             let digits = remainder
                 .trim_start_matches(|character: char| {
-                    character.is_ascii_whitespace()
-                        || matches!(character, ':' | '=' | '"' | '\'')
+                    character.is_ascii_whitespace() || matches!(character, ':' | '=' | '"' | '\'')
                 })
                 .chars()
                 .take_while(|character| character.is_ascii_digit())
@@ -270,7 +270,10 @@ mod tests {
     fn accepts_and_normalizes_loopback_http_urls() {
         let cases = [
             ("localhost:3000", "http://localhost:3000/"),
-            ("HTTP://LOCALHOST:8080/path?q=1", "http://localhost:8080/path?q=1"),
+            (
+                "HTTP://LOCALHOST:8080/path?q=1",
+                "http://localhost:8080/path?q=1",
+            ),
             ("127.42.0.9:4000", "http://127.42.0.9:4000/"),
             ("http://[::1]:5173/app", "http://[::1]:5173/app"),
         ];
@@ -292,7 +295,10 @@ mod tests {
             "http://user@localhost:3000",
             "javascript:alert(1)",
         ] {
-            assert!(parse_loopback_http_url(input).is_err(), "{input} was accepted");
+            assert!(
+                parse_loopback_http_url(input).is_err(),
+                "{input} was accepted"
+            );
         }
     }
 

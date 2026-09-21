@@ -50,11 +50,11 @@ export default function PreviewPanel({
   const ensurePreview = useCallback(
     (nextBounds: Bounds): Promise<void> => {
       if (created.current) {
-        return invoke("set_preview_bounds", { bounds: nextBounds });
+        return invoke<void>("set_preview_bounds", { bounds: nextBounds });
       }
       if (creating.current) return creating.current;
 
-      creating.current = invoke<string>("create_preview", {
+      const pending = invoke<string>("create_preview", {
         url: addressRef.current,
         bounds: nextBounds,
       })
@@ -64,7 +64,7 @@ export default function PreviewPanel({
           setAddress(normalized);
           setError(null);
           if (!shouldShow.current) {
-            return invoke("set_preview_visible", { visible: false });
+            return invoke<void>("set_preview_visible", { visible: false });
           }
         })
         .catch((cause) => {
@@ -74,7 +74,8 @@ export default function PreviewPanel({
         .finally(() => {
           creating.current = null;
         });
-      return creating.current;
+      creating.current = pending;
+      return pending;
     },
     [],
   );

@@ -222,7 +222,10 @@ async fn start_session(
             .collect(),
     };
 
-    *slot = Some(Session { orchestrator, harness });
+    *slot = Some(Session {
+        orchestrator,
+        harness,
+    });
     Ok(info)
 }
 
@@ -230,7 +233,11 @@ async fn start_session(
 async fn send_turn(state: State<'_, AppState>, text: String) -> Result<(), String> {
     let mut slot = state.session.lock().await;
     let session = slot.as_mut().ok_or("no session running")?;
-    session.orchestrator.send(&text).await.map_err(|e| format!("{e:#}"))
+    session
+        .orchestrator
+        .send(&text)
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -376,10 +383,7 @@ async fn set_preview_bounds(
 }
 
 #[tauri::command]
-async fn set_preview_visible(
-    state: State<'_, AppState>,
-    visible: bool,
-) -> Result<(), String> {
+async fn set_preview_visible(state: State<'_, AppState>, visible: bool) -> Result<(), String> {
     let webview = match preview_webview(&state) {
         Ok(webview) => webview,
         // Hiding before the preview has been opened is already the desired state.
@@ -395,10 +399,7 @@ async fn set_preview_visible(
 }
 
 #[tauri::command]
-async fn navigate_preview(
-    state: State<'_, AppState>,
-    url: String,
-) -> Result<String, String> {
+async fn navigate_preview(state: State<'_, AppState>, url: String) -> Result<String, String> {
     let url = parse_loopback_http_url(&url)?;
     preview_webview(&state)?
         .navigate(url.clone())
@@ -433,7 +434,11 @@ fn set_webview_bounds(webview: &Webview, bounds: PreviewBounds) -> Result<(), St
 async fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
     let mut slot = state.session.lock().await;
     if let Some(session) = slot.take() {
-        session.orchestrator.shutdown().await.map_err(|e| format!("{e:#}"))?;
+        session
+            .orchestrator
+            .shutdown()
+            .await
+            .map_err(|e| format!("{e:#}"))?;
     }
     Ok(())
 }
