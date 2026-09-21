@@ -357,17 +357,19 @@ mod tests {
 
     #[tokio::test]
     async fn spawned_children_have_api_keys_removed() {
-        // Prove the scrubbing actually reaches the child process, not just the Command.
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-should-not-survive");
-
+        // Prove the scrubbing reaches the child process, not just the Command.
+        //
+        // The key is set on the command rather than on this process: mutating the
+        // environment here would be visible to every other test running concurrently.
+        // Setting it explicitly is also the stronger assertion — scrubbing has to beat
+        // an explicit value, not merely fail to pass one along.
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "printenv ANTHROPIC_API_KEY || echo ABSENT"])
+            .env("ANTHROPIC_API_KEY", "sk-should-not-survive")
             .stdout(Stdio::piped());
         scrub_api_keys(&mut cmd);
 
         let out = cmd.output().await.unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ABSENT");
-
-        std::env::remove_var("ANTHROPIC_API_KEY");
     }
 }
