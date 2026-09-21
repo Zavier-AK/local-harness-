@@ -225,6 +225,14 @@ impl Harness {
         self.rate_limited.write().await.retain(|p| p != provider);
     }
 
+    /// Providers currently shedding to fallbacks, for the limits panel.
+    ///
+    /// This is the only limit information Claude actually gives us: not how much room is
+    /// left, but that we have already run out. Worth showing plainly for that reason.
+    pub async fn rate_limited_providers(&self) -> Vec<String> {
+        self.rate_limited.read().await.clone()
+    }
+
     pub async fn is_rate_limited(&self, provider: &str) -> bool {
         self.rate_limited.read().await.iter().any(|p| p == provider)
     }

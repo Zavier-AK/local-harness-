@@ -534,3 +534,24 @@ button.project.active { background: var(--accent-soft); color: var(--accent); }
   pointer-events: none;
 }
 .add-project > * { pointer-events: auto; }
+
+/* Limits. Vendor-reported headroom and our own measured spend, kept visibly apart. */
+button.meter { background: none; border: none; cursor: pointer; font: inherit; }
+button.meter:hover .meter-label { color: var(--accent); }
+.limits-panel .quota { margin-bottom: 20px; }
+.limits-panel h3 { margin: 0 0 8px; }
+.quota-age { color: var(--warn); font-weight: normal; font-size: 11px; }
+.quota-window { margin-bottom: 10px; }
+.quota-row { display: flex; justify-content: space-between; font-size: 12px; }
+.quota-bar {
+  height: 6px; margin-top: 4px; border-radius: 3px;
+  background: rgba(0, 0, 0, 0.22); overflow: hidden;
+}
+.quota-fill { height: 100%; background: var(--accent); }
+.quota-fill.high { background: var(--warn); }
+.quota-reset, .quota-note, .quota-spent { font-size: 11px; margin: 4px 0 0; }
+.limit-hit {
+  padding: 8px; border-radius: var(--radius);
+  background: var(--warn-soft); color: var(--warn); font-size: 12px;
+}
+.limits-footnote { font-size: 11px; border-top: 1px solid var(--border); padding-top: 10px; }

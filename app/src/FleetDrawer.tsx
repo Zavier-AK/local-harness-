@@ -41,9 +41,13 @@ export default function FleetDrawer({ projectRoot, onClose, onRolesChanged }: Pr
   }
 
   return (
-    <>
-      <div className="drawer-scrim" onClick={onClose} />
-      <aside className="drawer fleet-drawer" role="dialog" aria-label="Change the fleet">
+    <div className="drawer-scrim" onClick={onClose}>
+      <aside
+        className="drawer fleet-drawer"
+        role="dialog"
+        aria-label="Change the fleet"
+        onClick={(event) => event.stopPropagation()}
+      >
         <header className="drawer-head">
           <h2>Fleet</h2>
           <button onClick={onClose}>Close</button>
@@ -60,6 +64,6 @@ export default function FleetDrawer({ projectRoot, onClose, onRolesChanged }: Pr
           <FleetSetup projectRoot={projectRoot} inspection={inspection} onSaved={saved} />
         )}
       </aside>
-    </>
+    </div>
   );
 }

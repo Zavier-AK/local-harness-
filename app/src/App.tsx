@@ -7,6 +7,7 @@ import WorkerRail from "./WorkerRail";
 import DiffDrawer from "./DiffDrawer";
 import FleetDrawer from "./FleetDrawer";
 import ProjectSidebar from "./ProjectSidebar";
+import LimitsPanel from "./LimitsPanel";
 import BudgetMeter from "./BudgetMeter";
 import PreviewPanel from "./PreviewPanel";
 import type {
@@ -14,6 +15,7 @@ import type {
   HarnessEvent,
   ProjectHarnessEvent,
   ProjectView,
+  QuotaReport,
   Role,
   SessionInfo,
   UsageRow,
@@ -33,6 +35,8 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectView[]>([]);
   const [switching, setSwitching] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [limitsOpen, setLimitsOpen] = useState(false);
+  const [quotas, setQuotas] = useState<QuotaReport | null>(null);
 
   /** The orchestrator's run id, so its events are told apart from workers'. */
   const headRun = useRef<string | null>(null);
@@ -198,7 +202,14 @@ export default function App() {
       <header className="titlebar">
         <span className="title">Harness</span>
         <span className="muted mono">{session.project_root}</span>
-        <BudgetMeter usage={usage} rateLimited={rateLimited} />
+        <BudgetMeter
+          usage={usage}
+          rateLimited={rateLimited}
+          onOpenLimits={() => {
+            setLimitsOpen(true);
+            void invoke<QuotaReport>("quotas").then(setQuotas).catch(() => setQuotas(null));
+          }}
+        />
       </header>
 
       <div className="panes">
@@ -261,6 +272,10 @@ export default function App() {
           onChangeFleet={() => setFleetOpen(true)}
         />
       </div>
+
+      {limitsOpen && (
+        <LimitsPanel quotas={quotas} usage={usage} onClose={() => setLimitsOpen(false)} />
+      )}
 
       {adding && (
         <div className="drawer-scrim" onClick={() => setAdding(false)}>
