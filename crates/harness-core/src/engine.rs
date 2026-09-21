@@ -46,7 +46,9 @@ pub struct WorkerRecord {
 }
 
 pub struct Harness {
-    registry: RoleRegistry,
+    /// Behind a lock because the fleet is editable while a session runs: swapping what
+    /// backs a role takes effect on the next delegation, with no process restarted.
+    registry: RwLock<RoleRegistry>,
     workspaces: Workspaces,
     store: Mutex<Store>,
     session_id: String,
@@ -69,7 +71,7 @@ impl Harness {
         events: EventSink,
     ) -> Self {
         Self {
-            registry,
+            registry: RwLock::new(registry),
             workspaces,
             store: Mutex::new(store),
             session_id: session_id.into(),
@@ -107,8 +109,15 @@ impl Harness {
         &self.session_id
     }
 
-    pub fn registry(&self) -> &RoleRegistry {
-        &self.registry
+    /// Replace the fleet for every delegation from here on.
+    ///
+    /// Workers are spawned per delegation, so a swap needs no process to be restarted —
+    /// the next `delegate` resolves against the new registry. The head agent's brief is
+    /// argv-baked into its long-lived process and cannot be rewritten, so callers should
+    /// tell it what changed; its `list_roles` tool reads through to this, so it can
+    /// always re-check.
+    pub async fn swap_registry(&self, registry: RoleRegistry) {
+        *self.registry.write().await = registry;
     }
 
     pub fn workspaces(&self) -> &Workspaces {
@@ -132,8 +141,10 @@ impl Harness {
         self.emit(event);
     }
 
-    pub fn list_roles(&self) -> Vec<RoleInfo> {
+    pub async fn list_roles(&self) -> Vec<RoleInfo> {
         self.registry
+            .read()
+            .await
             .roles
             .iter()
             .map(|(name, role)| RoleInfo {
@@ -157,12 +168,23 @@ impl Harness {
     /// Probed concurrently: a fleet with several unreachable local servers would
     /// otherwise stall session startup by the timeout, once per role.
     pub async fn list_roles_probed(&self) -> Vec<RoleInfo> {
-        let probes = self.registry.roles.iter().map(|(name, role)| async move {
-            (name.clone(), crate::availability::probe(role).await)
-        });
+        // Cloned rather than probed under the lock: a probe waits on a network timeout,
+        // and holding the registry for that long would stall every delegation.
+        let snapshot: Vec<(String, crate::roles::Role)> = self
+            .registry
+            .read()
+            .await
+            .roles
+            .iter()
+            .map(|(name, role)| (name.clone(), role.clone()))
+            .collect();
+
+        let probes = snapshot
+            .iter()
+            .map(|(name, role)| async move { (name.clone(), crate::availability::probe(role).await) });
         let results: Vec<_> = futures::future::join_all(probes).await;
 
-        let mut roles = self.list_roles();
+        let mut roles = self.list_roles().await;
         for info in &mut roles {
             if let Some((_, probe)) = results.iter().find(|(name, _)| *name == info.name) {
                 info.available = Some(probe.available);
@@ -197,7 +219,8 @@ impl Harness {
     /// runs anyway rather than searching, since the registry forbids cycles but not
     /// chains, and a degraded run beats no run.
     async fn resolve_role(&self, requested: &str) -> Result<String> {
-        let role = self.registry.get(requested)?;
+        let registry = self.registry.read().await;
+        let role = registry.get(requested)?;
 
         if !self.is_rate_limited(role.provider.as_str()).await {
             return Ok(requested.to_string());
@@ -235,7 +258,8 @@ impl Harness {
         context_files: Vec<String>,
     ) -> Result<WorkerRecord> {
         let role_name = self.resolve_role(requested_role).await?;
-        let role = self.registry.get(&role_name)?.clone();
+        // Cloned out of the lock: the worker runs for minutes and must not hold it.
+        let role = self.registry.read().await.get(&role_name)?.clone();
         let worker_id = format!("w-{}", Uuid::new_v4().simple());
 
         self.upsert(WorkerRecord {
@@ -398,7 +422,7 @@ impl Harness {
         // Validate before detaching, so a bad role name is an error the orchestrator sees
         // now rather than a worker that mysteriously fails later.
         let resolved = self.resolve_role(role).await?;
-        self.registry.get(&resolved)?;
+        self.registry.read().await.get(&resolved)?;
 
         let worker_id = format!("w-{}", Uuid::new_v4().simple());
         self.upsert(WorkerRecord {

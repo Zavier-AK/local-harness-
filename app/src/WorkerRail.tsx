@@ -7,6 +7,7 @@ type Props = {
   backends: DetectedBackend[];
   selected: string | null;
   onSelect: (id: string) => void;
+  onChangeFleet: () => void;
 };
 
 const STATUS_LABEL: Record<Worker["status"], string> = {
@@ -19,10 +20,22 @@ const STATUS_LABEL: Record<Worker["status"], string> = {
   cancelled: "cancelled",
 };
 
-export default function WorkerRail({ workers, roles, backends, selected, onSelect }: Props) {
+export default function WorkerRail({
+  workers,
+  roles,
+  backends,
+  selected,
+  onSelect,
+  onChangeFleet,
+}: Props) {
   return (
     <aside className="rail">
-      <h2>Workers</h2>
+      <div className="rail-head">
+        <h2>Workers</h2>
+        <button className="link" onClick={onChangeFleet}>
+          Change fleet
+        </button>
+      </div>
 
       <h3 className="first">Detected</h3>
       <ul className="backend-inventory">

@@ -176,7 +176,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 101 engine tests, no network, no CLI login needed
+cargo test                        # 108 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -191,7 +191,7 @@ Preview discovery and URL-safety tests run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **101 engine tests, 106 including the Tauri shell** — worth stating explicitly,
+That makes **108 engine tests, 113 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats

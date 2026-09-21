@@ -486,3 +486,13 @@ button.link {
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255, 183, 202, 0.3); background-clip: padding-box; }
+
+/* Rail header: the fleet is editable mid-session, so the way in lives next to it. */
+.rail-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.rail-head h2 { margin: 0; }
+button.link {
+  background: none; border: none; padding: 0;
+  color: var(--accent); font-size: 12px; cursor: pointer;
+}
+button.link:hover { color: var(--accent-strong); text-decoration: underline; }
+.fleet-drawer .fleet-setup { margin-top: 12px; }

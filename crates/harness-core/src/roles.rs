@@ -232,6 +232,14 @@ impl RoleRegistry {
         self.roles.keys().cloned().collect()
     }
 
+    /// Run the registry's own rules over this registry.
+    ///
+    /// Role editing builds a one-role registry from a proposed change and calls this, so
+    /// "is this role legal" has exactly one definition rather than two that can drift.
+    pub fn check(&self) -> Result<()> {
+        self.validate()
+    }
+
     fn validate(&self) -> Result<()> {
         if self.roles.is_empty() {
             bail!("role registry defines no roles");

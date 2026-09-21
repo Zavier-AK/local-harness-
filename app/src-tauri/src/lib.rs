@@ -171,10 +171,15 @@ async fn inspect_fleet(
     Ok(harness_core::detection::inspect_fleet(&registry).await)
 }
 
-/// Persist exact model ids selected from discovery. The core validates compatibility and
-/// edits only model/base_url, preserving the project's comments and role policy.
+/// Persist role assignments chosen from discovery, and apply them to a running session.
+///
+/// The core validates that the assignment is something this machine can actually run,
+/// then edits only the fields it must, preserving the project's comments and role policy.
+/// When a session is live the new fleet takes effect immediately: workers are spawned per
+/// delegation, so nothing has to be restarted.
 #[tauri::command]
 async fn save_role_assignments(
+    state: State<'_, AppState>,
     project_root: String,
     roles_path: Option<String>,
     patches: Vec<RoleModelPatch>,
@@ -188,6 +193,45 @@ async fn save_role_assignments(
         .map_err(|e| format!("{e:#}"))?;
 
     let updated = RoleRegistry::load(&roles_file).map_err(|e| format!("{e:#}"))?;
+
+    // Push the new fleet into the live session, if there is one.
+    let mut slot = state.session.lock().await;
+    if let Some(session) = slot.as_mut() {
+        session.harness.swap_registry(updated.clone()).await;
+
+        // The head agent's brief is baked into its process argv and cannot be rewritten,
+        // so it still describes the old fleet. Tell it what moved; its `list_roles` tool
+        // reads live state, so one sentence is enough to keep it from planning around a
+        // backend that is no longer there.
+        let changed = patches
+            .iter()
+            .map(|patch| {
+                let provider = patch
+                    .provider
+                    .clone()
+                    .or_else(|| {
+                        updated
+                            .roles
+                            .get(&patch.role_name)
+                            .map(|role| role.provider.as_str().to_string())
+                    })
+                    .unwrap_or_default();
+                format!("`{}` now runs {provider}/{}", patch.role_name, patch.model)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        if !changed.is_empty() {
+            let notice = format!(
+                "The fleet changed: {changed}. Call `list_roles` before your next \
+                 delegation so you are planning against the current fleet."
+            );
+            if let Err(error) = session.orchestrator.send(&notice).await {
+                tracing::warn!("could not notify the head agent of the fleet change: {error:#}");
+            }
+        }
+    }
+
     Ok(harness_core::detection::inspect_fleet(&updated).await)
 }
 
@@ -294,6 +338,32 @@ async fn start_session(
         harness,
     });
     Ok(info)
+}
+
+/// The running session's fleet, re-probed.
+///
+/// `SessionInfo.roles` is a snapshot from session start; once a role can be reassigned
+/// mid-session the UI needs to re-read it rather than trust that snapshot.
+#[tauri::command]
+async fn session_roles(state: State<'_, AppState>) -> Result<Vec<RoleView>, String> {
+    let slot = state.session.lock().await;
+    let session = slot.as_ref().ok_or("no session running")?;
+    Ok(session
+        .harness
+        .list_roles_probed()
+        .await
+        .into_iter()
+        .map(|r| RoleView {
+            name: r.name,
+            provider: r.provider,
+            model: r.model,
+            isolation: r.isolation,
+            can_edit_files: r.can_edit_files,
+            brief: r.brief,
+            available: r.available.unwrap_or(true),
+            unavailable_reason: r.unavailable_reason,
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -530,6 +600,7 @@ pub fn run() {
             write_default_roles,
             inspect_fleet,
             save_role_assignments,
+            session_roles,
             start_session,
             send_turn,
             list_workers,

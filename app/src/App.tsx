@@ -5,6 +5,7 @@ import StartGate from "./StartGate";
 import HeadChat from "./HeadChat";
 import WorkerRail from "./WorkerRail";
 import DiffDrawer from "./DiffDrawer";
+import FleetDrawer from "./FleetDrawer";
 import BudgetMeter from "./BudgetMeter";
 import PreviewPanel from "./PreviewPanel";
 import type { ChatItem, HarnessEvent, Role, SessionInfo, UsageRow, Worker } from "./types";
@@ -18,6 +19,7 @@ export default function App() {
   const [selectedWorker, setSelectedWorker] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [activePane, setActivePane] = useState<"chat" | "preview">("chat");
+  const [fleetOpen, setFleetOpen] = useState(false);
 
   /** The orchestrator's run id, so its events are told apart from workers'. */
   const headRun = useRef<string | null>(null);
@@ -176,8 +178,19 @@ export default function App() {
           backends={session.backends}
           selected={selectedWorker}
           onSelect={setSelectedWorker}
+          onChangeFleet={() => setFleetOpen(true)}
         />
       </div>
+
+      {fleetOpen && (
+        <FleetDrawer
+          projectRoot={session.project_root}
+          onClose={() => setFleetOpen(false)}
+          onRolesChanged={(roles) =>
+            setSession((current) => (current ? { ...current, roles } : current))
+          }
+        />
+      )}
 
       {selected && (
         <DiffDrawer

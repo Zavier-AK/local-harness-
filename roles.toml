@@ -6,6 +6,13 @@
 #
 # Cost shape: Claude is the planner and the escalation path, not the router. Frequent
 # and cheap work goes to local models, which have no rate limit and no context floor.
+#
+# Roles can be reassigned while a session runs — "Change fleet" in the worker rail, or
+# by editing this file. A role that needs a filesystem (worktree/readonly/shared) can
+# move between the Claude and Codex CLIs, including onto a local model under Codex; a
+# role with isolation = "none" can only take an openai_compat endpoint, since it has no
+# tool loop. Changes apply to the next delegation: workers are spawned per delegation,
+# so nothing is restarted and in-flight workers finish on the backend they started with.
 
 default_role = "builder"
 
