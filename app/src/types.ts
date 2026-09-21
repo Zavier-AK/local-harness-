@@ -152,3 +152,22 @@ export type ChatItem =
 
 export const totalInput = (u: Usage) =>
   u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens;
+
+/** One open project, as the switcher sees it. Mirrors `ProjectView` in the Tauri shell. */
+export type ProjectView = {
+  project_root: string;
+  name: string;
+  active: boolean;
+  /** Whether its head agent is up. A suspended project costs no subscription quota. */
+  live: boolean;
+  running_workers: number;
+  pending_merges: number;
+};
+
+/**
+ * Engine events are tagged with their project.
+ *
+ * Every open project emits on one Tauri channel, and `HarnessEvent` carries only run and
+ * worker ids, so without this tag two projects' streams could not be told apart.
+ */
+export type ProjectHarnessEvent = HarnessEvent & { project: string };

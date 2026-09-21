@@ -142,7 +142,7 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); ou
 .title { font-weight: 650; }
 .titlebar .mono { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.panes { flex: 1; display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
+.panes { flex: 1; display: grid; grid-template-columns: 200px 1fr 340px; min-height: 0; }
 .main-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .pane-tabs {
   display: flex;
@@ -496,3 +496,41 @@ button.link {
 }
 button.link:hover { color: var(--accent-strong); text-decoration: underline; }
 .fleet-drawer .fleet-setup { margin-top: 12px; }
+
+/* Project switcher. Its own column, mirroring the worker rail on the other side. */
+.sidebar {
+  background: var(--panel);
+  backdrop-filter: var(--blur);
+  border-right: 1px solid var(--border);
+  padding: 16px;
+  overflow-y: auto;
+  min-width: 0;
+}
+.sidebar-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.sidebar-head h2 { margin: 0; }
+.project-list { list-style: none; margin: 12px 0 0; padding: 0; }
+.project-list li { display: flex; align-items: center; gap: 4px; }
+button.project {
+  flex: 1; min-width: 0; text-align: left;
+  background: none; border: none; border-radius: var(--radius);
+  padding: 8px; cursor: pointer; color: var(--text);
+}
+button.project:hover { background: var(--accent-soft); }
+button.project.active { background: var(--accent-soft); color: var(--accent); }
+.project-name { display: block; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-meta { display: block; font-size: 11px; }
+.project-close { font-size: 16px; line-height: 1; padding: 0 4px; }
+/* Work happening where the user is not looking is the thing worth surfacing. */
+.elsewhere {
+  margin-top: 12px; padding: 8px;
+  border-radius: var(--radius);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 11px;
+}
+.main-pane.switching { opacity: 0.5; pointer-events: none; }
+.add-project {
+  position: fixed; inset: 0; display: grid; place-items: center;
+  pointer-events: none;
+}
+.add-project > * { pointer-events: auto; }

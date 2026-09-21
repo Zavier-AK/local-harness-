@@ -64,7 +64,7 @@ output can merge anything.
 
 ### Working and verified
 
-- **108 engine tests** (113 including the separate Tauri shell workspace), no network or
+- **108 engine tests** (116 including the separate Tauri shell workspace), no network or
   CLI login required.
 - **Orchestrator** — live end-to-end against the real `claude` CLI: it called `list_roles`,
   then `delegate`, a worker wrote into its worktree, and it correctly reported the work as

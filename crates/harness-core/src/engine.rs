@@ -105,6 +105,23 @@ impl Harness {
             .ok();
     }
 
+    /// The head agent's most recent backend conversation for this project, if any.
+    ///
+    /// Resuming that conversation is what makes suspending a project cheap: the head
+    /// agent comes back where it left off instead of paying the context floor again.
+    pub async fn resumable_backend_session(&self) -> Result<Option<String>> {
+        let root = self.workspaces.project_root();
+        let key = root
+            .canonicalize()
+            .unwrap_or_else(|_| root.to_path_buf())
+            .display()
+            .to_string();
+        self.store
+            .lock()
+            .await
+            .latest_orchestrator_backend_session(&key)
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
