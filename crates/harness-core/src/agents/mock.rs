@@ -22,6 +22,7 @@ pub async fn run(spec: &WorkerSpec, sink: &EventSink) -> Result<RunOutcome> {
         model: spec.role.model.clone(),
         tools: spec.role.effective_tools(),
         mcp_servers: Vec::new(),
+        mcp_failed: Vec::new(),
     });
 
     let mut is_error = false;

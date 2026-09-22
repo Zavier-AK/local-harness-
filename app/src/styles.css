@@ -628,3 +628,75 @@ button.icon-button:hover { color: var(--accent); border-color: var(--border-stro
 }
 .bubble.markdown table { border-collapse: collapse; margin: 0 0 8px; font-size: 12px; }
 .bubble.markdown th, .bubble.markdown td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+
+/* ---------- Tools & Skills, Settings ---------- */
+.sidebar { display: flex; flex-direction: column; }
+.sidebar-foot {
+  margin-top: auto; padding-top: 12px;
+  display: flex; gap: 6px;
+}
+button.icon-button.active { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.session-pane { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.session-pane.hidden { display: none; }
+
+.settings-view {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 20px 24px 32px;
+  display: flex; flex-direction: column; gap: 22px;
+}
+.settings-head { display: flex; justify-content: space-between; align-items: center; }
+.settings-head h2 { margin: 0; font-size: 17px; }
+.settings-section { display: flex; flex-direction: column; gap: 10px; }
+.settings-section h3 {
+  margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted);
+}
+.settings-section > p { margin: 0; font-size: 12px; line-height: 1.5; }
+.settings-section code { font-family: var(--mono); font-size: 11px; }
+.settings-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.settings-list li {
+  display: flex; flex-direction: column; gap: 4px; align-items: flex-start;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: rgba(0, 0, 0, 0.16);
+}
+.settings-list li.off { opacity: 0.6; }
+.settings-name { font-size: 13px; }
+.settings-desc { font-size: 12px; overflow-wrap: anywhere; }
+.settings-meta { font-size: 11px; overflow-wrap: anywhere; }
+.settings-meta.ok { color: var(--ok); }
+.settings-meta.error { color: var(--error); }
+.toggle-row { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; }
+.settings-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.inline-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.inline-form input { min-width: 0; }
+.inline-form .grow { flex: 1; min-width: 180px; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; width: 100%; }
+.tool-rule {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px 4px 2px 8px; border-radius: 999px;
+  background: var(--accent-soft); font-size: 11px;
+}
+button.chip-remove {
+  background: none; border: none; padding: 0 4px; cursor: pointer;
+  color: var(--muted); font-size: 13px; line-height: 1;
+}
+button.chip-remove:hover { color: var(--error); }
+input.chip-input { width: 140px; font-size: 11px; padding: 3px 8px; }
+.field { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+.field > span { width: 90px; color: var(--muted); }
+.field input { width: 220px; }
+.swatches { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button.swatch {
+  width: 26px; height: 26px; padding: 0; border-radius: 50%;
+  border: 2px solid transparent; cursor: pointer;
+}
+button.swatch.theme { width: auto; padding: 0 10px; border-radius: 13px; border-color: var(--border); font-size: 11px; }
+button.swatch.chosen { border-color: var(--text); }
+.swatches input[type="color"] { width: 30px; height: 26px; padding: 0; border: none; background: none; }
+/* The global input rule sizes text fields; a checkbox must stay a checkbox. */
+.toggle-row input[type="checkbox"] { width: auto; flex: none; margin: 0; padding: 0; accent-color: var(--accent); }
+.settings-view { background: var(--panel); }
+.settings-head h2, .settings-name { color: var(--text); }
+.inline-form input { width: auto; flex: 0 1 220px; }
+.inline-form input.grow { flex: 1 1 220px; }
+.settings-actions .inline-form { flex: 1; }
+.settings-actions .inline-form input { flex: 1 1 260px; }

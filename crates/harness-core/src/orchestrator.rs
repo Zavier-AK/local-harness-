@@ -203,7 +203,15 @@ impl Orchestrator {
         } else {
             orchestrator_role_native(model, max_turns)
         };
+        // Skills reach the head agent and, through it, native subagents. The user's MCP
+        // servers are connected but not approved for the head: it stays a planner, and a
+        // role that should use one lists its tools.
+        let extras = harness.extras_snapshot().await;
         let mut extra_args = Vec::new();
+        if let Some(dir) = &extras.plugin_dir {
+            extra_args.push("--plugin-dir".into());
+            extra_args.push(dir.to_string_lossy().into_owned());
+        }
         if let (Some(agents), Some(hook)) = (agents, &native_hook) {
             extra_args.push("--agents".into());
             extra_args.push(agents);
@@ -223,7 +231,7 @@ impl Orchestrator {
             run_id,
             project_root,
             &role,
-            Some(&mcp.claude_mcp_config()),
+            Some(&mcp.claude_mcp_config_with(&extras.mcp_servers)),
             Some(&brief),
             resume_session_id.as_deref(),
             &extra_args,

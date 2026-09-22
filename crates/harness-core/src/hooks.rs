@@ -6,7 +6,7 @@
 //! path it prints, and uses that directory as the subagent's working copy. So the harness
 //! answers it with the same code its own workers use: the same location under
 //! `.harness/worktrees/`, the same `harness/<name>` branch naming the merge gate trusts,
-//! the same `[worktree]` bootstrap (`.env`, `npm ci`), the same bundled skills.
+//! the same `[worktree]` bootstrap (`.env`, `npm ci`).
 //!
 //! Verified against the real CLI (2.1.280): the hook receives `{name, cwd, ...}` on stdin,
 //! its last stdout line becomes the subagent's working directory, and the subagent's
@@ -187,10 +187,6 @@ mod tests {
             "KEY=1\n"
         );
         assert!(path.join("deps.txt").exists());
-        // Same skills too.
-        assert!(path
-            .join(".claude/skills/harness-worktree/SKILL.md")
-            .exists());
         // On the branch the merge gate recognizes.
         let head = tokio::process::Command::new("git")
             .args(["rev-parse", "--abbrev-ref", "HEAD"])

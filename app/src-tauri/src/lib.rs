@@ -6,9 +6,11 @@
 //! headlessly by `harness-cli` and tested without a desktop.
 
 mod preview_probe;
+mod settings;
 
 use harness_core::engine::{Harness, WorkerRecord};
 use harness_core::event::HarnessEvent;
+use harness_core::extensions::{Extensions, ImportReport, SkillInfo, WorkerExtras};
 use harness_core::isolation::Workspaces;
 use harness_core::orchestrator::Orchestrator;
 use harness_core::roles::RoleRegistry;
@@ -394,11 +396,12 @@ async fn start_session(
         let mut projects = state.projects.lock().await;
         if let Some(session) = projects.get_mut(&key) {
             if !session.is_live() {
+                session.harness.set_extras(current_extras()).await;
                 let (orchestrator, events) = Orchestrator::start(
                     Arc::clone(&session.harness),
                     &session.project_root,
                     session.model.clone(),
-                    Some(200),
+                    Some(settings::load().max_turns),
                     session
                         .harness
                         .resumable_backend_session()
@@ -420,6 +423,7 @@ async fn start_session(
 
     let project = PathBuf::from(&project_root);
     let roles_file = roles_file(&project_root, roles_path);
+    let model = model.or_else(|| settings::load().default_model);
 
     if !roles_file.is_file() {
         return Err(format!("no roles.toml in {}", project.display()));
@@ -459,12 +463,13 @@ async fn start_session(
         session_id.clone(),
         tx,
     ));
+    harness.set_extras(current_extras()).await;
 
     let (orchestrator, orchestrator_events) = Orchestrator::start(
         Arc::clone(&harness),
         &project,
         model.clone(),
-        Some(200),
+        Some(settings::load().max_turns),
         resume_session_id,
         hook_command(),
     )
@@ -508,7 +513,7 @@ async fn start_session(
             project_root: project,
             roles_file,
             model: model.clone(),
-            },
+        },
     );
     *state.active.lock().await = Some(key);
     Ok(info)
@@ -980,6 +985,7 @@ async fn focus_project(
 
     let session = projects.get_mut(&key).ok_or("that project is not open")?;
     if !session.is_live() {
+        session.harness.set_extras(current_extras()).await;
         let resume = session
             .harness
             .resumable_backend_session()
@@ -989,7 +995,7 @@ async fn focus_project(
             Arc::clone(&session.harness),
             &session.project_root,
             session.model.clone(),
-            Some(200),
+            Some(settings::load().max_turns),
             resume,
             hook_command(),
         )
@@ -1037,6 +1043,223 @@ async fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+
+// ------------------------------------------------------------------ settings
+
+#[tauri::command]
+fn get_settings() -> settings::Settings {
+    settings::load()
+}
+
+/// Takes effect for heads started from now on; a running head keeps the turn limit and
+/// model it was started with.
+#[tauri::command]
+fn save_settings(settings: settings::Settings) -> Result<settings::Settings, String> {
+    let settings = settings.validated()?;
+    let path = settings::path().ok_or("no home directory to keep settings in")?;
+    settings::save_to(&path, &settings)?;
+    Ok(settings)
+}
+
+// ---------------------------------------------------------- tools and skills
+
+fn extensions() -> Result<Extensions, String> {
+    harness_core::extensions::default_dir()
+        .map(Extensions::new)
+        .ok_or_else(|| "no home directory to keep skills in".to_string())
+}
+
+/// The current skills and servers. A broken library costs the skills, not the session.
+fn current_extras() -> WorkerExtras {
+    match extensions().and_then(|ext| ext.worker_extras().map_err(|e| format!("{e:#}"))) {
+        Ok(extras) => extras,
+        Err(error) => {
+            tracing::warn!("skills and MCP servers not loaded: {error}");
+            WorkerExtras::default()
+        }
+    }
+}
+
+/// Hand the changed set to every open project, so its next worker gets it. Head agents
+/// pick it up when they next start: a running process cannot load a plugin.
+async fn apply_extras(state: &AppState) {
+    let extras = current_extras();
+    for session in state.projects.lock().await.values() {
+        session.harness.set_extras(extras.clone()).await;
+    }
+}
+
+fn describe_error(error: anyhow::Error) -> String {
+    format!("{error:#}")
+}
+
+#[tauri::command]
+fn list_skills() -> Result<Vec<SkillInfo>, String> {
+    extensions()?.skills().map_err(describe_error)
+}
+
+#[tauri::command]
+async fn set_skill_enabled(
+    state: State<'_, AppState>,
+    name: String,
+    enabled: bool,
+) -> Result<Vec<SkillInfo>, String> {
+    let ext = extensions()?;
+    ext.set_skill_enabled(&name, enabled).map_err(describe_error)?;
+    apply_extras(&state).await;
+    ext.skills().map_err(describe_error)
+}
+
+#[tauri::command]
+async fn create_skill(
+    state: State<'_, AppState>,
+    name: String,
+    description: String,
+) -> Result<String, String> {
+    let path = extensions()?
+        .create_skill(&name, &description)
+        .map_err(describe_error)?;
+    apply_extras(&state).await;
+    Ok(path.join("SKILL.md").display().to_string())
+}
+
+#[tauri::command]
+async fn import_skills_folder(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<ImportReport, String> {
+    let report = extensions()?
+        .import_skills(std::path::Path::new(&path), Some(&path))
+        .map_err(describe_error)?;
+    apply_extras(&state).await;
+    Ok(report)
+}
+
+#[tauri::command]
+async fn import_skills_git(state: State<'_, AppState>, url: String) -> Result<ImportReport, String> {
+    let report = extensions()?
+        .import_skills_from_git(&url)
+        .await
+        .map_err(describe_error)?;
+    apply_extras(&state).await;
+    Ok(report)
+}
+
+#[tauri::command]
+async fn remove_skill(state: State<'_, AppState>, name: String) -> Result<Vec<SkillInfo>, String> {
+    let ext = extensions()?;
+    ext.remove_skill(&name).map_err(describe_error)?;
+    apply_extras(&state).await;
+    ext.skills().map_err(describe_error)
+}
+
+#[tauri::command]
+fn list_mcp_servers() -> Result<std::collections::BTreeMap<String, serde_json::Value>, String> {
+    extensions()?.mcp_servers().map_err(describe_error)
+}
+
+#[tauri::command]
+async fn set_mcp_server(
+    state: State<'_, AppState>,
+    name: String,
+    config: serde_json::Value,
+) -> Result<std::collections::BTreeMap<String, serde_json::Value>, String> {
+    let ext = extensions()?;
+    ext.set_mcp_server(&name, config).map_err(describe_error)?;
+    apply_extras(&state).await;
+    ext.mcp_servers().map_err(describe_error)
+}
+
+#[tauri::command]
+async fn remove_mcp_server(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<std::collections::BTreeMap<String, serde_json::Value>, String> {
+    let ext = extensions()?;
+    ext.remove_mcp_server(&name).map_err(describe_error)?;
+    apply_extras(&state).await;
+    ext.mcp_servers().map_err(describe_error)
+}
+
+#[derive(Serialize)]
+struct RoleTools {
+    name: String,
+    provider: String,
+    isolation: String,
+    tools: Vec<String>,
+    /// Run by the head agent's own `Agent` tool rather than `delegate`.
+    native: bool,
+}
+
+/// The fleet file for a project: the open session's, or `roles.toml` beside it.
+async fn roles_file_for(state: &AppState, project_root: &str) -> PathBuf {
+    let projects = state.projects.lock().await;
+    projects
+        .get(&project_key(project_root))
+        .map(|session| session.roles_file.clone())
+        .unwrap_or_else(|| roles_file(project_root, None))
+}
+
+fn describe_role_tools(registry: &RoleRegistry) -> Vec<RoleTools> {
+    let native = harness_core::native::native_roles(registry);
+    registry
+        .roles
+        .iter()
+        .map(|(name, role)| RoleTools {
+            name: name.clone(),
+            provider: role.provider.as_str().to_string(),
+            isolation: role.isolation.as_str().to_string(),
+            tools: role.tools.clone(),
+            native: native.contains_key(name),
+        })
+        .collect()
+}
+
+#[tauri::command]
+async fn role_tools(
+    state: State<'_, AppState>,
+    project_root: String,
+) -> Result<Vec<RoleTools>, String> {
+    let file = roles_file_for(&state, &project_root).await;
+    let registry = RoleRegistry::load(&file).map_err(describe_error)?;
+    Ok(describe_role_tools(&registry))
+}
+
+/// Rewrite one role's allow-list in `roles.toml`, and apply it to the open session.
+#[tauri::command]
+async fn save_role_tools(
+    state: State<'_, AppState>,
+    project_root: String,
+    role: String,
+    tools: Vec<String>,
+) -> Result<Vec<RoleTools>, String> {
+    let file = roles_file_for(&state, &project_root).await;
+    let before = RoleRegistry::load(&file).map_err(describe_error)?;
+    harness_core::roles_patch::apply_tools_patch_file(&file, &role, &tools)
+        .map_err(describe_error)?;
+    let updated = RoleRegistry::load(&file).map_err(describe_error)?;
+
+    let mut projects = state.projects.lock().await;
+    if let Some(session) = projects.get_mut(&project_key(&project_root)) {
+        session.harness.swap_registry(updated.clone()).await;
+        // Delegated workers read the live fleet. A native role's definition was fixed
+        // when the head agent started, so route it through `delegate` until then.
+        if harness_core::native::native_roles(&before).contains_key(&role) {
+            if let Head::Live(orchestrator) = &mut session.head {
+                let notice = format!(
+                    "The tools for `{role}` changed. Your Agent-tool definition for it is fixed \
+                     for this session, so until the project is reopened delegate to `{role}` \
+                     with the `delegate` tool instead."
+                );
+                if let Err(error) = orchestrator.send(&notice).await {
+                    tracing::warn!("could not notify the head agent of the tools change: {error:#}");
+                }
+            }
+        }
+    }
+    Ok(describe_role_tools(&updated))
+}
+
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -1050,6 +1273,12 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             app.manage(AppState::default());
+            // Older plugin builds are safe to drop only now, before any worker can be
+            // reading one.
+            if let Ok(ext) = extensions() {
+                let current = current_extras().plugin_dir;
+                ext.prune_plugins(current.as_deref());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1080,6 +1309,19 @@ pub fn run() {
             navigate_preview,
             reload_preview,
             stop_session,
+            get_settings,
+            save_settings,
+            list_skills,
+            set_skill_enabled,
+            create_skill,
+            import_skills_folder,
+            import_skills_git,
+            remove_skill,
+            list_mcp_servers,
+            set_mcp_server,
+            remove_mcp_server,
+            role_tools,
+            save_role_tools,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the harness app");

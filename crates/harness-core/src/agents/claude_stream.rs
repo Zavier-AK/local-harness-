@@ -137,6 +137,22 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<ParsedLine, String> {
                                     .collect()
                             })
                             .unwrap_or_default(),
+                        // `pending` is still connecting, not failed; anything else that is
+                        // not `connected` (failed, needs-auth) will not serve tools.
+                        mcp_failed: value
+                            .get("mcp_servers")
+                            .and_then(Value::as_array)
+                            .map(|a| {
+                                a.iter()
+                                    .filter(|s| {
+                                        let status = s.get("status").and_then(Value::as_str);
+                                        !matches!(status, Some("connected") | Some("pending") | None)
+                                    })
+                                    .filter_map(|s| s.get("name").and_then(Value::as_str))
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     });
                 }
                 "api_retry" => {
@@ -351,18 +367,22 @@ mod tests {
     fn init_line_exposes_the_auth_provider() {
         let line = r#"{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-sonnet-5",
             "provider":"firstParty","tools":["Read","Grep"],
-            "mcp_servers":[{"name":"harness","status":"connected"}]}"#;
+            "mcp_servers":[{"name":"harness","status":"connected"},{"name":"github","status":"failed"},
+                           {"name":"slow","status":"pending"}]}"#;
 
         let parsed = parse_line("run-1", line).unwrap();
         assert_eq!(parsed.backend_session_id.as_deref(), Some("sess-1"));
 
         match &parsed.events[0] {
-            HarnessEvent::SessionStarted { provider, model, tools, mcp_servers, .. } => {
+            HarnessEvent::SessionStarted { provider, model, tools, mcp_servers, mcp_failed, .. } => {
                 // The observable proof that the subscription, not an API key, is paying.
                 assert_eq!(provider.as_deref(), Some("firstParty"));
                 assert_eq!(model.as_deref(), Some("claude-sonnet-5"));
                 assert_eq!(tools, &["Read", "Grep"]);
-                assert_eq!(mcp_servers, &["harness"]);
+                assert_eq!(mcp_servers, &["harness", "github", "slow"]);
+                // Only a server that will not serve tools is failed; one still connecting
+                // is not.
+                assert_eq!(mcp_failed, &["github"]);
             }
             other => panic!("expected SessionStarted, got {other:?}"),
         }

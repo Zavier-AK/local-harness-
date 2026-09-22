@@ -254,7 +254,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 142 engine tests, no network, no CLI login needed
+cargo test                        # 157 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -262,14 +262,14 @@ The `mock` backend is a deterministic stand-in, so isolation, delegation, the me
 and rate-limit shedding are all tested without touching a subscription. `WRITE:<path>:<text>`
 makes a mock worker write a file; `FAIL:<reason>` makes it fail.
 
-The Tauri shell is a separate cargo workspace, so `cargo test` does not reach it. Its five
-Preview discovery and URL-safety tests run on their own:
+The Tauri shell is a separate cargo workspace, so `cargo test` does not reach it. Its tests —
+Preview discovery, URL safety, settings — run on their own:
 
 ```bash
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **142 engine tests, 150 including the Tauri shell** — worth stating explicitly,
+That makes **157 engine tests, 168 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats
@@ -293,17 +293,43 @@ because the two numbers measure different things and have drifted apart before.
   unrecognized lines yield no events rather than failing a run, and parsing is covered by
   fixture tests.
 
-## Worker skills
+## Tools & Skills, and Settings
 
-Every worktree-isolated worker gets a small set of skills materialized into
-`.claude/skills/harness-*`, where its CLI picks them up. They tell a worker what it can
-and cannot do here: that its worktree is disposable and harness-managed, that nothing it
-writes lands without a human approving the diff, how to report a review without
-generating noise, and when a change needs evidence rather than a passing test suite.
+Two views sit behind the icons at the foot of the project sidebar.
 
-They are **held out of the worker's commits** by pathspec, so they are visible to the
-agent and invisible to your diff. A project's own `.claude/skills/` is untouched by this
-and remains the worker's to change.
+**Tools & Skills** holds what the fleet can use:
+
+- **Skills.** A library shared by every project. Three are built in: `worktree`,
+  `review` and `risky-changes`. You can add your own from a folder, from a git
+  repository (every folder with a `SKILL.md` in it is imported, with its source kept
+  for credit), or as a blank skill to write. Each one can be switched off.
+- **Tools, by role.** Each role's allow-list for the open project. Rules can be
+  scoped, like `Bash(git *)`, and `mcp__<server>` grants that server's tools. It is
+  written back into `roles.toml` without disturbing its comments.
+- **MCP servers.** A command or an HTTP URL. They are connected for the head agent and
+  every Claude worker. The view shows whether each one actually connected, as reported
+  when the head agent last started.
+
+Skills reach Claude as a plugin passed with `--plugin-dir`, so they appear as
+`harness:<name>`. **Nothing is written into your repository or `~/.claude`**. Earlier
+versions copied skills into every worktree and kept them out of commits with a
+pathspec; that is gone. The plugin directory is content-addressed, so changing a skill
+builds a new one instead of rewriting a directory a running worker may be reading.
+Workers pick up changes on their next task; head agents pick them up when a project is
+next opened.
+
+An MCP server's tools are available to a role only if that role lists them. The head
+agent never lists them, so it stays a planner.
+
+**Settings** (⌘,) holds:
+
+- the head agent's default model and turn limit;
+- whether to send notifications;
+- the accent colour. It is one variable; hover, soft and text-on-accent colours are
+  derived from it.
+
+The CLI and the app share the extensions library in the app's data folder. Pass
+`--extensions <dir>` to the CLI to use a different one.
 
 ## Credits
 

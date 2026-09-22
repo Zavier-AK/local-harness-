@@ -152,7 +152,10 @@ async fn pump_stdout(
 
 /// Run a single-shot Claude worker.
 pub async fn run(spec: &WorkerSpec, sink: &EventSink) -> Result<RunOutcome> {
-    let mut args = base_args(&spec.role, false);
+    // Extras go first: `--mcp-config` takes several values, and placed last it would
+    // swallow the prompt as another config.
+    let mut args = spec.extras.claude_args();
+    args.extend(base_args(&spec.role, false));
     args.push(compose_prompt(spec));
 
     let mut child = spawn(&spec.cwd, &args)?;

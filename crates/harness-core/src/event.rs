@@ -77,6 +77,9 @@ pub enum HarnessEvent {
         model: Option<String>,
         tools: Vec<String>,
         mcp_servers: Vec<String>,
+        /// Servers from `mcp_servers` that did not connect (failed, or waiting on auth).
+        #[serde(default)]
+        mcp_failed: Vec<String>,
     },
     AssistantText {
         run_id: String,

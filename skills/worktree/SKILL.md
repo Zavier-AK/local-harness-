@@ -1,5 +1,5 @@
 ---
-name: harness-worktree
+name: worktree
 description: How work is isolated and landed in this harness. Use when about to write files, run the project's tests, commit, merge, or push from inside a worker.
 ---
 
