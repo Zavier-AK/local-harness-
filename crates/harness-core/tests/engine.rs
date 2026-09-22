@@ -640,3 +640,43 @@ async fn a_stopped_head_turn_still_counts_against_the_window() {
     let claude = rows.iter().find(|r| r.provider == "claude").expect("usage recorded");
     assert_eq!(claude.usage.input_tokens, 1200);
 }
+
+/// Claude's own quota report is kept, and a refusal sheds work before a retry is wasted.
+#[tokio::test]
+async fn claudes_quota_report_is_kept_and_a_refusal_sheds_load() {
+    let f = fixture().await;
+    assert!(f.harness.claude_quota_snapshot().await.is_none());
+
+    let window = |used: f64| harness_core::quota::QuotaWindow {
+        label: "5h".into(),
+        used_percent: used,
+        resets_at: Some(1_790_122_800),
+    };
+
+    f.harness
+        .note_event(&HarnessEvent::QuotaReport {
+            run_id: "orchestrator-s1".into(),
+            provider: "claude".into(),
+            status: "allowed".into(),
+            windows: vec![window(48.0)],
+        })
+        .await;
+    let (_, windows) = f.harness.claude_quota_snapshot().await.unwrap();
+    assert_eq!(windows[0].used_percent, 48.0);
+    assert!(!f.harness.is_rate_limited("claude").await);
+
+    f.harness
+        .note_event(&HarnessEvent::QuotaReport {
+            run_id: "orchestrator-s1".into(),
+            provider: "claude".into(),
+            status: "rejected".into(),
+            windows: vec![window(100.0)],
+        })
+        .await;
+    assert!(
+        f.harness.is_rate_limited("claude").await,
+        "a refused request should shed Claude roles to their fallbacks"
+    );
+    let (_, windows) = f.harness.claude_quota_snapshot().await.unwrap();
+    assert_eq!(windows[0].used_percent, 100.0, "the newest report replaces the old one");
+}

@@ -63,6 +63,8 @@ pub struct Harness {
     /// One stop switch per live worker, so a person can end a run that has gone wrong
     /// without closing the whole project.
     cancels: RwLock<HashMap<String, tokio::sync::watch::Sender<bool>>>,
+    /// The latest subscription quota Claude reported, with when it arrived.
+    claude_quota: RwLock<Option<(i64, Vec<crate::quota::QuotaWindow>)>>,
 }
 
 impl Harness {
@@ -84,6 +86,7 @@ impl Harness {
             rate_limited: RwLock::new(Vec::new()),
             orchestrator_run: RwLock::new(None),
             cancels: RwLock::new(HashMap::new()),
+            claude_quota: RwLock::new(None),
         }
     }
 
@@ -135,6 +138,11 @@ impl Harness {
             Some(stop) => stop.send(true).is_ok(),
             None => false,
         }
+    }
+
+    /// The latest Claude quota this session has seen, as `(observed_at, windows)`.
+    pub async fn claude_quota_snapshot(&self) -> Option<(i64, Vec<crate::quota::QuotaWindow>)> {
+        self.claude_quota.read().await.clone()
     }
 
     pub fn session_id(&self) -> &str {
@@ -679,6 +687,23 @@ impl Harness {
                     .await
                     .set_backend_session_id(run_id, backend_session_id)
                     .ok();
+            }
+
+            HarnessEvent::QuotaReport {
+                provider,
+                status,
+                windows,
+                ..
+            } if provider == "claude" => {
+                if !windows.is_empty() {
+                    let observed = time::OffsetDateTime::now_utc().unix_timestamp();
+                    *self.claude_quota.write().await = Some((observed, windows.clone()));
+                }
+                // The server saying no is a firmer signal than a retry, and it arrives
+                // before the turn has been spent waiting on one.
+                if status == "rejected" {
+                    self.mark_rate_limited(Provider::Claude.as_str()).await;
+                }
             }
 
             HarnessEvent::ApiRetry { error, .. } if error == "rate_limit" => {

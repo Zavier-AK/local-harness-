@@ -8,12 +8,14 @@
 //!   those. They are a snapshot from the last turn, not live, so they are reported with
 //!   the time they were observed and go stale rather than silently ageing.
 //!
-//! * **Claude** exposes nothing a parent process can read. There is no `claude usage`
-//!   subcommand, `/usage` is interactive-only, and `--output-format stream-json` carries
-//!   no limit or reset field — `api_retry` tells you that you have *already* hit a wall,
-//!   never how much room is left. The documented `rate_limits` block reaches statusLine
-//!   scripts only, and statusLine does not run under `-p`, which is how this harness
-//!   drives the CLI. So no percentage is available, and this module does not invent one.
+//! * **Claude** reports its quota on its own stream. Every turn of a `claude -p` process
+//!   emits a `rate_limit_event` with server-reported utilization and reset times for the
+//!   five-hour and weekly windows. The harness keeps the latest one. Before the first turn
+//!   of a session there is nothing yet, which is reported as missing, not as zero.
+//!
+//!   (An earlier version of this module said Claude exposed nothing readable. That was
+//!   wrong: `/usage` is interactive-only and statusLine never runs under `-p`, but the
+//!   stream itself carries the figures.)
 //!
 //! The three states are borrowed from Codex's own `/status`, which classifies its data as
 //! available, stale or missing. A meter that says "unknown" is more useful than one that
@@ -73,14 +75,29 @@ fn now() -> i64 {
     time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
-/// Claude has no machine-readable quota. Say so, and say why.
-pub fn claude_quota() -> ProviderQuota {
-    ProviderQuota::missing(
-        "claude",
-        "Claude exposes no readable quota: /usage is interactive-only and the documented \
-         rate_limits block reaches statusLine scripts, which do not run under `claude -p`. \
-         The token counts beside this are what this harness itself has spent.",
-    )
+/// Claude's quota, from the latest `rate_limit_event` this app has seen.
+///
+/// `latest` is `(observed_at, windows)`. The figures are real but only as fresh as the last
+/// turn, so an old report is marked stale rather than shown as current.
+pub fn claude_quota(latest: Option<(i64, Vec<QuotaWindow>)>) -> ProviderQuota {
+    let Some((observed_at, windows)) = latest.filter(|(_, windows)| !windows.is_empty()) else {
+        return ProviderQuota::missing(
+            "claude",
+            "Claude reports its quota with every turn. Nothing has run yet in this session, \
+             so there is no figure to show.",
+        );
+    };
+    ProviderQuota {
+        provider: "claude".into(),
+        state: if now() - observed_at > STALE_AFTER_SECS {
+            QuotaState::Stale
+        } else {
+            QuotaState::Available
+        },
+        observed_at: Some(observed_at),
+        windows,
+        note: None,
+    }
 }
 
 /// Codex's quota, read from its session rollout files.
@@ -235,8 +252,8 @@ fn parse_timestamp(value: &serde_json::Value) -> Option<i64> {
 }
 
 /// Every provider's quota, for the panel.
-pub fn all_quotas() -> Vec<ProviderQuota> {
-    vec![claude_quota(), codex_quota()]
+pub fn all_quotas(claude: Option<(i64, Vec<QuotaWindow>)>) -> Vec<ProviderQuota> {
+    vec![claude_quota(claude), codex_quota()]
 }
 
 #[cfg(test)]
@@ -249,14 +266,32 @@ mod tests {
     }
 
     #[test]
-    fn claude_reports_no_percentage_and_explains_why() {
-        let quota = claude_quota();
+    fn claude_before_its_first_turn_is_missing_not_zero() {
+        let quota = claude_quota(None);
         assert_eq!(quota.state, QuotaState::Missing);
-        assert!(quota.windows.is_empty(), "inventing a percentage would be worse than none");
-        // The note is shown to the user, so it has to actually say what is going on.
-        let note = quota.note.unwrap();
-        assert!(note.contains("statusLine"));
-        assert!(note.contains("-p"));
+        assert!(quota.windows.is_empty(), "an unknown share of a limit is not an empty one");
+        assert!(quota.note.unwrap().contains("every turn"));
+    }
+
+    #[test]
+    fn a_recent_claude_report_is_shown_as_it_came() {
+        let windows = vec![
+            QuotaWindow { label: "5h".into(), used_percent: 48.0, resets_at: Some(1790122800) },
+            QuotaWindow { label: "weekly".into(), used_percent: 6.0, resets_at: Some(1790668800) },
+        ];
+        let quota = claude_quota(Some((now() - 30, windows.clone())));
+        assert_eq!(quota.state, QuotaState::Available);
+        assert_eq!(quota.windows, windows);
+        assert!(quota.note.is_none());
+    }
+
+    #[test]
+    fn an_old_claude_report_is_stale_not_current() {
+        let windows = vec![QuotaWindow { label: "5h".into(), used_percent: 90.0, resets_at: None }];
+        let quota = claude_quota(Some((now() - STALE_AFTER_SECS - 60, windows)));
+        // Real figures, but a turn since then may have moved them.
+        assert_eq!(quota.state, QuotaState::Stale);
+        assert_eq!(quota.windows[0].used_percent, 90.0);
     }
 
     #[test]

@@ -791,8 +791,19 @@ async fn quotas(state: State<'_, AppState>) -> Result<QuotaReport, String> {
         }
     }
 
+    // Claude's quota is account-wide, so whichever open project heard from it last has the
+    // freshest figure.
+    let mut claude = None;
+    for session in projects.values() {
+        if let Some(snapshot) = session.harness.claude_quota_snapshot().await {
+            if claude.as_ref().is_none_or(|(seen, _): &(i64, _)| snapshot.0 > *seen) {
+                claude = Some(snapshot);
+            }
+        }
+    }
+
     Ok(QuotaReport {
-        providers: harness_core::quota::all_quotas(),
+        providers: harness_core::quota::all_quotas(claude),
         rate_limited: limited,
     })
 }

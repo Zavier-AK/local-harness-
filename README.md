@@ -124,15 +124,17 @@ visibly apart because conflating them would be worse than showing nothing:
   time for both its five-hour and weekly windows into its session rollout files, and the
   panel reads them. They are a snapshot from Codex's last turn rather than live, so each
   is shown with when it was observed and goes **stale** rather than quietly ageing.
-- **Claude reports none.** There is no `claude usage` subcommand, `/usage` is
-  interactive-only, and `--output-format stream-json` carries no limit or reset field.
-  The documented `rate_limits` block reaches statusLine scripts only, and statusLine does
-  not run under `-p`, which is how this harness drives the CLI. So the panel shows no
-  Claude percentage. It shows what the harness itself has spent, labelled as spend.
+- **Claude reports real limits too — on its own stream.** Every turn of the head agent's
+  `claude -p` process carries a `rate_limit_event` with server-reported utilization and
+  reset times for the five-hour and weekly windows. The panel shows the latest one. Until
+  the first turn of a session there is nothing to show, which reads as missing rather
+  than as 0%. A `rejected` status also sheds Claude roles to their fallbacks immediately,
+  instead of after a failed retry.
 
-The one piece of real Claude limit information available is the `api_retry` event, which
-says you have *already* hit a wall. That is surfaced plainly, along with which providers
-are currently shedding to their fallback roles.
+  An earlier version of this panel said Claude exposed no readable quota. That was wrong:
+  `/usage` is interactive-only and the statusLine block never runs under `-p`, but the
+  stream itself carries the same figures. It was found by capturing a real run rather
+  than reading the docs.
 
 Quota states are `available`, `stale` and `missing`, borrowed from Codex's own `/status`.
 A meter that says unknown is more useful than one that says 0%.
@@ -220,7 +222,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 121 engine tests, no network, no CLI login needed
+cargo test                        # 126 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -235,7 +237,7 @@ Preview discovery and URL-safety tests run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **121 engine tests, 129 including the Tauri shell** — worth stating explicitly,
+That makes **126 engine tests, 134 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats
