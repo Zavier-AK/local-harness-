@@ -68,8 +68,7 @@ fn worktree_setup(project: &Path) -> Result<WorktreeSetup> {
 
 /// Answer `WorktreeCreate`: build the worktree and return the path Claude Code should use.
 pub async fn worktree_create(stdin: &str) -> Result<PathBuf> {
-    let input: CreateInput =
-        serde_json::from_str(stdin).context("reading WorktreeCreate input")?;
+    let input: CreateInput = serde_json::from_str(stdin).context("reading WorktreeCreate input")?;
     check_name(&input.name)?;
 
     let project = input
@@ -96,8 +95,7 @@ pub async fn worktree_create(stdin: &str) -> Result<PathBuf> {
 /// reports. Committing here anyway costs nothing and means no path through this hook can
 /// discard work.
 pub async fn worktree_remove(stdin: &str) -> Result<()> {
-    let input: RemoveInput =
-        serde_json::from_str(stdin).context("reading WorktreeRemove input")?;
+    let input: RemoveInput = serde_json::from_str(stdin).context("reading WorktreeRemove input")?;
     let path = input
         .worktree_path
         .canonicalize()
@@ -116,7 +114,10 @@ pub async fn worktree_remove(stdin: &str) -> Result<()> {
         .and_then(Path::parent)
         .context("worktree path is not inside a project")?;
     if project.join(WORKTREE_DIR).join(&name) != path {
-        bail!("refusing to remove {}: not a harness worktree", path.display());
+        bail!(
+            "refusing to remove {}: not a harness worktree",
+            path.display()
+        );
     }
 
     let workspaces = Workspaces::new(project.to_path_buf());
@@ -138,7 +139,11 @@ mod tests {
             .output()
             .await
             .unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     async fn repo() -> tempfile::TempDir {
@@ -146,7 +151,9 @@ mod tests {
         git(dir.path(), &["init", "-q", "-b", "main"]).await;
         git(dir.path(), &["config", "user.email", "h@t"]).await;
         git(dir.path(), &["config", "user.name", "H"]).await;
-        tokio::fs::write(dir.path().join("README.md"), "base\n").await.unwrap();
+        tokio::fs::write(dir.path().join("README.md"), "base\n")
+            .await
+            .unwrap();
         git(dir.path(), &["add", "-A"]).await;
         git(dir.path(), &["commit", "-q", "-m", "init"]).await;
         dir
@@ -161,7 +168,9 @@ mod tests {
         )
         .await
         .unwrap();
-        tokio::fs::write(dir.path().join(".env"), "KEY=1\n").await.unwrap();
+        tokio::fs::write(dir.path().join(".env"), "KEY=1\n")
+            .await
+            .unwrap();
 
         let input = serde_json::json!({
             "session_id": "s", "cwd": dir.path(), "hook_event_name": "WorktreeCreate",
@@ -173,10 +182,15 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         assert_eq!(path, root.join(".harness/worktrees/agent-abc123"));
         // Same bootstrap our own workers get: the .env and the setup command.
-        assert_eq!(tokio::fs::read_to_string(path.join(".env")).await.unwrap(), "KEY=1\n");
+        assert_eq!(
+            tokio::fs::read_to_string(path.join(".env")).await.unwrap(),
+            "KEY=1\n"
+        );
         assert!(path.join("deps.txt").exists());
         // Same skills too.
-        assert!(path.join(".claude/skills/harness-worktree/SKILL.md").exists());
+        assert!(path
+            .join(".claude/skills/harness-worktree/SKILL.md")
+            .exists());
         // On the branch the merge gate recognizes.
         let head = tokio::process::Command::new("git")
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -184,7 +198,10 @@ mod tests {
             .output()
             .await
             .unwrap();
-        assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "harness/agent-abc123");
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "harness/agent-abc123"
+        );
     }
 
     #[tokio::test]
@@ -192,7 +209,10 @@ mod tests {
         let dir = repo().await;
         for name in ["../../evil", ".hidden", "-flag", "a/b", ""] {
             let input = serde_json::json!({ "cwd": dir.path(), "name": name }).to_string();
-            assert!(worktree_create(&input).await.is_err(), "should refuse {name:?}");
+            assert!(
+                worktree_create(&input).await.is_err(),
+                "should refuse {name:?}"
+            );
         }
     }
 
@@ -201,7 +221,9 @@ mod tests {
         let dir = repo().await;
         let input = serde_json::json!({ "cwd": dir.path(), "name": "agent-rm1" }).to_string();
         let path = worktree_create(&input).await.unwrap();
-        tokio::fs::write(path.join("late.txt"), "kept\n").await.unwrap();
+        tokio::fs::write(path.join("late.txt"), "kept\n")
+            .await
+            .unwrap();
 
         let input = serde_json::json!({ "worktree_path": path }).to_string();
         worktree_remove(&input).await.unwrap();
