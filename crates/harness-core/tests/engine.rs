@@ -680,3 +680,96 @@ async fn claudes_quota_report_is_kept_and_a_refusal_sheds_load() {
     let (_, windows) = f.harness.claude_quota_snapshot().await.unwrap();
     assert_eq!(windows[0].used_percent, 100.0, "the newest report replaces the old one");
 }
+
+/// A native subagent — run inside the head agent's process by Claude Code — ends up as an
+/// ordinary worker: its work committed to a branch, its spend counted, and its change put
+/// in front of the person for review. Nothing lands until they approve it.
+#[tokio::test]
+async fn a_native_subagent_becomes_a_reviewable_worker() {
+    let mut f = fixture().await;
+
+    // What Claude Code does first: ask our hook for a worktree.
+    let hook_input = serde_json::json!({ "cwd": f.root, "name": "agent-t1" }).to_string();
+    let worktree = harness_core::hooks::worktree_create(&hook_input).await.unwrap();
+
+    f.harness
+        .note_event(&HarnessEvent::SubagentStarted {
+            run_id: "orchestrator-s1".into(),
+            task_id: "t1".into(),
+            tool_use_id: "toolu_1".into(),
+            subagent_type: "builder".into(),
+            description: "Add a greeting".into(),
+        })
+        .await;
+    assert_eq!(
+        f.harness.worker("agent-t1").await.unwrap().status,
+        WorkerStatus::Running
+    );
+
+    // The subagent works — in its worktree, never the checkout.
+    tokio::fs::write(worktree.join("greeting.txt"), "hello\n").await.unwrap();
+
+    f.harness
+        .note_event(&HarnessEvent::SubagentFinished {
+            run_id: "orchestrator-s1".into(),
+            task_id: "t1".into(),
+            status: "completed".into(),
+            summary: "Added greeting.txt".into(),
+            total_tokens: 3682,
+        })
+        .await;
+
+    let worker = f.harness.worker("agent-t1").await.unwrap();
+    assert_eq!(worker.status, WorkerStatus::Done);
+    assert_eq!(worker.branch.as_deref(), Some("harness/agent-t1"));
+    assert_eq!(worker.diff.as_ref().unwrap().files, ["greeting.txt"]);
+    assert!(!worktree.exists(), "the worktree is removed once its work is committed");
+    assert!(
+        !f.root.join("greeting.txt").exists(),
+        "nothing reaches the checkout before approval"
+    );
+
+    // Proposed for review automatically; the person still has to approve.
+    let pending = f.harness.pending_merges().await;
+    assert!(pending.iter().any(|(id, _)| id == "agent-t1"));
+    let events = drain(&mut f.events);
+    assert!(events.iter().any(|e| matches!(e, HarnessEvent::MergeRequested { worker_id, .. } if worker_id == "agent-t1")));
+
+    // Its spend counts against the window; the head's own result would not include it.
+    let claude = f.harness.usage_window(3600).await.unwrap();
+    assert_eq!(claude.iter().find(|r| r.provider == "claude").unwrap().usage.input_tokens, 3682);
+
+    // And approving lands it exactly like any other worker.
+    f.harness.approve_merge("agent-t1").await.unwrap();
+    assert_eq!(tokio::fs::read_to_string(f.root.join("greeting.txt")).await.unwrap(), "hello\n");
+}
+
+/// Claude Code's built-in subagents (Explore and friends) have no role and no worktree.
+/// They still show in the rail, and never produce anything to merge.
+#[tokio::test]
+async fn a_built_in_subagent_is_shown_but_offers_nothing_to_merge() {
+    let f = fixture().await;
+    f.harness
+        .note_event(&HarnessEvent::SubagentStarted {
+            run_id: "orchestrator-s1".into(),
+            task_id: "t2".into(),
+            tool_use_id: "toolu_2".into(),
+            subagent_type: "Explore".into(),
+            description: "Find the retry logic".into(),
+        })
+        .await;
+    f.harness
+        .note_event(&HarnessEvent::SubagentFinished {
+            run_id: "orchestrator-s1".into(),
+            task_id: "t2".into(),
+            status: "completed".into(),
+            summary: "It is in src/prices.rs".into(),
+            total_tokens: 900,
+        })
+        .await;
+
+    let worker = f.harness.worker("agent-t2").await.unwrap();
+    assert_eq!(worker.status, WorkerStatus::Done);
+    assert!(worker.branch.is_none());
+    assert!(f.harness.pending_merges().await.is_empty());
+}

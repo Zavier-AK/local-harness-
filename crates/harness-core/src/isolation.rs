@@ -77,6 +77,35 @@ async fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Serialize git's worktree bookkeeping across *processes*, not just tasks.
+///
+/// The in-process mutex covers workers this engine starts. Native subagents are different:
+/// Claude Code creates their worktrees by running our `WorktreeCreate` hook as a separate
+/// process per subagent, and two subagents started together run two hooks at once. Two
+/// concurrent `git worktree add`s from separate processes corrupt `.git/worktrees/` exactly
+/// as two tasks would, so the guard has to be something every process can see: an OS file
+/// lock in the repository's common git directory, released when the file is dropped.
+async fn lock_worktree_admin(repo: &Path) -> Result<std::fs::File> {
+    let common = git(repo, &["rev-parse", "--git-common-dir"]).await?;
+    let common = {
+        let path = PathBuf::from(&common);
+        if path.is_absolute() { path } else { repo.join(path) }
+    };
+    let path = common.join("harness-worktree.lock");
+    tokio::task::spawn_blocking(move || -> Result<std::fs::File> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        file.lock().context("waiting for the worktree lock")?;
+        Ok(file)
+    })
+    .await
+    .context("worktree lock task")?
+}
+
 /// A branch's changes, ready to render.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Patch {
@@ -166,6 +195,7 @@ impl Workspace {
 
         // Teardown mutates the same bookkeeping that creation does.
         let _guard = self.git_lock.lock().await;
+        let _file_lock = lock_worktree_admin(&self.project_root).await?;
         git(
             &self.project_root,
             &["worktree", "remove", "--force", &self.cwd.to_string_lossy()],
@@ -214,6 +244,24 @@ impl Workspaces {
 
     pub fn project_root(&self) -> &Path {
         &self.project_root
+    }
+
+    /// A worktree this engine did not create — a native subagent's, made by our
+    /// `WorktreeCreate` hook in another process — as a workspace it can diff, commit and
+    /// release like any other.
+    ///
+    /// Found by name, because the hook puts every worktree at the same place ours go, on a
+    /// branch named the same way. `None` if there is no such worktree.
+    pub fn adopt(&self, worker_id: &str, isolation: Isolation) -> Option<Workspace> {
+        let path = self.project_root.join(WORKTREE_DIR).join(worker_id);
+        path.is_dir().then(|| Workspace {
+            cwd: path,
+            isolation,
+            branch: Some(format!("{BRANCH_PREFIX}/{worker_id}")),
+            project_root: self.project_root.clone(),
+            _shared_guard: None,
+            git_lock: Arc::clone(&self.git_lock),
+        })
     }
 
     /// Keep worker worktrees out of the project's `git status`.
@@ -365,6 +413,7 @@ impl Workspaces {
                     // Serialized: two concurrent `worktree add` calls leave git's
                     // administrative directory inconsistent.
                     let _guard = self.git_lock.lock().await;
+                    let _file_lock = lock_worktree_admin(&self.project_root).await?;
                     git(
                         &self.project_root,
                         &["worktree", "add", "-b", &branch, &path.to_string_lossy(), "HEAD"],
@@ -380,6 +429,7 @@ impl Workspaces {
                     .and(self.bootstrap(&path).await)
                 {
                     let _guard = self.git_lock.lock().await;
+                    let _file_lock = lock_worktree_admin(&self.project_root).await;
                     let _ = git(
                         &self.project_root,
                         &["worktree", "remove", "--force", &path.to_string_lossy()],
@@ -641,6 +691,74 @@ mod tests {
             [format!("{SKILLS_DIR}/project-convention/SKILL.md")],
             "the project's own skill is the worker's to change; ours is not"
         );
+    }
+
+    /// Two engines — or an engine and a hook process — share nothing in memory, so only
+    /// the file lock stands between their worktree bookkeeping. Two independent instances
+    /// have independent in-process locks, which is exactly that situation.
+    ///
+    /// Creation racing *teardown* is what corrupts: reproduced with plain git as
+    /// `failed to read .git/worktrees/<id>/commondir` when adds, removes and lists run in
+    /// separate processes. So one instance creates while the other tears down.
+    ///
+    /// Honest limit: this test did not fail without the lock in 10 runs — the race is
+    /// timing-dependent and plain git hit it in roughly one round in four under heavier
+    /// load. It guards that concurrent create and remove across instances stays correct;
+    /// it is not proof the lock is needed. The plain-git reproduction is that proof.
+    #[tokio::test]
+    async fn separate_instances_can_create_and_remove_worktrees_at_the_same_time() {
+        let (dir, first) = scratch_repo().await;
+        let second = Workspaces::new(dir.path().to_path_buf());
+
+        let mut old = Vec::new();
+        for i in 0..12 {
+            old.push(second.prepare(&format!("w-old{i}"), Isolation::Worktree).await.unwrap());
+        }
+
+        let mut tasks = Vec::new();
+        for (i, workspace) in old.into_iter().enumerate() {
+            let first = first.clone();
+            tasks.push(tokio::spawn(async move {
+                first.prepare(&format!("w-new{i}"), Isolation::Worktree).await.map(|_| ())
+            }));
+            tasks.push(tokio::spawn(async move { workspace.release().await }));
+        }
+        for task in tasks {
+            task.await.unwrap().expect("no worktree operation should corrupt another");
+        }
+
+        let listed = git(dir.path(), &["worktree", "list"]).await.unwrap();
+        assert_eq!(listed.lines().count(), 13, "12 new worktrees plus the main checkout");
+    }
+
+    #[tokio::test]
+    async fn a_worktree_made_elsewhere_can_be_adopted_and_committed() {
+        let (dir, workspaces) = scratch_repo().await;
+        // As the hook would: same place, same branch naming.
+        git(
+            dir.path(),
+            &["worktree", "add", "-q", "-b", "harness/agent-x1", ".harness/worktrees/agent-x1", "HEAD"],
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(dir.path().join(".harness/worktrees/agent-x1/made.txt"), "native\n")
+            .await
+            .unwrap();
+
+        let adopted = workspaces
+            .adopt("agent-x1", Isolation::Worktree)
+            .expect("the hook's worktree should be found by name");
+        assert_eq!(adopted.mergeable_branch(), Some("harness/agent-x1"));
+        assert_eq!(adopted.diff().await.unwrap().files, ["made.txt"]);
+        assert!(adopted.commit("native work").await.unwrap());
+        adopted.release().await.unwrap();
+
+        // Worktree gone, branch and its commit kept for review.
+        assert!(!dir.path().join(".harness/worktrees/agent-x1").exists());
+        let shown = git(dir.path(), &["show", "harness/agent-x1:made.txt"]).await.unwrap();
+        assert_eq!(shown, "native");
+
+        assert!(workspaces.adopt("agent-missing", Isolation::Worktree).is_none());
     }
 
     #[tokio::test]

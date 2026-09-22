@@ -152,6 +152,42 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<ParsedLine, String> {
                             .to_string(),
                     });
                 }
+                // Claude Code's own subagents. These are how a native worker is seen at all:
+                // it runs inside the head agent's process, not as a process of ours.
+                "task_started" => {
+                    let text = |field: &str| {
+                        value.get(field).and_then(Value::as_str).unwrap_or_default().to_string()
+                    };
+                    out.events.push(HarnessEvent::SubagentStarted {
+                        run_id: key,
+                        task_id: text("task_id"),
+                        tool_use_id: text("tool_use_id"),
+                        subagent_type: text("subagent_type"),
+                        description: text("description"),
+                    });
+                }
+                "task_progress" => {
+                    out.events.push(HarnessEvent::SubagentProgress {
+                        run_id: key,
+                        task_id: value.get("task_id").and_then(Value::as_str).unwrap_or_default().into(),
+                        description: value
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .into(),
+                        last_tool: value.get("last_tool_name").and_then(Value::as_str).map(str::to_string),
+                        total_tokens: value.pointer("/usage/total_tokens").and_then(Value::as_u64).unwrap_or(0),
+                    });
+                }
+                "task_notification" => {
+                    out.events.push(HarnessEvent::SubagentFinished {
+                        run_id: key,
+                        task_id: value.get("task_id").and_then(Value::as_str).unwrap_or_default().into(),
+                        status: value.get("status").and_then(Value::as_str).unwrap_or("unknown").into(),
+                        summary: value.get("summary").and_then(Value::as_str).unwrap_or_default().into(),
+                        total_tokens: value.pointer("/usage/total_tokens").and_then(Value::as_u64).unwrap_or(0),
+                    });
+                }
                 // Other system subtypes (plugin_install, hook_*, permission_denied) carry no
                 // state this engine acts on yet.
                 _ => {}
@@ -473,6 +509,40 @@ mod tests {
             [HarnessEvent::QuotaReport { windows, .. }] => {
                 assert_eq!(windows.len(), 1);
                 assert_eq!(windows[0].label, "weekly");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// The three lifecycle events, as captured from a live native-subagent run (CLI 2.1.280).
+    #[test]
+    fn reads_a_native_subagents_lifecycle() {
+        let started = r#"{"type":"system","subtype":"task_started","task_id":"af7922364ce2c7f50","tool_use_id":"toolu_012b","description":"Create hello.txt file","subagent_type":"builder","is_backgrounded":false,"spawn_depth":1,"task_type":"local_agent","prompt":"Create a file","uuid":"u","session_id":"s"}"#;
+        let progress = r#"{"type":"system","subtype":"task_progress","task_id":"af7922364ce2c7f50","tool_use_id":"toolu_012b","description":"Writing hello.txt","subagent_type":"builder","usage":{"total_tokens":3391,"tool_uses":2,"duration_ms":3365},"last_tool_name":"Write","uuid":"u","session_id":"s"}"#;
+        let finished = r#"{"type":"system","subtype":"task_notification","task_id":"af7922364ce2c7f50","tool_use_id":"toolu_012b","status":"completed","output_file":"/tmp/x.output","summary":"Done. I've created the file.","usage":{"total_tokens":3682,"tool_uses":2,"duration_ms":4674},"uuid":"u","session_id":"s"}"#;
+
+        match &parse_line("head", started).unwrap().events[..] {
+            [HarnessEvent::SubagentStarted { task_id, tool_use_id, subagent_type, description, .. }] => {
+                assert_eq!(task_id, "af7922364ce2c7f50");
+                assert_eq!(tool_use_id, "toolu_012b");
+                assert_eq!(subagent_type, "builder");
+                assert_eq!(description, "Create hello.txt file");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match &parse_line("head", progress).unwrap().events[..] {
+            [HarnessEvent::SubagentProgress { last_tool, total_tokens, description, .. }] => {
+                assert_eq!(last_tool.as_deref(), Some("Write"));
+                assert_eq!(*total_tokens, 3391);
+                assert_eq!(description, "Writing hello.txt");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match &parse_line("head", finished).unwrap().events[..] {
+            [HarnessEvent::SubagentFinished { status, summary, total_tokens, .. }] => {
+                assert_eq!(status, "completed");
+                assert!(summary.starts_with("Done."));
+                assert_eq!(*total_tokens, 3682);
             }
             other => panic!("unexpected {other:?}"),
         }
