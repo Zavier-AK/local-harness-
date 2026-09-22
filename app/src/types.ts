@@ -34,7 +34,9 @@ export type HarnessEvent =
   | { type: "merge_requested"; worker_id: string; branch: string; diff: DiffStat }
   | { type: "api_retry"; run_id: string; attempt: number; max_retries: number; retry_delay_ms: number; error: string }
   | { type: "run_finished"; run_id: string; text: string; usage: Usage; cost_usd: number | null; is_error: boolean }
-  | { type: "error"; run_id: string; message: string };
+  | { type: "error"; run_id: string; message: string }
+  | { type: "turn_interrupted"; run_id: string }
+  | { type: "user_message"; run_id: string; text: string };
 
 /** Mirrors `harness_core::isolation::Patch`. */
 export type Patch = {
@@ -131,6 +133,10 @@ export type Worker = {
   branch: string | null;
   is_error: boolean;
   startedAt: number;
+  /** The tool the worker is using right now, while it runs. */
+  currentTool: string | null;
+  /** Recent tool calls and messages, newest last — what the worker is actually doing. */
+  activity: WorkerActivity[];
 };
 
 export type UsageRow = {
@@ -147,7 +153,7 @@ export type UsageRow = {
 export type ChatItem =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string }
-  | { kind: "tool"; name: string; workerId?: string }
+  | { kind: "tool"; name: string; toolUseId?: string; workerId?: string }
   | { kind: "notice"; text: string; tone: "info" | "warn" | "error" };
 
 export const totalInput = (u: Usage) =>
@@ -199,3 +205,8 @@ export type QuotaReport = {
   providers: ProviderQuota[];
   rate_limited: string[];
 };
+
+/** One line of a worker's live activity. */
+export type WorkerActivity =
+  | { kind: "tool"; name: string; detail: string | null }
+  | { kind: "text"; text: string };

@@ -171,6 +171,7 @@ pub async fn run(spec: &WorkerSpec, sink: &EventSink) -> Result<RunOutcome> {
             cost_usd: result.cost_usd,
             backend_session_id: result.backend_session_id,
             is_error: result.is_error,
+            cancelled: false,
         }),
         // No result line at all: the CLI died before finishing a turn.
         None => Ok(RunOutcome {
@@ -188,6 +189,8 @@ pub async fn run(spec: &WorkerSpec, sink: &EventSink) -> Result<RunOutcome> {
 pub struct ClaudeSession {
     child: Child,
     stdin: ChildStdin,
+    /// Correlates control requests with their responses.
+    next_request: u64,
     pub run_id: String,
     pub backend_session_id: Option<String>,
 }
@@ -237,6 +240,7 @@ impl ClaudeSession {
             Self {
                 child,
                 stdin,
+                next_request: 0,
                 run_id,
                 backend_session_id: None,
             },
@@ -246,6 +250,29 @@ impl ClaudeSession {
 
     /// Queue a user turn. Returns as soon as the line is written; the reply arrives on the
     /// event stream.
+    /// Stop the turn in progress, keeping the process and its conversation.
+    ///
+    /// Uses the CLI's stream-json control protocol. Verified against the real CLI: the
+    /// turn ends within a fraction of a second with a `result` whose subtype is
+    /// `error_during_execution`, and the same process answers the next turn normally —
+    /// so a stop costs neither the conversation nor its cached context.
+    pub async fn interrupt(&mut self) -> Result<()> {
+        self.next_request += 1;
+        let message = serde_json::json!({
+            "type": "control_request",
+            "request_id": format!("interrupt-{}", self.next_request),
+            "request": { "subtype": "interrupt" },
+        });
+        let mut line = serde_json::to_string(&message)?;
+        line.push('\n');
+        self.stdin
+            .write_all(line.as_bytes())
+            .await
+            .context("writing an interrupt to the orchestrator — has the process exited?")?;
+        self.stdin.flush().await?;
+        Ok(())
+    }
+
     pub async fn send(&mut self, text: &str) -> Result<()> {
         let message = serde_json::json!({
             "type": "user",

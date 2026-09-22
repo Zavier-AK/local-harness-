@@ -180,7 +180,25 @@ impl Orchestrator {
 
     /// Queue a user turn. The reply arrives on the event stream.
     pub async fn send(&mut self, text: &str) -> Result<()> {
+        self.harness
+            .record_head_event(HarnessEvent::UserMessage {
+                run_id: self.session.run_id.clone(),
+                text: text.to_string(),
+            })
+            .await;
         self.session.send(text).await
+    }
+
+    /// Stop the head agent's current turn. The conversation and the process survive,
+    /// so the next message carries on from where it was stopped.
+    pub async fn interrupt(&mut self) -> Result<()> {
+        self.session.interrupt().await?;
+        self.harness
+            .record_head_event(HarnessEvent::TurnInterrupted {
+                run_id: self.session.run_id.clone(),
+            })
+            .await;
+        Ok(())
     }
 
     pub async fn shutdown(self) -> Result<()> {

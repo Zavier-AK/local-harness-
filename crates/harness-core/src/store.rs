@@ -270,6 +270,33 @@ impl Store {
     }
 
     /// Replay a session's event log, for reopening a session in the UI.
+    /// The conversation events for a project across all of its sessions, oldest first,
+    /// keeping only the most recent `limit`.
+    ///
+    /// Restricted to what a chat transcript shows: what the person said, what the head
+    /// agent said and did, and turns that were stopped. Worker lifecycle is left out —
+    /// it belongs to the rail, and its workers are long gone after a restart.
+    pub fn project_history(&self, project_root: &str, limit: usize) -> Result<Vec<HarnessEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT events.payload FROM events \
+             JOIN sessions ON sessions.id = events.session_id \
+             WHERE sessions.project_root = ?1 \
+               AND json_extract(events.payload, '$.type') IN \
+                   ('user_message', 'assistant_text', 'tool_call', 'turn_interrupted', 'run_finished', 'error') \
+             ORDER BY events.id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![project_root, limit as i64], |row| {
+            row.get::<_, String>(0)
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(serde_json::from_str(&row?)?);
+        }
+        out.reverse();
+        Ok(out)
+    }
+
     pub fn replay(&self, session_id: &str) -> Result<Vec<HarnessEvent>> {
         let mut stmt = self
             .conn

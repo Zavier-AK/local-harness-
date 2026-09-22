@@ -29,8 +29,15 @@ export default function ProjectSidebar({ projects, onFocus, onClose, onAdd }: Pr
     <aside className="sidebar">
       <div className="sidebar-head">
         <h2>Projects</h2>
-        <button className="link" onClick={onAdd}>
-          Open…
+        <button
+          className="icon-button"
+          onClick={onAdd}
+          aria-label="Open a project"
+          title="Open a project (⌘N)"
+        >
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          </svg>
         </button>
       </div>
 

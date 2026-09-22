@@ -60,6 +60,9 @@ pub struct Harness {
     rate_limited: RwLock<Vec<String>>,
     /// The head agent's run id, so its usage lands in the meter too.
     orchestrator_run: RwLock<Option<String>>,
+    /// One stop switch per live worker, so a person can end a run that has gone wrong
+    /// without closing the whole project.
+    cancels: RwLock<HashMap<String, tokio::sync::watch::Sender<bool>>>,
 }
 
 impl Harness {
@@ -80,6 +83,7 @@ impl Harness {
             pending_merges: RwLock::new(HashMap::new()),
             rate_limited: RwLock::new(Vec::new()),
             orchestrator_run: RwLock::new(None),
+            cancels: RwLock::new(HashMap::new()),
         }
     }
 
@@ -120,6 +124,17 @@ impl Harness {
             .lock()
             .await
             .latest_orchestrator_backend_session(&key)
+    }
+
+    /// Stop a running worker. Returns false if it is not running, or already finished.
+    ///
+    /// Its process is killed, whatever it had written is committed to its branch so
+    /// nothing is lost, and it finishes with status `Cancelled`.
+    pub async fn cancel_worker(&self, worker_id: &str) -> bool {
+        match self.cancels.read().await.get(worker_id) {
+            Some(stop) => stop.send(true).is_ok(),
+            None => false,
+        }
     }
 
     pub fn session_id(&self) -> &str {
@@ -287,6 +302,9 @@ impl Harness {
         let role = self.registry.read().await.get(&role_name)?.clone();
         let worker_id = format!("w-{}", Uuid::new_v4().simple());
 
+        let (stop, mut stopped) = tokio::sync::watch::channel(false);
+        self.cancels.write().await.insert(worker_id.clone(), stop);
+
         self.upsert(WorkerRecord {
             id: worker_id.clone(),
             role: role_name.clone(),
@@ -354,7 +372,24 @@ impl Harness {
             context_files,
         };
 
-        let outcome = agents::run_worker(&spec, &self.events).await;
+        // Dropping the worker's future kills its process: `claude` and `codex` are spawned
+        // with `kill_on_drop`, and an HTTP request is abandoned when its future goes. So
+        // one select here stops every backend the same way.
+        let outcome = if *stopped.borrow() {
+            // Stopped while its workspace was still being prepared: never start it.
+            Ok(stopped_outcome())
+        } else {
+            tokio::select! {
+                outcome = agents::run_worker(&spec, &self.events) => outcome,
+                _ = stopped.wait_for(|stop| *stop) => Ok(stopped_outcome()),
+            }
+        };
+        self.cancels.write().await.remove(&worker_id);
+        // Announced before `WorkerFinished`, which carries only `is_error`: without this a
+        // stopped worker would be indistinguishable from a failed one.
+        if matches!(&outcome, Ok(o) if o.cancelled) {
+            self.set_status(&worker_id, WorkerStatus::Cancelled).await;
+        }
 
         // A backend that failed to launch is still a finished worker, not a lost one.
         let outcome = match outcome {
@@ -373,10 +408,12 @@ impl Harness {
         let diff = workspace.diff().await.unwrap_or_default();
         let branch = workspace.mergeable_branch().map(str::to_string);
         if branch.is_some() && diff.files_changed > 0 {
-            workspace
-                .commit(&format!("harness: {role_name} ({worker_id})"))
-                .await
-                .ok();
+            let message = if outcome.cancelled {
+                format!("harness: {role_name} ({worker_id}) — stopped before finishing")
+            } else {
+                format!("harness: {role_name} ({worker_id})")
+            };
+            workspace.commit(&message).await.ok();
         }
         let workspace_cwd = workspace.cwd.clone();
         if let Err(err) = workspace.release().await {
@@ -399,7 +436,16 @@ impl Harness {
                 )
                 .ok();
             store
-                .finish_run(&worker_id, if outcome.is_error { "failed" } else { "done" })
+                .finish_run(
+                    &worker_id,
+                    if outcome.cancelled {
+                        "cancelled"
+                    } else if outcome.is_error {
+                        "failed"
+                    } else {
+                        "done"
+                    },
+                )
                 .ok();
             if let Some(backend_session_id) = &outcome.backend_session_id {
                 store
@@ -411,7 +457,9 @@ impl Harness {
         let record = WorkerRecord {
             id: worker_id.clone(),
             role: role_name,
-            status: if outcome.is_error {
+            status: if outcome.cancelled {
+                WorkerStatus::Cancelled
+            } else if outcome.is_error {
                 WorkerStatus::Failed
             } else {
                 WorkerStatus::Done
@@ -597,51 +645,63 @@ impl Harness {
     /// Wired to the orchestrator's stream, this turns "am I near the limit?" from a guess
     /// into something the engine reacts to.
     pub async fn note_event(&self, event: &HarnessEvent) {
+        let head = self.orchestrator_run.read().await.clone();
+        let is_head = |run_id: &str| head.as_deref() == Some(run_id);
+
+        // The head agent's side of the conversation is persisted here, because its events
+        // never pass through `record` — they come straight off its stdout. Only settled
+        // events: partial text deltas would bloat the store and replay as noise.
+        let persist = match event {
+            HarnessEvent::AssistantText {
+                run_id,
+                partial: false,
+                ..
+            }
+            | HarnessEvent::ToolCall { run_id, .. }
+            | HarnessEvent::RunFinished { run_id, .. }
+            | HarnessEvent::Error { run_id, .. } => is_head(run_id),
+            _ => false,
+        };
+        if persist {
+            if let Err(err) = self.store.lock().await.append_event(&self.session_id, event) {
+                tracing::warn!("failed to persist head-agent event: {err}");
+            }
+        }
+
         match event {
             HarnessEvent::SessionStarted {
                 run_id,
                 backend_session_id: Some(backend_session_id),
                 ..
-            } => {
-                let is_orchestrator = self
-                    .orchestrator_run
-                    .read()
+            } if is_head(run_id) => {
+                self.store
+                    .lock()
                     .await
-                    .as_deref()
-                    .is_some_and(|id| id == run_id);
-                if is_orchestrator {
-                    self.store
-                        .lock()
-                        .await
-                        .set_backend_session_id(run_id, backend_session_id)
-                        .ok();
-                }
+                    .set_backend_session_id(run_id, backend_session_id)
+                    .ok();
             }
 
             HarnessEvent::ApiRetry { error, .. } if error == "rate_limit" => {
                 self.mark_rate_limited(Provider::Claude.as_str()).await;
             }
 
-            // A successful turn means the limit, if we had noted one, has lifted.
             HarnessEvent::RunFinished {
                 run_id,
                 usage,
                 cost_usd,
-                is_error: false,
+                is_error,
                 ..
             } => {
-                self.clear_rate_limit(Provider::Claude.as_str()).await;
+                // Only a successful turn is evidence the limit has lifted.
+                if !is_error {
+                    self.clear_rate_limit(Provider::Claude.as_str()).await;
+                }
 
-                let is_orchestrator = self
-                    .orchestrator_run
-                    .read()
-                    .await
-                    .as_deref()
-                    .is_some_and(|id| id == run_id);
-
-                // Worker usage is recorded by `delegate` once the run settles; recording
-                // it here as well would double count it.
-                if is_orchestrator {
+                // Recorded whether or not the turn succeeded: a failed or stopped turn
+                // still spent quota, and leaving it out would understate burn exactly
+                // when something went wrong. Worker usage is recorded by `delegate` once
+                // the run settles; recording it here too would double count it.
+                if is_head(run_id) {
                     self.store
                         .lock()
                         .await
@@ -659,5 +719,39 @@ impl Harness {
 
             _ => {}
         }
+    }
+
+    /// Persist and broadcast an event on behalf of the head agent — what the person
+    /// typed, or that they stopped a turn. These originate in the app rather than in the
+    /// agent's output, so nothing else would record them.
+    pub async fn record_head_event(&self, event: HarnessEvent) {
+        self.record(event).await;
+    }
+
+    /// The head agent's conversation for a project, across every session it has had.
+    ///
+    /// Each app start is a new session, so a per-session replay would show nothing
+    /// after a restart. Newest last, capped at `limit` events.
+    pub async fn project_history(&self, limit: usize) -> Result<Vec<HarnessEvent>> {
+        let root = self.workspaces.project_root();
+        let key = root
+            .canonicalize()
+            .unwrap_or_else(|_| root.to_path_buf())
+            .display()
+            .to_string();
+        self.store.lock().await.project_history(&key, limit)
+    }
+}
+
+/// What a stopped worker reports. Worded for the head agent as much as the person: it
+/// should not retry work someone deliberately stopped.
+fn stopped_outcome() -> agents::RunOutcome {
+    agents::RunOutcome {
+        text: "Stopped by the user before finishing. Anything written so far was kept on \
+               the branch; do not retry this task unless asked."
+            .into(),
+        is_error: true,
+        cancelled: true,
+        ..Default::default()
     }
 }

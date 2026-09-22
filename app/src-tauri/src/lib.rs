@@ -804,6 +804,48 @@ pub struct QuotaReport {
     rate_limited: Vec<String>,
 }
 
+/// Stop the head agent's current turn. Its conversation survives: the next message
+/// carries on from the point it was stopped.
+#[tauri::command]
+async fn stop_turn(state: State<'_, AppState>, project: Option<String>) -> Result<(), String> {
+    let key = key_for(&state, project).await?;
+    let mut projects = state.projects.lock().await;
+    let session = projects.get_mut(&key).ok_or("no session for that project")?;
+    let Head::Live(orchestrator) = &mut session.head else {
+        return Ok(()); // Suspended: nothing is running to stop.
+    };
+    orchestrator.interrupt().await.map_err(|e| format!("{e:#}"))
+}
+
+/// Stop one worker. Its process is killed and anything it wrote is kept on its branch.
+#[tauri::command]
+async fn stop_worker(
+    state: State<'_, AppState>,
+    worker_id: String,
+    project: Option<String>,
+) -> Result<bool, String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
+    Ok(session.harness.cancel_worker(&worker_id).await)
+}
+
+/// The head agent's conversation for a project, so it survives restarts and switching.
+#[tauri::command]
+async fn chat_history(
+    state: State<'_, AppState>,
+    project: Option<String>,
+) -> Result<Vec<HarnessEvent>, String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
+    session
+        .harness
+        .project_history(400)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
 /// Every open project, for the switcher.
 ///
 /// The most-reported failure with tools like this is losing track of work — a session
@@ -925,6 +967,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             app.manage(AppState::default());
             Ok(())
@@ -936,6 +979,9 @@ pub fn run() {
             save_role_assignments,
             session_roles,
             list_projects,
+            stop_turn,
+            stop_worker,
+            chat_history,
             quotas,
             focus_project,
             close_project,

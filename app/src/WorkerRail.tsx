@@ -1,4 +1,4 @@
-import type { DetectedBackend, Role, Worker } from "./types";
+import type { DetectedBackend, Role, Worker, WorkerActivity } from "./types";
 import { totalInput } from "./types";
 
 type Props = {
@@ -8,7 +8,18 @@ type Props = {
   selected: string | null;
   onSelect: (id: string) => void;
   onChangeFleet: () => void;
+  onStopWorker: (id: string) => void;
 };
+
+/** Statuses a stop can still act on. */
+const STOPPABLE = new Set(["queued", "blocked", "preparing", "running"]);
+
+/** One line for the card: the tool and what it touched, or the last thing it said. */
+export function describeActivity(item: WorkerActivity): string {
+  if (item.kind === "tool") return item.detail ? `${item.name} ${item.detail}` : item.name;
+  const line = item.text.split("\n")[0];
+  return line.length > 90 ? `${line.slice(0, 87)}…` : line;
+}
 
 const STATUS_LABEL: Record<Worker["status"], string> = {
   queued: "queued",
@@ -17,7 +28,7 @@ const STATUS_LABEL: Record<Worker["status"], string> = {
   running: "running",
   done: "done",
   failed: "failed",
-  cancelled: "cancelled",
+  cancelled: "stopped",
 };
 
 export default function WorkerRail({
@@ -27,6 +38,7 @@ export default function WorkerRail({
   selected,
   onSelect,
   onChangeFleet,
+  onStopWorker,
 }: Props) {
   return (
     <aside className="rail">
@@ -88,8 +100,20 @@ export default function WorkerRail({
       )}
 
       {workers.map((worker) => (
+        // The stop control sits beside the card rather than inside it: the card is itself
+        // a button, and a button nested in a button is not valid markup.
+        <div key={worker.id} className="worker-card-wrap">
+        {STOPPABLE.has(worker.status) && (
+          <button
+            className="worker-stop"
+            onClick={() => onStopWorker(worker.id)}
+            title="Stop this worker — anything it has written is kept"
+            aria-label={`Stop ${worker.role}`}
+          >
+            Stop
+          </button>
+        )}
         <button
-          key={worker.id}
           className={`worker-card ${worker.status} ${selected === worker.id ? "selected" : ""}`}
           onClick={() => onSelect(worker.id)}
         >
@@ -101,6 +125,12 @@ export default function WorkerRail({
           <div className="worker-meta muted mono">
             {worker.provider} · {worker.isolation}
           </div>
+
+          {/* What it is doing right now, while it runs — the rail used to show only that
+              a worker was running, never what it was running. */}
+          {!worker.summary && worker.activity.length > 0 && (
+            <p className="worker-now mono">{describeActivity(worker.activity[worker.activity.length - 1])}</p>
+          )}
 
           {worker.summary && <p className="worker-summary">{worker.summary}</p>}
 
@@ -117,6 +147,7 @@ export default function WorkerRail({
             )}
           </div>
         </button>
+        </div>
       ))}
     </aside>
   );

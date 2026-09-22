@@ -500,3 +500,143 @@ isolation = "worktree"
         .expect_err("a role the fleet no longer defines must not run");
     assert!(error.to_string().contains("no role named"), "got: {error}");
 }
+
+/// A person can stop a worker that has gone wrong, without losing what it wrote.
+#[tokio::test]
+async fn stopping_a_worker_kills_it_and_keeps_its_partial_work() {
+    let f = fixture().await;
+    let harness = Arc::clone(&f.harness);
+
+    let running = tokio::spawn({
+        let harness = Arc::clone(&harness);
+        async move {
+            harness
+                .delegate("local_builder", "SLOW:half-done.txt:partial", vec![])
+                .await
+        }
+    });
+
+    // Wait until it is actually running, then stop it.
+    let worker_id = loop {
+        if let Some(worker) = harness
+            .workers()
+            .await
+            .into_iter()
+            .find(|w| w.status == WorkerStatus::Running)
+        {
+            break worker.id;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    // Give the mock a moment to write its file before the stop lands.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(harness.cancel_worker(&worker_id).await, "a running worker should accept a stop");
+
+    let record = tokio::time::timeout(std::time::Duration::from_secs(10), running)
+        .await
+        .expect("a stopped worker must finish promptly, not wait out its task")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(record.status, WorkerStatus::Cancelled);
+    assert!(record.is_error);
+    assert!(
+        record.summary.contains("do not retry"),
+        "the head agent should be told not to redo deliberately stopped work"
+    );
+
+    // The partial work is on the branch, reviewable like any other.
+    let branch = record.branch.expect("worktree workers keep a branch");
+    let show = Command::new("git")
+        .args(["show", &format!("{branch}:half-done.txt")])
+        .current_dir(&f.root)
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&show.stdout), "partial");
+
+    // And a finished worker no longer accepts a stop.
+    assert!(!harness.cancel_worker(&worker_id).await);
+}
+
+/// The head agent's conversation outlives the session that produced it.
+#[tokio::test]
+async fn the_head_agents_conversation_is_kept_across_sessions() {
+    let f = fixture().await;
+    let harness = &f.harness;
+    harness.register_orchestrator("orchestrator-s1", None).await;
+
+    harness
+        .record_head_event(HarnessEvent::UserMessage {
+            run_id: "orchestrator-s1".into(),
+            text: "plan the release".into(),
+        })
+        .await;
+    // What the agent says arrives through `note_event`, as it does from the real CLI.
+    for event in [
+        HarnessEvent::AssistantText {
+            run_id: "orchestrator-s1".into(),
+            text: "partial".into(),
+            partial: true,
+        },
+        HarnessEvent::AssistantText {
+            run_id: "orchestrator-s1".into(),
+            text: "Here is the plan.".into(),
+            partial: false,
+        },
+        // A worker's own text is not part of the head agent's conversation.
+        HarnessEvent::AssistantText {
+            run_id: "w-someone-else".into(),
+            text: "worker chatter".into(),
+            partial: false,
+        },
+    ] {
+        harness.note_event(&event).await;
+    }
+    harness
+        .record_head_event(HarnessEvent::TurnInterrupted {
+            run_id: "orchestrator-s1".into(),
+        })
+        .await;
+
+    let history = harness.project_history(100).await.unwrap();
+    let kinds: Vec<String> = history
+        .iter()
+        .map(|e| serde_json::to_value(e).unwrap()["type"].as_str().unwrap().to_string())
+        .collect();
+
+    assert_eq!(
+        kinds,
+        ["user_message", "assistant_text", "turn_interrupted"],
+        "only settled head-agent events belong in the transcript"
+    );
+    match &history[1] {
+        HarnessEvent::AssistantText { text, .. } => assert_eq!(text, "Here is the plan."),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+/// A turn that failed or was stopped still spent quota, so it still counts.
+#[tokio::test]
+async fn a_stopped_head_turn_still_counts_against_the_window() {
+    let f = fixture().await;
+    f.harness.register_orchestrator("orchestrator-s1", None).await;
+
+    f.harness
+        .note_event(&HarnessEvent::RunFinished {
+            run_id: "orchestrator-s1".into(),
+            text: String::new(),
+            usage: harness_core::event::Usage {
+                input_tokens: 1200,
+                output_tokens: 40,
+                ..Default::default()
+            },
+            cost_usd: None,
+            is_error: true,
+        })
+        .await;
+
+    let rows = f.harness.usage_window(3600).await.unwrap();
+    let claude = rows.iter().find(|r| r.provider == "claude").expect("usage recorded");
+    assert_eq!(claude.usage.input_tokens, 1200);
+}
