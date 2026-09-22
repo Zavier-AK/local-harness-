@@ -26,6 +26,51 @@ use tauri::{
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 
+/// The first argument that makes this binary answer a Claude Code hook instead of
+/// opening the app. See `main.rs`.
+pub const HOOK_ARG: &str = "__harness-hook";
+
+/// Answer a Claude Code worktree hook: read its JSON from stdin, act, and return the exit
+/// code. `WorktreeCreate` prints the worktree path as its last stdout line, which is what
+/// Claude Code reads; everything else goes to stderr.
+pub fn run_hook(which: Option<&str>) -> i32 {
+    use std::io::Read;
+    let mut input = String::new();
+    if let Err(err) = std::io::stdin().read_to_string(&mut input) {
+        eprintln!("harness hook: reading stdin: {err}");
+        return 1;
+    }
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("harness hook: {err}");
+            return 1;
+        }
+    };
+    let outcome = runtime.block_on(async {
+        match which {
+            Some("worktree-create") => harness_core::hooks::worktree_create(&input)
+                .await
+                .map(|path| println!("{}", path.display())),
+            Some("worktree-remove") => harness_core::hooks::worktree_remove(&input).await,
+            other => Err(anyhow::anyhow!("unknown hook {other:?}")),
+        }
+    });
+    match outcome {
+        Ok(()) => 0,
+        Err(err) => {
+            eprintln!("harness hook: {err:#}");
+            1
+        }
+    }
+}
+
+/// How Claude Code should invoke this app as a hook: this very binary, plus the flag.
+fn hook_command() -> Option<Vec<String>> {
+    let exe = std::env::current_exe().ok()?;
+    Some(vec![exe.display().to_string(), HOOK_ARG.to_string()])
+}
+
 /// Event channel the UI subscribes to.
 const EVENT_CHANNEL: &str = "harness://event";
 const PREVIEW_LABEL: &str = "preview";
@@ -297,10 +342,31 @@ async fn save_role_assignments(
             .collect::<Vec<_>>()
             .join("; ");
 
+        // A native role's subagent definition was fixed when the head agent's process
+        // started, so the Agent tool would keep running the old one. `delegate` always
+        // reads the live fleet, so route a changed native role through it until the
+        // project is reopened.
+        let fixed: Vec<String> = patches
+            .iter()
+            .filter(|patch| {
+                harness_core::native::native_roles(&registry).contains_key(&patch.role_name)
+            })
+            .map(|patch| format!("`{}`", patch.role_name))
+            .collect();
+        let fixed_note = if fixed.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " Your Agent-tool definition for {} is fixed for this session, so until the \
+                 project is reopened delegate to it with the `delegate` tool instead.",
+                fixed.join(", ")
+            )
+        };
+
         if !changed.is_empty() {
             let notice = format!(
                 "The fleet changed: {changed}. Call `list_roles` before your next \
-                 delegation so you are planning against the current fleet."
+                 delegation so you are planning against the current fleet.{fixed_note}"
             );
             if let Head::Live(orchestrator) = &mut session.head {
                 if let Err(error) = orchestrator.send(&notice).await {
@@ -338,6 +404,7 @@ async fn start_session(
                         .resumable_backend_session()
                         .await
                         .map_err(|e| format!("{e:#}"))?,
+                    hook_command(),
                 )
                 .await
                 .map_err(|e| format!("{e:#}"))?;
@@ -399,6 +466,7 @@ async fn start_session(
         model.clone(),
         Some(200),
         resume_session_id,
+        hook_command(),
     )
     .await
     .map_err(|e| format!("{e:#}"))?;
@@ -923,6 +991,7 @@ async fn focus_project(
             session.model.clone(),
             Some(200),
             resume,
+            hook_command(),
         )
         .await
         .map_err(|e| format!("{e:#}"))?;

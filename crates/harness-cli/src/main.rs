@@ -83,6 +83,10 @@ enum Command {
         bind: String,
     },
 
+    /// Answer a Claude Code worktree hook. Run by Claude Code itself, not by people.
+    #[command(hide = true)]
+    Hook { which: String },
+
     /// Token totals for the rolling window that governs a subscription.
     Usage {
         #[arg(long, default_value = "5")]
@@ -309,10 +313,30 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // Hooks run before anything else: Claude Code is waiting on stdout for a path, and
+    // building a harness here would load a roles file and open a database for nothing.
+    if let Command::Hook { which } = &cli.command {
+        use std::io::Read;
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input)?;
+        match which.as_str() {
+            "worktree-create" => {
+                let path = harness_core::hooks::worktree_create(&input).await?;
+                println!("{}", path.display());
+            }
+            "worktree-remove" => harness_core::hooks::worktree_remove(&input).await?,
+            other => anyhow::bail!("unknown hook `{other}`"),
+        }
+        return Ok(());
+    }
+
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let harness = build_harness(&cli, tx).await?;
 
     match &cli.command {
+        Command::Hook { .. } => unreachable!("handled before the harness is built"),
+
         Command::Roles => {
             drop(rx);
             let roles = harness.list_roles_probed().await;
@@ -434,6 +458,10 @@ async fn main() -> Result<()> {
                 model.clone(),
                 Some(*max_turns),
                 None,
+                // This same binary answers Claude Code's worktree hook.
+                std::env::current_exe()
+                    .ok()
+                    .map(|exe| vec![exe.display().to_string(), "hook".to_string()]),
             )
             .await?;
 
