@@ -143,6 +143,10 @@ cargo run -p harness-cli -- usage --hours 5
 cd app && npm install && npm run tauri dev
 ```
 
+**After pulling, run `npm install` in `app/` again.** New features sometimes add frontend
+packages, and Vite reports a missing one as `Failed to resolve import "…"` rather than
+installing it. Cargo fetches new Rust crates on its own.
+
 On Linux the desktop app additionally needs `libgtk-3-dev`, `libwebkit2gtk-4.1-dev`,
 `libayatana-appindicator3-dev` and `librsvg2-dev`. macOS needs none of these — it uses
 WKWebView.
