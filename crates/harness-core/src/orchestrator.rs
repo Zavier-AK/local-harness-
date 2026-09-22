@@ -27,6 +27,12 @@ pub const ORCHESTRATOR_TOOLS: &[&str] = &["Read", "Grep", "Glob"];
 
 /// The brief appended to the head agent's system prompt.
 pub fn orchestrator_brief(roles: &[crate::engine::RoleInfo]) -> String {
+    orchestrator_brief_with(roles, &[])
+}
+
+/// The brief, for a fleet in which `native` roles are Claude Code subagents the head
+/// delegates to with its own `Agent` tool rather than through `delegate`.
+pub fn orchestrator_brief_with(roles: &[crate::engine::RoleInfo], native: &[String]) -> String {
     // A role whose backend is missing cannot do work, and naming it only invites the
     // head agent to spend a turn discovering that. Probed-unavailable roles are held
     // back; unprobed roles (available: None) are listed, since we do not know otherwise.
@@ -54,7 +60,11 @@ pub fn orchestrator_brief(roles: &[crate::engine::RoleInfo]) -> String {
                     .as_ref()
                     .map(|b| format!(" — {b}"))
                     .unwrap_or_default(),
-            )
+            ) + if native.contains(&r.name) {
+                " [your subagent: use the Agent tool]"
+            } else {
+                ""
+            }
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -78,11 +88,31 @@ pub fn orchestrator_brief(roles: &[crate::engine::RoleInfo]) -> String {
         )
     };
 
+    // Where the head agent's own `Agent` tool is in play, say so first: it is the tool the
+    // model already knows best, and the one piece of its behaviour that must be steered is
+    // what it does when the work is not where it expects. Tested live: a head agent that
+    // could not see a subagent's file in the checkout copied it there with `cp`, routing
+    // around the review. It must be told that absence is correct.
+    let native_note = if native.is_empty() {
+        String::new()
+    } else {
+        "\n\
+         - Roles marked [your subagent] are yours to delegate to with the Agent tool, \
+         using the role name as subagent_type. Each works in its own git worktree on its \
+         own branch. Its changes will NOT appear in the project checkout — that is \
+         correct, not a failure. They are put in front of the user for review \
+         automatically. Never copy them into the checkout, never redo them yourself, and \
+         do not call `request_merge` for them. Tell the user the work is waiting for their \
+         review.\n\
+         - For every other role, use the `delegate` tool."
+            .to_string()
+    };
+
     format!(
         "You are the orchestrator of a local multi-agent harness. You plan and delegate; \
          you do not write code yourself.\n\n\
          Your fleet:\n{fleet}{unavailable}\n\n\
-         How to work:\n\
+         How to work:{native_note}\n\
          - Delegate with the `delegate` tool. Prefer delegating over answering from your \
          own context: workers run in their own context windows and cost far less of your \
          budget than doing the work here.\n\
@@ -118,6 +148,24 @@ pub fn orchestrator_role(model: Option<String>, max_turns: Option<u32>) -> Role 
     }
 }
 
+/// The head agent's role when some roles are native subagents.
+///
+/// Differs from [`orchestrator_role`] in two ways, both forced by how Claude Code applies
+/// permissions, and both verified against the real CLI:
+///
+/// * It is allowed the `Agent` tool.
+/// * It carries **no session-wide deny list.** `--disallowedTools` binds every subagent
+///   in the session too — a builder subagent was refused `Write` with "disabled for this
+///   session, in subagents as well as here". The head stays read-only another way: it is
+///   approved only these tools, and with nobody to answer a permission prompt, any write
+///   it attempts is refused (also verified). Each subagent carries its own permissions.
+pub fn orchestrator_role_native(model: Option<String>, max_turns: Option<u32>) -> Role {
+    let mut role = orchestrator_role(model, max_turns);
+    role.tools.push("Agent".into());
+    role.isolation = Isolation::None;
+    role
+}
+
 /// A running head chat: the MCP server, the Claude process, and the event stream.
 pub struct Orchestrator {
     session: ClaudeSession,
@@ -134,11 +182,37 @@ impl Orchestrator {
         model: Option<String>,
         max_turns: Option<u32>,
         resume_session_id: Option<String>,
+        native_hook: Option<Vec<String>>,
     ) -> Result<(Self, UnboundedReceiver<HarnessEvent>)> {
         let mcp = mcp::serve(Arc::clone(&harness)).await?;
-        let role = orchestrator_role(model, max_turns);
+
+        // Native delegation needs a way to run our worktree hook; without one, every role
+        // stays on `delegate` exactly as before.
+        let registry = harness.registry_snapshot().await;
+        let agents = native_hook
+            .as_ref()
+            .and_then(|_| crate::native::agents_json(&registry));
+        let native: Vec<String> = if agents.is_some() {
+            crate::native::native_roles(&registry).into_keys().collect()
+        } else {
+            Vec::new()
+        };
+
+        let role = if native.is_empty() {
+            orchestrator_role(model, max_turns)
+        } else {
+            orchestrator_role_native(model, max_turns)
+        };
+        let mut extra_args = Vec::new();
+        if let (Some(agents), Some(hook)) = (agents, &native_hook) {
+            extra_args.push("--agents".into());
+            extra_args.push(agents);
+            extra_args.push("--settings".into());
+            extra_args.push(crate::native::hook_settings(hook));
+        }
+
         // Probe before briefing, so the head agent never plans around a dead backend.
-        let brief = orchestrator_brief(&harness.list_roles_probed().await);
+        let brief = orchestrator_brief_with(&harness.list_roles_probed().await, &native);
 
         let run_id = format!("orchestrator-{}", harness.session_id());
         harness
@@ -152,6 +226,7 @@ impl Orchestrator {
             Some(&mcp.claude_mcp_config()),
             Some(&brief),
             resume_session_id.as_deref(),
+            &extra_args,
         )
         .await?;
 
@@ -312,5 +387,36 @@ mod tests {
         let brief = orchestrator_brief(&fleet());
         assert!(brief.contains("only queues the diff"));
         assert!(brief.contains("Never tell the user work has landed"));
+    }
+
+    /// With native roles the head may use Claude Code's own `Agent` tool — and must still be
+    /// unable to change anything itself, without a session-wide deny list (which would also
+    /// bind every subagent it starts).
+    #[test]
+    fn the_native_head_can_delegate_but_cannot_write() {
+        let role = orchestrator_role_native(None, None);
+        let allowed = role.effective_tools();
+        assert!(allowed.iter().any(|t| t == "Agent"));
+        for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"] {
+            assert!(
+                !allowed.iter().any(|t| t == tool),
+                "the head must not be approved {tool}: a live head used Bash `cp` to copy a \
+                 subagent's work past the review"
+            );
+        }
+        assert!(
+            role.denied_tools().is_empty(),
+            "a session-wide deny list would stop builder subagents from writing"
+        );
+    }
+
+    #[test]
+    fn the_brief_steers_native_roles_to_the_agent_tool_and_away_from_the_checkout() {
+        let brief = orchestrator_brief_with(&fleet(), &["builder".to_string()]);
+        assert!(brief.contains("[your subagent: use the Agent tool]"));
+        assert!(brief.contains("will NOT appear in the project checkout"));
+        assert!(brief.contains("Never copy them into the checkout"));
+        // The legacy brief is unchanged when nothing is native.
+        assert!(!orchestrator_brief(&fleet()).contains("Agent tool"));
     }
 }

@@ -138,6 +138,37 @@ pub enum HarnessEvent {
         windows: Vec<crate::quota::QuotaWindow>,
     },
 
+    /// The head agent started one of Claude Code's own subagents (`system/task_started`).
+    SubagentStarted {
+        run_id: String,
+        task_id: String,
+        tool_use_id: String,
+        /// The agent definition it runs — for a native role, the role's name.
+        subagent_type: String,
+        description: String,
+    },
+
+    /// A running subagent's progress (`system/task_progress`): the tool it last used and
+    /// what it is doing, in the CLI's own words.
+    SubagentProgress {
+        run_id: String,
+        task_id: String,
+        description: String,
+        last_tool: Option<String>,
+        total_tokens: u64,
+    },
+
+    /// A subagent finished (`system/task_notification`).
+    SubagentFinished {
+        run_id: String,
+        task_id: String,
+        status: String,
+        summary: String,
+        /// Every token the subagent spent across all its requests. The head agent's own
+        /// `result` usage does not include these.
+        total_tokens: u64,
+    },
+
     /// The person stopped the head agent's turn. The turn's own `RunFinished` still
     /// follows, with `is_error` set — this is what lets a UI show it as stopped rather
     /// than failed.
@@ -182,6 +213,9 @@ impl HarnessEvent {
             | Self::ApiRetry { run_id, .. }
             | Self::TurnInterrupted { run_id }
             | Self::QuotaReport { run_id, .. }
+            | Self::SubagentStarted { run_id, .. }
+            | Self::SubagentProgress { run_id, .. }
+            | Self::SubagentFinished { run_id, .. }
             | Self::UserMessage { run_id, .. }
             | Self::RunFinished { run_id, .. }
             | Self::Error { run_id, .. } => run_id,

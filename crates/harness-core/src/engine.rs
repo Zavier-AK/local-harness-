@@ -149,6 +149,11 @@ impl Harness {
         &self.session_id
     }
 
+    /// The fleet as it stands, cloned out of its lock.
+    pub async fn registry_snapshot(&self) -> RoleRegistry {
+        self.registry.read().await.clone()
+    }
+
     /// Replace the fleet for every delegation from here on.
     ///
     /// Workers are spawned per delegation, so a swap needs no process to be restarted —
@@ -689,6 +694,46 @@ impl Harness {
                     .ok();
             }
 
+            // Claude Code's own subagents, seen only through the head agent's stream. Turned
+            // into ordinary workers so the rail, the diff drawer and the merge gate need
+            // not know a worker ran natively rather than as a process of ours.
+            HarnessEvent::SubagentStarted {
+                task_id,
+                subagent_type,
+                description,
+                ..
+            } => {
+                self.native_started(task_id, subagent_type, description).await;
+            }
+
+            HarnessEvent::SubagentProgress {
+                task_id,
+                description,
+                last_tool,
+                ..
+            } => {
+                let worker_id = crate::native::worker_id(task_id);
+                if self.worker(&worker_id).await.is_some() {
+                    // Emitted, not recorded: progress is for the card, not for history.
+                    self.emit(HarnessEvent::ToolCall {
+                        run_id: worker_id,
+                        tool_use_id: String::new(),
+                        name: last_tool.clone().unwrap_or_else(|| "Working".into()),
+                        input: serde_json::json!({ "description": description }),
+                    });
+                }
+            }
+
+            HarnessEvent::SubagentFinished {
+                task_id,
+                status,
+                summary,
+                total_tokens,
+                ..
+            } => {
+                self.native_finished(task_id, status, summary, *total_tokens).await;
+            }
+
             HarnessEvent::QuotaReport {
                 provider,
                 status,
@@ -743,6 +788,150 @@ impl Harness {
             }
 
             _ => {}
+        }
+    }
+
+    /// A native subagent started: register it as a worker.
+    async fn native_started(&self, task_id: &str, subagent_type: &str, description: &str) {
+        let worker_id = crate::native::worker_id(task_id);
+        // A role from roles.toml gets its worktree from our hook. Claude Code's built-in
+        // subagents (Explore, general-purpose) have no role here, run in the project with
+        // the head's read-only permissions, and are shown without a worktree.
+        let role = self.registry.read().await.roles.get(subagent_type).cloned();
+        let native = role.as_ref().is_some_and(|role| {
+            role.provider == Provider::Claude
+                && matches!(role.isolation, crate::roles::Isolation::Worktree | crate::roles::Isolation::Readonly)
+        });
+        let isolation = if native {
+            role.as_ref().map(|r| r.isolation).unwrap_or_default()
+        } else {
+            crate::roles::Isolation::None
+        };
+        let model = role.as_ref().and_then(|r| r.model.clone());
+        let cwd = if native {
+            self.workspaces
+                .project_root()
+                .join(crate::isolation::WORKTREE_DIR)
+                .join(&worker_id)
+        } else {
+            self.workspaces.project_root().to_path_buf()
+        };
+
+        self.upsert(WorkerRecord {
+            id: worker_id.clone(),
+            role: subagent_type.to_string(),
+            status: WorkerStatus::Running,
+            task: description.to_string(),
+            summary: String::new(),
+            usage: Usage::default(),
+            diff: None,
+            branch: None,
+            is_error: false,
+        })
+        .await;
+        self.store
+            .lock()
+            .await
+            .create_run(
+                &worker_id,
+                &self.session_id,
+                subagent_type,
+                Provider::Claude.as_str(),
+                model.as_deref(),
+                isolation.as_str(),
+            )
+            .ok();
+        self.record(HarnessEvent::WorkerSpawned {
+            worker_id,
+            role: subagent_type.to_string(),
+            provider: Provider::Claude.as_str().to_string(),
+            model,
+            isolation: isolation.as_str().to_string(),
+            cwd: cwd.display().to_string(),
+        })
+        .await;
+    }
+
+    /// A native subagent finished: keep its work on its branch, account for what it spent,
+    /// and put anything it changed in front of the person for review.
+    ///
+    /// Claude Code leaves a subagent's worktree on disk, uncommitted, when it made changes
+    /// — so this is where the harness does what it does for its own workers: commit to the
+    /// branch, then remove the worktree. The merge is proposed automatically, because the
+    /// head agent cannot see the work in the checkout (by design) and would otherwise have
+    /// to be told a worker id it never chose. Proposing lands nothing; only the person can.
+    async fn native_finished(&self, task_id: &str, status: &str, summary: &str, total_tokens: u64) {
+        let worker_id = crate::native::worker_id(task_id);
+        let Some(record) = self.worker(&worker_id).await else {
+            return;
+        };
+        let role = self.registry.read().await.roles.get(&record.role).cloned();
+        let isolation = role.as_ref().map(|r| r.isolation).unwrap_or_default();
+
+        let mut diff = None;
+        let mut branch = None;
+        if let Some(workspace) = self.workspaces.adopt(&worker_id, isolation) {
+            let stat = workspace.diff().await.unwrap_or_default();
+            if stat.files_changed > 0 && isolation.is_mergeable() {
+                workspace
+                    .commit(&format!("harness: {} ({worker_id})", record.role))
+                    .await
+                    .ok();
+                branch = workspace.mergeable_branch().map(str::to_string);
+                diff = Some(stat);
+            }
+            if let Err(err) = workspace.release().await {
+                tracing::warn!("failed to release native worktree {worker_id}: {err:#}");
+            }
+        }
+
+        let is_error = status != "completed";
+        // The notification reports one total, not an input/output split. It is recorded as
+        // input so the window's total is right; the split is not knowable from here.
+        let usage = Usage {
+            input_tokens: total_tokens,
+            ..Default::default()
+        };
+        {
+            let store = self.store.lock().await;
+            store
+                .record_usage(
+                    &self.session_id,
+                    &worker_id,
+                    Provider::Claude.as_str(),
+                    role.as_ref().and_then(|r| r.model.as_deref()),
+                    &usage,
+                    None,
+                )
+                .ok();
+            store
+                .finish_run(&worker_id, if is_error { "failed" } else { "done" })
+                .ok();
+        }
+
+        let finished = WorkerRecord {
+            status: if is_error { WorkerStatus::Failed } else { WorkerStatus::Done },
+            summary: summary.to_string(),
+            usage,
+            diff: diff.clone(),
+            branch: branch.clone(),
+            is_error,
+            ..record
+        };
+        self.upsert(finished).await;
+        self.record(HarnessEvent::WorkerFinished {
+            worker_id: worker_id.clone(),
+            summary: summary.to_string(),
+            usage,
+            diff,
+            is_error,
+        })
+        .await;
+
+        if branch.is_some() {
+            if let Err(err) = self.request_merge(&worker_id).await {
+                tracing::warn!("could not propose {worker_id} for review: {err:#}");
+            }
         }
     }
 

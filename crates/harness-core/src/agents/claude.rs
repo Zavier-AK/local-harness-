@@ -207,9 +207,11 @@ impl ClaudeSession {
         mcp_config: Option<&str>,
         append_system_prompt: Option<&str>,
         resume_session_id: Option<&str>,
+        extra_args: &[String],
     ) -> Result<(Self, UnboundedReceiver<HarnessEvent>)> {
         let run_id = run_id.into();
-        let args = session_args(role, mcp_config, append_system_prompt, resume_session_id);
+        let mut args = session_args(role, mcp_config, append_system_prompt, resume_session_id);
+        args.extend(extra_args.iter().cloned());
 
         let mut child = spawn(cwd, &args)?;
         log_stderr(&mut child, run_id.clone());

@@ -73,6 +73,38 @@ a first-class tool call:
 `approve_merge` is deliberately *not* an MCP tool. It exists only on the host side, driven
 by a click in the app, so no amount of model output can land code on its own.
 
+### Claude roles delegate the way Claude already does
+
+Opus is trained to hand work to subagents with Claude Code's own `Agent` tool, so the
+harness does not make it go through ours for Claude roles. At session start every Claude
+role with `worktree` or `readonly` isolation is passed to the head agent as a native
+subagent (`--agents`): its brief becomes the subagent's prompt, and its model, tools,
+turn limit and permission mode carry over. Codex and local-model roles, which the `Agent`
+tool cannot run, stay on `delegate`. The brief tells the head agent which is which.
+
+What stays the harness's job is everything around the subagent:
+
+- **Worktrees.** Claude Code's `WorktreeCreate` / `WorktreeRemove` hooks call back into
+  the harness binary, so a native subagent gets the same worktree as a delegated worker —
+  under `.harness/worktrees/`, on a `harness/` branch, with the `[worktree]` copy and
+  setup steps from `roles.toml` already run.
+- **The rail.** `task_started` / `task_progress` / `task_notification` from the stream
+  become the usual worker events, so native subagents show up as worker cards with a
+  live current tool, their token use, and a diff.
+- **The merge gate.** When a subagent finishes, its work is committed to its branch and
+  a merge is proposed automatically. It still lands only on your click.
+
+Two findings shaped this. The head agent must not have a session-level deny list —
+subagents inherit it — so it is kept read-only by being approved for nothing but
+`Read`, `Grep`, `Glob` and `Agent`, with permission prompts off. And in an early run a
+head agent that had `Bash` copied a subagent's work straight into the checkout,
+skipping review, because the work "wasn't there". The brief now says outright that
+absence from the checkout is correct.
+
+A role's subagent definition is fixed when the session starts. If you reassign a native
+role mid-session, the head agent is told to reach it through `delegate` until the project
+is reopened.
+
 The MCP server binds to an ephemeral loopback port behind a per-session bearer token.
 Anything that can reach that port can spend your subscription, so unauthenticated requests
 are refused rather than logged.
@@ -222,7 +254,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 126 engine tests, no network, no CLI login needed
+cargo test                        # 142 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -237,7 +269,7 @@ Preview discovery and URL-safety tests run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **126 engine tests, 134 including the Tauri shell** — worth stating explicitly,
+That makes **142 engine tests, 150 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats
