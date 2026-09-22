@@ -16,9 +16,10 @@ const LABEL: Record<string, string> = {
  * Subscription headroom.
  *
  * Two different kinds of number live here and they are kept visibly apart. What the
- * vendor reports as remaining is a real limit; what this harness has spent is a real
- * measurement but says nothing about how much room is left. Only Codex supplies the
- * former, so Claude shows tokens and an explanation rather than a fabricated percentage.
+ * vendor reports as remaining is a real limit — Claude sends it on its stream with every
+ * turn, Codex writes it into its session files. What this harness has spent is a real
+ * measurement too, but says nothing about how much room is left. Before a provider has
+ * reported anything, its limit shows as unknown rather than as zero.
  */
 export default function LimitsPanel({ quotas, usage, onClose }: Props) {
   const spent = new Map(usage.map((row) => [row.provider, row]));

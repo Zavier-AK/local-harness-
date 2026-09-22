@@ -56,6 +56,39 @@ fn flatten_content(value: &Value) -> String {
 /// Messages carrying a non-null `parent_tool_use_id` come from a subagent nested inside
 /// this run; they are tagged with that id so the UI can nest them rather than
 /// interleaving them into the parent transcript.
+/// The limit windows in a `rate_limit_info` object, most familiar first.
+///
+/// `unifiedWindows` maps a window name to `{utilization, resetsAt}`, with utilization as a
+/// fraction. Windows without a utilization are skipped rather than shown as zero — an
+/// unknown share of a limit is not an empty one.
+fn quota_windows(info: &Value) -> Vec<crate::quota::QuotaWindow> {
+    let Some(windows) = info.get("unifiedWindows").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+
+    let mut out: Vec<(u8, crate::quota::QuotaWindow)> = windows
+        .iter()
+        .filter_map(|(name, window)| {
+            let utilization = window.get("utilization").and_then(Value::as_f64)?;
+            let (order, label) = match name.as_str() {
+                "five_hour" => (0, "5h".to_string()),
+                "seven_day" => (1, "weekly".to_string()),
+                other => (2, other.replace('_', " ")),
+            };
+            Some((
+                order,
+                crate::quota::QuotaWindow {
+                    label,
+                    used_percent: utilization * 100.0,
+                    resets_at: window.get("resetsAt").and_then(Value::as_i64),
+                },
+            ))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.label.cmp(&b.1.label)));
+    out.into_iter().map(|(_, window)| window).collect()
+}
+
 pub fn parse_line(run_id: &str, line: &str) -> Result<ParsedLine, String> {
     let line = line.trim();
     if line.is_empty() {
@@ -200,6 +233,25 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<ParsedLine, String> {
                         is_error: block.get("is_error").and_then(Value::as_bool).unwrap_or(false),
                     });
                 }
+            }
+        }
+
+        // Sent once per turn. It is the only machine-readable account of Claude
+        // subscription quota a `-p` process gets: `/usage` is interactive-only, and the
+        // statusLine block that carries the same numbers never runs under `-p`.
+        "rate_limit_event" => {
+            if let Some(info) = value.get("rate_limit_info") {
+                let status = info
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
+                out.events.push(HarnessEvent::QuotaReport {
+                    run_id: key,
+                    provider: "claude".into(),
+                    status,
+                    windows: quota_windows(info),
+                });
             }
         }
 
@@ -389,5 +441,40 @@ mod tests {
     #[test]
     fn malformed_json_reports_rather_than_panics() {
         assert!(parse_line("run-1", "{not json").is_err());
+    }
+
+    /// Captured verbatim from a live `claude -p --output-format stream-json` run (CLI
+    /// 2.1.280); only the ids are shortened.
+    #[test]
+    fn reads_real_subscription_quota_from_the_rate_limit_event() {
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1790122800,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"out_of_credits","isUsingOverage":false,"unifiedWindows":{"seven_day":{"utilization":0.06,"resetsAt":1790668800},"five_hour":{"utilization":0.48,"resetsAt":1790122800}}},"uuid":"u","session_id":"s"}"#;
+        let parsed = parse_line("orchestrator-1", line).unwrap();
+
+        match &parsed.events[..] {
+            [HarnessEvent::QuotaReport { provider, status, windows, .. }] => {
+                assert_eq!(provider, "claude");
+                assert_eq!(status, "allowed");
+                // Ordered five-hour first regardless of JSON key order.
+                assert_eq!(windows[0].label, "5h");
+                assert!((windows[0].used_percent - 48.0).abs() < 1e-9);
+                assert_eq!(windows[0].resets_at, Some(1790122800));
+                assert_eq!(windows[1].label, "weekly");
+                assert!((windows[1].used_percent - 6.0).abs() < 1e-9);
+            }
+            other => panic!("expected one quota report, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_window_without_a_utilization_is_left_out_rather_than_shown_as_zero() {
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":{"five_hour":{"resetsAt":1},"seven_day":{"utilization":0.5}}}}"#;
+        let parsed = parse_line("r", line).unwrap();
+        match &parsed.events[..] {
+            [HarnessEvent::QuotaReport { windows, .. }] => {
+                assert_eq!(windows.len(), 1);
+                assert_eq!(windows[0].label, "weekly");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

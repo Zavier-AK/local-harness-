@@ -36,6 +36,13 @@ export type HarnessEvent =
   | { type: "run_finished"; run_id: string; text: string; usage: Usage; cost_usd: number | null; is_error: boolean }
   | { type: "error"; run_id: string; message: string }
   | { type: "turn_interrupted"; run_id: string }
+  | {
+      type: "quota_report";
+      run_id: string;
+      provider: string;
+      status: string;
+      windows: QuotaWindow[];
+    }
   | { type: "user_message"; run_id: string; text: string };
 
 /** Mirrors `harness_core::isolation::Patch`. */

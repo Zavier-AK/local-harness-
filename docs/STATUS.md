@@ -64,7 +64,7 @@ output can merge anything.
 
 ### Working and verified
 
-- **121 engine tests** (129 including the separate Tauri shell workspace), no network or
+- **126 engine tests** (134 including the separate Tauri shell workspace), no network or
   CLI login required.
 - **Orchestrator** — live end-to-end against the real `claude` CLI: it called `list_roles`,
   then `delegate`, a worker wrote into its worktree, and it correctly reported the work as
@@ -97,7 +97,7 @@ output can merge anything.
 
 ### Known gaps
 
-- **No CI.** The repository has no workflows, so the 121 tests run only by hand. This
+- **No CI.** The repository has no workflows, so the 126 tests run only by hand. This
   matters more than usual here: both CLIs' JSON output is parsed leniently against
   fixtures rather than a stable contract, so upstream schema drift would go unnoticed
   until a live run misbehaved. Deferred by choice.

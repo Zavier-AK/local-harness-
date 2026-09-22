@@ -125,6 +125,19 @@ pub enum HarnessEvent {
         branch: String,
         diff: DiffStat,
     },
+    /// The subscription's own account of how much of each limit window is used.
+    ///
+    /// Claude's stream-json output carries a `rate_limit_event` with every turn —
+    /// server-reported utilization and reset times for the five-hour and weekly windows.
+    /// A real figure, not an estimate from token counts.
+    QuotaReport {
+        run_id: String,
+        provider: String,
+        /// `allowed`, `allowed_warning`, or `rejected` once a limit is hit.
+        status: String,
+        windows: Vec<crate::quota::QuotaWindow>,
+    },
+
     /// The person stopped the head agent's turn. The turn's own `RunFinished` still
     /// follows, with `is_error` set — this is what lets a UI show it as stopped rather
     /// than failed.
@@ -168,6 +181,7 @@ impl HarnessEvent {
             | Self::ToolResult { run_id, .. }
             | Self::ApiRetry { run_id, .. }
             | Self::TurnInterrupted { run_id }
+            | Self::QuotaReport { run_id, .. }
             | Self::UserMessage { run_id, .. }
             | Self::RunFinished { run_id, .. }
             | Self::Error { run_id, .. } => run_id,
