@@ -64,7 +64,7 @@ output can merge anything.
 
 ### Working and verified
 
-- **142 engine tests** (150 including the separate Tauri shell workspace), no network or
+- **157 engine tests** (168 including the separate Tauri shell workspace), no network or
   CLI login required.
 - **Orchestrator** — live end-to-end against the real `claude` CLI: it called `list_roles`,
   then `delegate`, a worker wrote into its worktree, and it correctly reported the work as
@@ -73,6 +73,8 @@ output can merge anything.
   on a `builder` subagent, the `WorktreeCreate` hook built a bootstrapped worktree under
   `.harness/worktrees/`, the work was committed to `harness/agent-<id>`, the worktree was
   released, the checkout stayed untouched, and a merge was proposed for approval.
+- **Skills via plugin** — a real `claude -p` worker started by the harness listed
+  `harness:review, harness:risky-changes, harness:worktree` from the plugin directory.
 - **MCP surface** — exercised over the wire with `curl`. Unauthenticated and bad-token
   requests both refused with 401; all six tools listed with correct schemas.
 - **Merge gate** — `request_merge` left `HEAD` unmoved; calling `approve_merge` through MCP
@@ -101,7 +103,7 @@ output can merge anything.
 
 ### Known gaps
 
-- **No CI.** The repository has no workflows, so the 142 tests run only by hand. This
+- **No CI.** The repository has no workflows, so the 157 tests run only by hand. This
   matters more than usual here: both CLIs' JSON output is parsed leniently against
   fixtures rather than a stable contract, so upstream schema drift would go unnoticed
   until a live run misbehaved. Deferred by choice.

@@ -84,6 +84,7 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<Vec<HarnessEvent>, String>
                 model: body.get("model").and_then(Value::as_str).map(str::to_string),
                 tools: Vec::new(),
                 mcp_servers: Vec::new(),
+                mcp_failed: Vec::new(),
             });
         }
 

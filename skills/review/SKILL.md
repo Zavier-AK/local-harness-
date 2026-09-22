@@ -1,5 +1,5 @@
 ---
-name: harness-review
+name: review
 description: Review a change and report only what matters. Use when reviewing a diff, evaluating another worker's output, or combining several reviewers' findings.
 ---
 

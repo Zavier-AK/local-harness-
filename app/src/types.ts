@@ -23,7 +23,7 @@ export type WorkerStatus =
   | "cancelled";
 
 export type HarnessEvent =
-  | { type: "session_started"; run_id: string; backend_session_id: string | null; provider: string | null; model: string | null; tools: string[]; mcp_servers: string[] }
+  | { type: "session_started"; run_id: string; backend_session_id: string | null; provider: string | null; model: string | null; tools: string[]; mcp_servers: string[]; mcp_failed: string[] }
   | { type: "assistant_text"; run_id: string; text: string; partial: boolean }
   | { type: "thinking"; run_id: string; text: string }
   | { type: "tool_call"; run_id: string; tool_use_id: string; name: string; input: unknown }
@@ -217,3 +217,47 @@ export type QuotaReport = {
 export type WorkerActivity =
   | { kind: "tool"; name: string; detail: string | null }
   | { kind: "text"; text: string };
+
+// ---------- Tools & Skills, Settings ----------
+
+export type SkillInfo = {
+  name: string;
+  description: string;
+  source: "bundled" | "library";
+  enabled: boolean;
+  origin: string | null;
+  path: string | null;
+};
+
+export type ImportReport = {
+  imported: string[];
+  skipped: [string, string][];
+};
+
+/** Claude Code's own `mcpServers` entry shape. */
+export type McpServerConfig = {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  type?: string;
+  url?: string;
+  headers?: Record<string, string>;
+};
+
+export type RoleTools = {
+  name: string;
+  provider: string;
+  isolation: string;
+  tools: string[];
+  native: boolean;
+};
+
+export type AppSettings = {
+  default_model: string | null;
+  max_turns: number;
+  notifications: boolean;
+  accent: string | null;
+};
+
+/** What the head agent's CLI reported about MCP servers when it last started. */
+export type McpStatus = { connected: string[]; failed: string[] };

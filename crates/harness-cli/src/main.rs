@@ -41,6 +41,11 @@ struct Cli {
     #[arg(long, global = true)]
     db: Option<PathBuf>,
 
+    /// Skills and MCP servers for Claude workers. Defaults to the desktop app's, so
+    /// both use one library.
+    #[arg(long, global = true)]
+    extensions: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -281,13 +286,16 @@ async fn build_harness(cli: &Cli, events: harness_core::agents::EventSink) -> Re
         tracing::warn!("could not update .git/info/exclude: {error:#}");
     }
 
-    Ok(Arc::new(Harness::new(
-        registry,
-        workspaces,
-        store,
-        session_id,
-        events,
-    )))
+    let harness = Arc::new(Harness::new(registry, workspaces, store, session_id, events));
+
+    // Skills and MCP servers are an addition, never a reason not to run.
+    if let Some(dir) = cli.extensions.clone().or_else(harness_core::extensions::default_dir) {
+        match harness_core::extensions::Extensions::new(dir).worker_extras() {
+            Ok(extras) => harness.set_extras(extras).await,
+            Err(error) => tracing::warn!("skills and MCP servers not loaded: {error:#}"),
+        }
+    }
+    Ok(harness)
 }
 
 /// Small unique id without pulling uuid into this crate's surface.

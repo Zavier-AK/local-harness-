@@ -1,5 +1,5 @@
 ---
-name: harness-risky-changes
+name: risky-changes
 description: Verify assumptions before shipping a change where being wrong is expensive — APIs, data shaping, billing, quotas, defaults, thresholds. Use when a mistake would be customer-visible or hard to reverse, or when asked whether something is safe to ship.
 ---
 

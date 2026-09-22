@@ -65,6 +65,9 @@ pub struct Harness {
     cancels: RwLock<HashMap<String, tokio::sync::watch::Sender<bool>>>,
     /// The latest subscription quota Claude reported, with when it arrived.
     claude_quota: RwLock<Option<(i64, Vec<crate::quota::QuotaWindow>)>>,
+    /// Skills and MCP servers from the Tools & Skills tab. Read per delegation, so a
+    /// change reaches the next worker without restarting anything.
+    extras: RwLock<crate::extensions::WorkerExtras>,
 }
 
 impl Harness {
@@ -87,7 +90,17 @@ impl Harness {
             orchestrator_run: RwLock::new(None),
             cancels: RwLock::new(HashMap::new()),
             claude_quota: RwLock::new(None),
+            extras: RwLock::new(Default::default()),
         }
+    }
+
+    /// Replace the skills and MCP servers workers get from their next delegation on.
+    pub async fn set_extras(&self, extras: crate::extensions::WorkerExtras) {
+        *self.extras.write().await = extras;
+    }
+
+    pub async fn extras_snapshot(&self) -> crate::extensions::WorkerExtras {
+        self.extras.read().await.clone()
     }
 
     /// Register the head agent's run so [`Harness::note_event`] can attribute its usage.
@@ -383,6 +396,7 @@ impl Harness {
             task: task.to_string(),
             cwd: workspace.cwd.clone(),
             context_files,
+            extras: self.extras_snapshot().await,
         };
 
         // Dropping the worker's future kills its process: `claude` and `codex` are spawned

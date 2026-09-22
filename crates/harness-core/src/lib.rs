@@ -14,6 +14,7 @@ pub mod availability;
 pub mod detection;
 pub mod engine;
 pub mod event;
+pub mod extensions;
 pub mod hooks;
 pub mod isolation;
 pub mod mcp;

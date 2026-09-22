@@ -270,16 +270,26 @@ impl McpServer {
 
     /// The `--mcp-config` JSON that points the Claude CLI at this server.
     pub fn claude_mcp_config(&self) -> String {
-        serde_json::json!({
-            "mcpServers": {
-                SERVER_NAME: {
-                    "type": "http",
-                    "url": self.url(),
-                    "headers": { "Authorization": format!("Bearer {}", self.token) }
-                }
-            }
-        })
-        .to_string()
+        self.claude_mcp_config_with(&Default::default())
+    }
+
+    /// Ours plus the user's servers, in one config. Ours is written last so a user entry
+    /// can never replace the delegation server (the name is also refused on the way in).
+    pub fn claude_mcp_config_with(
+        &self,
+        others: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> String {
+        let mut servers: serde_json::Map<String, serde_json::Value> =
+            others.iter().map(|(name, config)| (name.clone(), config.clone())).collect();
+        servers.insert(
+            SERVER_NAME.to_string(),
+            serde_json::json!({
+                "type": "http",
+                "url": self.url(),
+                "headers": { "Authorization": format!("Bearer {}", self.token) }
+            }),
+        );
+        serde_json::json!({ "mcpServers": servers }).to_string()
     }
 
     /// Tool names to pass to `--allowedTools` so delegation needs no approval prompt.

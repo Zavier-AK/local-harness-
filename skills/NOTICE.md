@@ -31,9 +31,9 @@ SOFTWARE.
 
 | Ours | Source | Change |
 |---|---|---|
-| `harness-worktree` | `agent-orchestration/git-worktree` | Substantially cut. The original teaches an agent to create, merge and remove its own worktrees; here the harness does all of that, and a worker doing it itself would corrupt the run. What remains is the part a worker still needs: knowing it is in a disposable tree, and that nothing it writes lands without a human approving the diff. |
-| `harness-risky-changes` | `ops-and-setup/risky-changes` | Lightly adapted. The original's core claim — passing tests do not tell you a change is *useful* — is kept, with the evidence step rewritten around what a worker in this harness can actually reach. |
-| `harness-review` | `agent-orchestration/total-review` | Written fresh from the original's idea: merge several reviewers' findings, drop duplicates, and report how many were discarded as overthinking. The discard count is the part worth keeping — it is what stops a review turning into noise. |
+| `worktree` | `agent-orchestration/git-worktree` | Substantially cut. The original teaches an agent to create, merge and remove its own worktrees; here the harness does all of that, and a worker doing it itself would corrupt the run. What remains is the part a worker still needs: knowing it is in a disposable tree, and that nothing it writes lands without a human approving the diff. |
+| `risky-changes` | `ops-and-setup/risky-changes` | Lightly adapted. The original's core claim — passing tests do not tell you a change is *useful* — is kept, with the evidence step rewritten around what a worker in this harness can actually reach. |
+| `review` | `agent-orchestration/total-review` | Written fresh from the original's idea: merge several reviewers' findings, drop duplicates, and report how many were discarded as overthinking. The discard count is the part worth keeping — it is what stops a review turning into noise. |
 
 Only three of the ~45 skills in that repository are carried here. The rest are either
 bound to tooling this project does not use or are personal working style; vendoring them

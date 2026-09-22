@@ -10,10 +10,15 @@ import ProjectSidebar from "./ProjectSidebar";
 import LimitsPanel from "./LimitsPanel";
 import BudgetMeter from "./BudgetMeter";
 import PreviewPanel from "./PreviewPanel";
+import ToolsView from "./ToolsView";
+import SettingsView from "./SettingsView";
 import { notifyIfAway } from "./notify";
+import { applySettings } from "./appSettings";
 import type {
+  AppSettings,
   ChatItem,
   HarnessEvent,
+  McpStatus,
   ProjectHarnessEvent,
   ProjectView,
   QuotaReport,
@@ -39,6 +44,19 @@ export default function App() {
   const [adding, setAdding] = useState(false);
   const [limitsOpen, setLimitsOpen] = useState(false);
   const [quotas, setQuotas] = useState<QuotaReport | null>(null);
+  /** The session, or one of the two full-pane views that replace it. */
+  const [view, setView] = useState<"session" | "tools" | "settings">("session");
+  /** Per project: which MCP servers its head agent's CLI managed to connect. */
+  const [mcpStatus, setMcpStatus] = useState<Record<string, McpStatus>>({});
+
+  // Settings that live in the page (accent, notifications) apply from the first frame.
+  useEffect(() => {
+    invoke<AppSettings>("get_settings")
+      .then(applySettings)
+      .catch(() => {
+        // Defaults are already in the stylesheet; nothing to undo.
+      });
+  }, []);
 
   /** The orchestrator's run id, so its events are told apart from workers'. */
   const headRun = useRef<string | null>(null);
@@ -126,6 +144,19 @@ export default function App() {
     if (!session) return;
 
     const unlisten = listen<ProjectHarnessEvent>("harness://event", ({ payload }) => {
+      // Any project's head reports its MCP servers as it starts; kept per project so the
+      // Tools view shows the truth for whichever is in front.
+      if (payload.type === "session_started" && payload.run_id.startsWith("orchestrator-")) {
+        const failed = payload.mcp_failed ?? [];
+        setMcpStatus((prev) => ({
+          ...prev,
+          [payload.project]: {
+            connected: payload.mcp_servers.filter((name) => !failed.includes(name)),
+            failed,
+          },
+        }));
+      }
+
       // Every open project emits on this one channel. Another project's events must not
       // land in this project's chat or worker rail — but they do change what the sidebar
       // should say, which is the whole point of showing work happening elsewhere.
@@ -194,7 +225,14 @@ export default function App() {
 
     function onKey(event: KeyboardEvent) {
       const mod = event.metaKey || event.ctrlKey;
-      if (event.key === "Escape" && busy && !overlayOpen) {
+      if (mod && event.key === ",") {
+        event.preventDefault();
+        setView("settings");
+      } else if (event.key === "Escape" && view !== "session" && !overlayOpen) {
+        // Out of Tools or Settings first; a second Esc can then stop a turn.
+        event.preventDefault();
+        setView("session");
+      } else if (event.key === "Escape" && busy && !overlayOpen) {
         event.preventDefault();
         void stopTurn();
       } else if (mod && event.key.toLowerCase() === "n") {
@@ -298,50 +336,65 @@ export default function App() {
           onFocus={focusProject}
           onClose={closeProject}
           onAdd={() => setAdding(true)}
+          view={view}
+          onView={setView}
         />
         <main className={`main-pane ${switching ? "switching" : ""}`}>
-          <nav className="pane-tabs" role="tablist" aria-label="Main pane">
-            <button
-              role="tab"
-              aria-selected={activePane === "chat"}
-              className={activePane === "chat" ? "active" : ""}
-              onClick={() => setActivePane("chat")}
-            >
-              Chat
-            </button>
-            <button
-              role="tab"
-              aria-selected={activePane === "preview"}
-              className={activePane === "preview" ? "active" : ""}
-              onClick={() => setActivePane("preview")}
-            >
-              Preview
-            </button>
-          </nav>
-          <div
-            className={`tab-panel chat-panel ${activePane === "chat" ? "" : "hidden"}`}
-            role="tabpanel"
-            aria-hidden={activePane !== "chat"}
-          >
-            <HeadChat
-              items={chat}
-              onStop={() => void stopTurn()}
-              busy={busy}
-              onSend={send}
-              onSelectWorker={setSelectedWorker}
-            />
-          </div>
-          <div
-            className={`tab-panel ${activePane === "preview" ? "" : "hidden"}`}
-            role="tabpanel"
-            aria-hidden={activePane !== "preview"}
-          >
-            <PreviewPanel
-              active={activePane === "preview"}
-              obscured={Boolean(selected)}
+          {view === "tools" && (
+            <ToolsView
               projectRoot={session.project_root}
-              workerRoots={workerList.map((worker) => worker.cwd)}
+              mcpStatus={mcpStatus[session.project_root] ?? null}
+              onClose={() => setView("session")}
             />
+          )}
+          {view === "settings" && (
+            <SettingsView onSaved={applySettings} onClose={() => setView("session")} />
+          )}
+          {/* The session stays mounted underneath, so a half-typed message survives. */}
+          <div className={`session-pane ${view === "session" ? "" : "hidden"}`}>
+            <nav className="pane-tabs" role="tablist" aria-label="Main pane">
+              <button
+                role="tab"
+                aria-selected={activePane === "chat"}
+                className={activePane === "chat" ? "active" : ""}
+                onClick={() => setActivePane("chat")}
+              >
+                Chat
+              </button>
+              <button
+                role="tab"
+                aria-selected={activePane === "preview"}
+                className={activePane === "preview" ? "active" : ""}
+                onClick={() => setActivePane("preview")}
+              >
+                Preview
+              </button>
+            </nav>
+            <div
+              className={`tab-panel chat-panel ${activePane === "chat" ? "" : "hidden"}`}
+              role="tabpanel"
+              aria-hidden={activePane !== "chat"}
+            >
+              <HeadChat
+                items={chat}
+                onStop={() => void stopTurn()}
+                busy={busy}
+                onSend={send}
+                onSelectWorker={setSelectedWorker}
+              />
+            </div>
+            <div
+              className={`tab-panel ${activePane === "preview" ? "" : "hidden"}`}
+              role="tabpanel"
+              aria-hidden={activePane !== "preview"}
+            >
+              <PreviewPanel
+                active={activePane === "preview" && view === "session"}
+                obscured={Boolean(selected)}
+                projectRoot={session.project_root}
+                workerRoots={workerList.map((worker) => worker.cwd)}
+              />
+            </div>
           </div>
         </main>
         <WorkerRail

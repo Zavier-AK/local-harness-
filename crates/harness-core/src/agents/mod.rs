@@ -29,6 +29,8 @@ pub struct WorkerSpec {
     pub cwd: PathBuf,
     /// Files the orchestrator wants the worker to look at first.
     pub context_files: Vec<String>,
+    /// Skills and MCP servers. Only Claude workers can use them today.
+    pub extras: crate::extensions::WorkerExtras,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -116,6 +118,7 @@ mod tests {
             task: "Do the thing.".into(),
             cwd: PathBuf::from("/tmp"),
             context_files: files.iter().map(|s| s.to_string()).collect(),
+            extras: Default::default(),
         }
     }
 

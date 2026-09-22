@@ -30,34 +30,6 @@ pub const BRANCH_PREFIX: &str = "harness";
 /// The line written into `.git/info/exclude`.
 const HARNESS_EXCLUDE: &str = ".harness/";
 
-/// Where skills are materialized inside a worker's worktree, and the prefix that marks
-/// them as ours.
-///
-/// Namespaced: a project may have its own `.claude/skills/`, which must keep working and
-/// must keep being committable. Only entries under this prefix are the harness's.
-const SKILLS_DIR: &str = ".claude/skills";
-const SKILL_PREFIX: &str = "harness-";
-
-/// Pathspec holding harness-managed skills back from a worker's commits.
-///
-/// Worktrees are staged with `git add -A`, which would otherwise sweep the skills we put
-/// there into the worker's branch and land them in the user's repository on merge.
-const EXCLUDE_SKILLS: &str = ":(exclude).claude/skills/harness-*";
-
-/// The skills every worker gets, baked into the binary.
-///
-/// Compiled in rather than read from disk because workers run in worktrees of the
-/// *user's* project, not of this repository — there is no path to a `skills/` directory
-/// from there once the app is installed somewhere else.
-const BUNDLED_SKILLS: &[(&str, &str)] = &[
-    ("harness-worktree", include_str!("../../../skills/harness-worktree/SKILL.md")),
-    ("harness-review", include_str!("../../../skills/harness-review/SKILL.md")),
-    (
-        "harness-risky-changes",
-        include_str!("../../../skills/harness-risky-changes/SKILL.md"),
-    ),
-];
-
 async fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
@@ -147,9 +119,8 @@ impl Workspace {
             return Ok(DiffStat::default());
         }
 
-        // Stage everything first so new files show up in the diff too — except the
-        // skills the harness put here, which are not the worker's work.
-        git(&self.cwd, &["add", "-A", "--", ".", EXCLUDE_SKILLS]).await?;
+        // Stage everything first so new files show up in the diff too.
+        git(&self.cwd, &["add", "-A"]).await?;
         let numstat = git(&self.cwd, &["diff", "--cached", "--numstat"]).await?;
 
         let mut stat = DiffStat::default();
@@ -177,7 +148,7 @@ impl Workspace {
             return Ok(false);
         }
 
-        git(&self.cwd, &["add", "-A", "--", ".", EXCLUDE_SKILLS]).await?;
+        git(&self.cwd, &["add", "-A"]).await?;
         if git(&self.cwd, &["diff", "--cached", "--name-only"]).await?.is_empty() {
             return Ok(false);
         }
@@ -301,28 +272,6 @@ impl Workspaces {
         Ok(())
     }
 
-    /// Put the bundled skills where the worker's CLI will find them.
-    ///
-    /// Claude Code reads skills from `.claude/skills` relative to the working directory,
-    /// so they go in the worktree rather than in this repository — a worker is working on
-    /// the user's project, and skills vendored here would never reach it.
-    ///
-    /// They are excluded from what the worker commits (see [`EXCLUDE_SKILLS`]), so they
-    /// are visible to the agent and invisible to the diff.
-    async fn write_skills_inner(root: &Path) -> Result<()> {
-        for (name, body) in BUNDLED_SKILLS {
-            debug_assert!(name.starts_with(SKILL_PREFIX), "skills must carry the prefix");
-            let dir = root.join(SKILLS_DIR).join(name);
-            tokio::fs::create_dir_all(&dir)
-                .await
-                .with_context(|| format!("creating {}", dir.display()))?;
-            tokio::fs::write(dir.join("SKILL.md"), body)
-                .await
-                .with_context(|| format!("writing the {name} skill"))?;
-        }
-        Ok(())
-    }
-
     /// Copy declared files in, then run the project's setup commands.
     ///
     /// Failure here is fatal to the worker on purpose: a builder that starts in a tree
@@ -424,10 +373,7 @@ impl Workspaces {
 
                 // A half-built worktree is worse than none: tear it down rather than
                 // handing a worker a tree that is missing its dependencies.
-                if let Err(error) = Self::write_skills_inner(&path)
-                    .await
-                    .and(self.bootstrap(&path).await)
-                {
+                if let Err(error) = self.bootstrap(&path).await {
                     let _guard = self.git_lock.lock().await;
                     let _file_lock = lock_worktree_admin(&self.project_root).await;
                     let _ = git(
@@ -622,75 +568,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_worktree_gets_the_bundled_skills() {
-        let (_dir, workspaces) = scratch_repo().await;
-        let workspace = workspaces.prepare("w-skills", Isolation::Worktree).await.unwrap();
-
-        for (name, _) in BUNDLED_SKILLS {
-            let skill = workspace.cwd.join(SKILLS_DIR).join(name).join("SKILL.md");
-            assert!(skill.is_file(), "{name} should be readable by the worker's CLI");
-            let body = tokio::fs::read_to_string(&skill).await.unwrap();
-            assert!(body.starts_with("---"), "{name} needs frontmatter to be loaded");
-            assert!(body.contains(&format!("name: {name}")), "{name} frontmatter is wrong");
-        }
-    }
-
-    #[tokio::test]
-    async fn harness_skills_never_reach_the_workers_diff_or_branch() {
+    async fn nothing_but_the_workers_own_changes_reaches_its_branch() {
         let (_dir, workspaces) = scratch_repo().await;
         let workspace = workspaces.prepare("w-clean", Isolation::Worktree).await.unwrap();
 
+        // Skills reach workers as a plugin now, so a fresh worktree is exactly the
+        // checkout and the diff is exactly the work.
+        assert!(!workspace.cwd.join(".claude").exists());
         tokio::fs::write(workspace.cwd.join("feature.txt"), "real work\n").await.unwrap();
-
-        // The skills are sitting right there; `git add -A` would otherwise sweep them
-        // into the branch and land them in the user's repository on merge.
         let stat = workspace.diff().await.unwrap();
-        assert_eq!(stat.files, ["feature.txt"], "only the worker's own work should show");
-
-        assert!(workspace.commit("work").await.unwrap());
-        let committed = git(&workspace.cwd, &["show", "--name-only", "--format=", "HEAD"])
-            .await
-            .unwrap();
-        assert!(
-            !committed.contains(".claude"),
-            "harness skills must not be committed: {committed}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_projects_own_claude_skills_are_still_the_workers_to_commit() {
-        let (dir, workspaces) = scratch_repo().await;
-
-        // A project may keep its own skills. Ours are namespaced so theirs keep working
-        // — and, crucially, keep being committable.
-        let theirs = dir.path().join(SKILLS_DIR).join("project-convention");
-        tokio::fs::create_dir_all(&theirs).await.unwrap();
-        tokio::fs::write(theirs.join("SKILL.md"), "---\nname: project-convention\n---\n")
-            .await
-            .unwrap();
-        git(dir.path(), &["add", "-A"]).await.unwrap();
-        git(dir.path(), &["commit", "-q", "-m", "project skills"]).await.unwrap();
-
-        let workspace = workspaces.prepare("w-both", Isolation::Worktree).await.unwrap();
-
-        // Theirs came across with the checkout; ours sits alongside it.
-        assert!(workspace.cwd.join(SKILLS_DIR).join("project-convention/SKILL.md").is_file());
-        assert!(workspace.cwd.join(SKILLS_DIR).join("harness-review/SKILL.md").is_file());
-
-        // Editing the project's own skill is ordinary work and must still be landable.
-        tokio::fs::write(
-            workspace.cwd.join(SKILLS_DIR).join("project-convention/SKILL.md"),
-            "---\nname: project-convention\n---\nrevised\n",
-        )
-        .await
-        .unwrap();
-
-        let stat = workspace.diff().await.unwrap();
-        assert_eq!(
-            stat.files,
-            [format!("{SKILLS_DIR}/project-convention/SKILL.md")],
-            "the project's own skill is the worker's to change; ours is not"
-        );
+        assert_eq!(stat.files, ["feature.txt"]);
     }
 
     /// Two engines — or an engine and a hook process — share nothing in memory, so only

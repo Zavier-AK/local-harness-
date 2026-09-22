@@ -5,6 +5,12 @@ import {
 } from "@tauri-apps/plugin-notification";
 
 let allowed: boolean | null = null;
+let enabled = true;
+
+/** Set from Settings. Off means off: no permission prompt, no notification. */
+export function setNotificationsEnabled(value: boolean): void {
+  enabled = value;
+}
 
 /**
  * Tell the person something finished — but only if they are not already looking.
@@ -13,7 +19,7 @@ let allowed: boolean | null = null;
  * is focused would just be noise on top of what the rail already shows.
  */
 export async function notifyIfAway(title: string, body: string): Promise<void> {
-  if (document.hasFocus()) return;
+  if (!enabled || document.hasFocus()) return;
   try {
     if (allowed === null) {
       allowed = await isPermissionGranted();
