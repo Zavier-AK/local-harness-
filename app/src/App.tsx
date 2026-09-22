@@ -10,6 +10,7 @@ import ProjectSidebar from "./ProjectSidebar";
 import LimitsPanel from "./LimitsPanel";
 import BudgetMeter from "./BudgetMeter";
 import PreviewPanel from "./PreviewPanel";
+import { notifyIfAway } from "./notify";
 import type {
   ChatItem,
   HarnessEvent,
@@ -20,6 +21,7 @@ import type {
   SessionInfo,
   UsageRow,
   Worker,
+  WorkerActivity,
 } from "./types";
 
 export default function App() {
@@ -52,6 +54,7 @@ export default function App() {
   /** Switch projects, resetting the panes that belong to the one being left. */
   const focusProject = useCallback(
     async (projectRoot: string) => {
+      if (projectRoot === session?.project_root) return;
       setSwitching(true);
       try {
         const info = await invoke<SessionInfo>("focus_project", { project: projectRoot });
@@ -69,7 +72,7 @@ export default function App() {
         setSwitching(false);
       }
     },
-    [refreshProjects],
+    [refreshProjects, session],
   );
 
   const closeProject = useCallback(
@@ -95,6 +98,30 @@ export default function App() {
     }
   }, []);
 
+  // A project's earlier conversation, restored when it comes to the front — after an app
+  // restart or a switch, the head agent resumes its conversation, and now so does the chat.
+  const projectRoot = session?.project_root;
+  useEffect(() => {
+    if (!projectRoot) return;
+    let cancelled = false;
+    invoke<HarnessEvent[]>("chat_history", { project: projectRoot })
+      .then((events) => {
+        if (cancelled || events.length === 0) return;
+        const restored = historyToChat(events);
+        setChat((prev) => [
+          ...restored,
+          { kind: "notice", tone: "info", text: "Earlier conversation above." },
+          ...prev,
+        ]);
+      })
+      .catch(() => {
+        // History is a convenience; a project must still open without it.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectRoot]);
+
   useEffect(() => {
     if (!session) return;
 
@@ -113,6 +140,7 @@ export default function App() {
       if (payload.type === "api_retry") {
         setRateLimited(payload.error === "rate_limit");
       }
+      if (payload.type === "turn_interrupted") setBusy(false);
       if (payload.type === "run_finished") {
         if (payload.run_id === headRun.current) setBusy(false);
         setRateLimited(false);
@@ -121,6 +149,16 @@ export default function App() {
       if (payload.type === "worker_finished") {
         void refreshUsage();
         void refreshProjects();
+        void notifyIfAway(
+          payload.is_error ? "A worker stopped without finishing" : "A worker finished",
+          firstLine(payload.summary),
+        );
+      }
+      if (payload.type === "merge_requested") {
+        void notifyIfAway(
+          "A change is ready to review",
+          `${payload.diff.files_changed} file(s) on ${payload.branch}`,
+        );
       }
       if (payload.type === "worker_spawned" || payload.type === "merge_requested") {
         void refreshProjects();
@@ -144,6 +182,48 @@ export default function App() {
       await invoke("send_turn", { text });
     } catch (err) {
       setBusy(false);
+      setChat((prev) => [...prev, { kind: "notice", tone: "error", text: String(err) }]);
+    }
+  }
+
+  // App-wide shortcuts. Esc in the composer is handled there, where focus usually is;
+  // this covers Esc from anywhere else, and project navigation.
+  useEffect(() => {
+    if (!session) return;
+    const overlayOpen = Boolean(selectedWorker) || fleetOpen || adding || limitsOpen;
+
+    function onKey(event: KeyboardEvent) {
+      const mod = event.metaKey || event.ctrlKey;
+      if (event.key === "Escape" && busy && !overlayOpen) {
+        event.preventDefault();
+        void stopTurn();
+      } else if (mod && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        setAdding(true);
+      } else if (mod && /^[1-9]$/.test(event.key)) {
+        const target = projects[Number(event.key) - 1];
+        if (target) {
+          event.preventDefault();
+          void focusProject(target.project_root);
+        }
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  async function stopTurn() {
+    try {
+      await invoke("stop_turn");
+    } catch (err) {
+      setChat((prev) => [...prev, { kind: "notice", tone: "error", text: String(err) }]);
+    }
+  }
+
+  async function stopWorker(workerId: string) {
+    try {
+      await invoke("stop_worker", { workerId });
+    } catch (err) {
       setChat((prev) => [...prev, { kind: "notice", tone: "error", text: String(err) }]);
     }
   }
@@ -245,6 +325,7 @@ export default function App() {
           >
             <HeadChat
               items={chat}
+              onStop={() => void stopTurn()}
               busy={busy}
               onSend={send}
               onSelectWorker={setSelectedWorker}
@@ -270,6 +351,7 @@ export default function App() {
           selected={selectedWorker}
           onSelect={setSelectedWorker}
           onChangeFleet={() => setFleetOpen(true)}
+          onStopWorker={(id) => void stopWorker(id)}
         />
       </div>
 
@@ -360,7 +442,27 @@ function reduceChat(
 
     case "tool_call":
       if (event.run_id !== headRun.current) return prev;
-      return [...prev, { kind: "tool", name: event.name }];
+      return [...prev, { kind: "tool", name: event.name, toolUseId: event.tool_use_id }];
+
+    case "tool_result": {
+      // A delegation's result names the worker it started; linking the chip to it is what
+      // makes "Delegating to a worker" clickable instead of a dead label.
+      if (event.run_id !== headRun.current) return prev;
+      const workerId = event.content.match(/w-[0-9a-f]{32}/)?.[0];
+      if (!workerId) return prev;
+      return prev.map((item) =>
+        item.kind === "tool" && item.toolUseId === event.tool_use_id
+          ? { ...item, workerId }
+          : item,
+      );
+    }
+
+    case "turn_interrupted":
+      if (event.run_id !== headRun.current) return prev;
+      return [
+        ...prev,
+        { kind: "notice", tone: "info", text: "Stopped. Send a message to carry on from here." },
+      ];
 
     case "merge_requested":
       return [
@@ -416,6 +518,8 @@ function reduceWorkers(
           branch: null,
           is_error: false,
           startedAt: Date.now(),
+          currentTool: null,
+          activity: [],
         },
       };
 
@@ -432,7 +536,10 @@ function reduceWorkers(
         ...prev,
         [event.worker_id]: {
           ...existing,
-          status: event.is_error ? "failed" : "done",
+          // A stop arrives as its own status change first; `is_error` alone would call it
+          // a failure.
+          status: existing.status === "cancelled" ? "cancelled" : event.is_error ? "failed" : "done",
+          currentTool: null,
           summary: event.summary,
           usage: event.usage,
           diff: event.diff,
@@ -450,7 +557,92 @@ function reduceWorkers(
       };
     }
 
+    // A worker's own stream: its run id is its worker id. Kept, rather than dropped, so
+    // the rail shows what a worker is doing instead of only that it is running.
+    case "tool_call": {
+      const existing = prev[event.run_id];
+      if (!existing) return prev;
+      return {
+        ...prev,
+        [event.run_id]: {
+          ...existing,
+          currentTool: event.name,
+          activity: pushActivity(existing.activity, {
+            kind: "tool",
+            name: event.name,
+            detail: toolDetail(event.input),
+          }),
+        },
+      };
+    }
+
+    case "assistant_text": {
+      const existing = prev[event.run_id];
+      if (!existing || event.partial || !event.text.trim()) return prev;
+      return {
+        ...prev,
+        [event.run_id]: {
+          ...existing,
+          activity: pushActivity(existing.activity, { kind: "text", text: event.text.trim() }),
+        },
+      };
+    }
+
     default:
       return prev;
   }
+}
+
+/** Recent activity only: a long-running worker would otherwise grow without bound. */
+const ACTIVITY_LIMIT = 40;
+
+function pushActivity(list: WorkerActivity[], item: WorkerActivity): WorkerActivity[] {
+  const next = [...list, item];
+  return next.length > ACTIVITY_LIMIT ? next.slice(next.length - ACTIVITY_LIMIT) : next;
+}
+
+/** The one argument that says what a tool call is about — a path, a command, a query. */
+function toolDetail(input: unknown): string | null {
+  if (!input || typeof input !== "object") return null;
+  const fields = input as Record<string, unknown>;
+  for (const key of ["file_path", "path", "command", "pattern", "url", "description"]) {
+    const value = fields[key];
+    if (typeof value === "string" && value.trim()) {
+      const line = value.trim().split("\n")[0];
+      return line.length > 120 ? `${line.slice(0, 117)}…` : line;
+    }
+  }
+  return null;
+}
+
+/** The head agent's earlier conversation, rebuilt from its recorded events. */
+function historyToChat(events: HarnessEvent[]): ChatItem[] {
+  const items: ChatItem[] = [];
+  for (const event of events) {
+    switch (event.type) {
+      case "user_message":
+        items.push({ kind: "user", text: event.text });
+        break;
+      case "assistant_text":
+        if (!event.partial) items.push({ kind: "assistant", text: event.text });
+        break;
+      case "tool_call":
+        items.push({ kind: "tool", name: event.name, toolUseId: event.tool_use_id });
+        break;
+      case "turn_interrupted":
+        items.push({ kind: "notice", tone: "info", text: "Stopped." });
+        break;
+      case "error":
+        items.push({ kind: "notice", tone: "error", text: event.message });
+        break;
+      default:
+        break;
+    }
+  }
+  return items;
+}
+
+function firstLine(text: string): string {
+  const line = text.trim().split("\n")[0] ?? "";
+  return line.length > 140 ? `${line.slice(0, 137)}…` : line;
 }

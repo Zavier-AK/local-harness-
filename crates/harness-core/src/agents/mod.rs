@@ -38,6 +38,8 @@ pub struct RunOutcome {
     pub cost_usd: Option<f64>,
     pub backend_session_id: Option<String>,
     pub is_error: bool,
+    /// Stopped by the user rather than finished or failed.
+    pub cancelled: bool,
 }
 
 /// Run a worker to completion, streaming events as they arrive.

@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from "react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { ChatItem } from "./types";
 
 type Props = {
   items: ChatItem[];
   busy: boolean;
   onSend: (text: string) => void;
+  onStop: () => void;
   onSelectWorker: (id: string) => void;
 };
 
@@ -29,7 +32,7 @@ function toolLabel(name: string): string {
   }
 }
 
-export default function HeadChat({ items, busy, onSend, onSelectWorker }: Props) {
+export default function HeadChat({ items, busy, onSend, onStop, onSelectWorker }: Props) {
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -56,9 +59,12 @@ export default function HeadChat({ items, busy, onSend, onSelectWorker }: Props)
                 </div>
               );
             case "assistant":
+              // Rendered as markdown: the head agent writes plans, lists and code, and
+              // as plain text those arrive as a wall of asterisks and backticks. Raw HTML
+              // stays off — model output is never trusted as markup.
               return (
-                <div key={i} className="bubble assistant">
-                  {item.text}
+                <div key={i} className="bubble assistant markdown">
+                  <Markdown remarkPlugins={[remarkGfm]}>{item.text}</Markdown>
                 </div>
               );
             case "tool":
@@ -95,19 +101,30 @@ export default function HeadChat({ items, busy, onSend, onSelectWorker }: Props)
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
-            // Enter sends; Shift+Enter is a newline.
+            // Enter sends; Shift+Enter is a newline; Escape stops a running turn.
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               submit();
+            } else if (e.key === "Escape" && busy) {
+              e.preventDefault();
+              onStop();
             }
           }}
-          placeholder={busy ? "Working…" : "What should the fleet do?"}
+          placeholder={busy ? "Working… (Esc to stop)" : "What should the fleet do?"}
           rows={3}
           spellCheck={false}
         />
-        <button onClick={submit} disabled={busy || !draft.trim()}>
-          Send
-        </button>
+        {busy ? (
+          // While the head agent works, the send button is the way out. Stopping keeps
+          // the conversation: the next message carries on from here.
+          <button className="stop" onClick={onStop} title="Stop this turn (Esc)">
+            Stop
+          </button>
+        ) : (
+          <button onClick={submit} disabled={!draft.trim()}>
+            Send
+          </button>
+        )}
       </div>
     </section>
   );

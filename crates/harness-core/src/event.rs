@@ -125,6 +125,15 @@ pub enum HarnessEvent {
         branch: String,
         diff: DiffStat,
     },
+    /// The person stopped the head agent's turn. The turn's own `RunFinished` still
+    /// follows, with `is_error` set — this is what lets a UI show it as stopped rather
+    /// than failed.
+    TurnInterrupted { run_id: String },
+
+    /// What the person typed to the head agent. Recorded so a conversation can be
+    /// shown again after a restart; the CLI's own transcript is not ours to read.
+    UserMessage { run_id: String, text: String },
+
     /// Emitted from the Claude CLI's `system/api_retry`. `error` carries the category,
     /// e.g. `rate_limit` — the hook for backpressure.
     ApiRetry {
@@ -158,6 +167,8 @@ impl HarnessEvent {
             | Self::ToolCall { run_id, .. }
             | Self::ToolResult { run_id, .. }
             | Self::ApiRetry { run_id, .. }
+            | Self::TurnInterrupted { run_id }
+            | Self::UserMessage { run_id, .. }
             | Self::RunFinished { run_id, .. }
             | Self::Error { run_id, .. } => run_id,
             Self::WorkerSpawned { worker_id, .. }

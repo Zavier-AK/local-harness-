@@ -95,5 +95,6 @@ pub async fn run(spec: &WorkerSpec, sink: &EventSink) -> Result<RunOutcome> {
         cost_usd: None,
         backend_session_id: None,
         is_error: false,
+        cancelled: false,
     })
 }

@@ -4,6 +4,8 @@
 //! The task string doubles as a control channel: a task beginning with `FAIL:` produces a
 //! failed run, and one beginning with `WRITE:<path>:<contents>` writes a file, which is how
 //! the isolation tests prove a worker's edits land in its worktree and nowhere else.
+//! `SLOW:<path>:<contents>` writes the file and then does not finish, which is how the
+//! cancellation tests prove a stopped worker keeps what it had already written.
 
 use anyhow::Result;
 
@@ -27,6 +29,16 @@ pub async fn run(spec: &WorkerSpec, sink: &EventSink) -> Result<RunOutcome> {
     let text = if let Some(rest) = spec.task.strip_prefix("FAIL:") {
         is_error = true;
         rest.trim().to_string()
+    } else if let Some(rest) = spec.task.strip_prefix("SLOW:") {
+        let (path, contents) = rest.split_once(':').unwrap_or((rest, "partial"));
+        let target = spec.cwd.join(path.trim());
+        if let Some(parent) = target.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&target, contents).await?;
+        // Long enough that only a stop ends it within a test.
+        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+        "finished slowly".to_string()
     } else if let Some(rest) = spec.task.strip_prefix("WRITE:") {
         let (path, contents) = rest.split_once(':').unwrap_or((rest, "mock contents"));
         let target = spec.cwd.join(path.trim());
@@ -74,5 +86,6 @@ pub async fn run(spec: &WorkerSpec, sink: &EventSink) -> Result<RunOutcome> {
         cost_usd: None,
         backend_session_id: Some(format!("mock-{}", spec.run_id)),
         is_error,
+        cancelled: false,
     })
 }

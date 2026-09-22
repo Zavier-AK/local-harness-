@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Patch, Worker } from "./types";
+import { describeActivity } from "./WorkerRail";
 
 type Props = {
   worker: Worker;
@@ -86,7 +87,24 @@ export default function DiffDrawer({ worker, onClose, onApprove, onReject }: Pro
         {worker.summary && (
           <section>
             <h3>Result</h3>
-            <p className={worker.is_error ? "error" : ""}>{worker.summary}</p>
+            <p className={worker.status === "cancelled" ? "muted" : worker.is_error ? "error" : ""}>
+              {worker.summary}
+            </p>
+          </section>
+        )}
+
+        {/* How it got there, not just where it ended up. The live trace is only in memory:
+            it covers workers started since this window opened. */}
+        {worker.activity.length > 0 && (
+          <section>
+            <h3>Activity</h3>
+            <ol className="activity-log mono">
+              {worker.activity.map((item, i) => (
+                <li key={i} className={item.kind}>
+                  {describeActivity(item)}
+                </li>
+              ))}
+            </ol>
           </section>
         )}
 
@@ -140,9 +158,11 @@ export default function DiffDrawer({ worker, onClose, onApprove, onReject }: Pro
         ) : (
           <section>
             <p className="muted">
-              {worker.isolation === "readonly"
-                ? "Read-only worker — it produces findings, not changes."
-                : "This worker changed nothing."}
+              {["queued", "blocked", "preparing", "running"].includes(worker.status)
+                ? "Still working — its changes appear here when it finishes."
+                : worker.isolation === "readonly"
+                  ? "Read-only worker — it produces findings, not changes."
+                  : "This worker changed nothing."}
             </p>
           </section>
         )}
