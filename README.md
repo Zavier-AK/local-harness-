@@ -219,19 +219,23 @@ it, or nothing is listening. `model` must match what the server reports:
 curl -s http://localhost:1234/v1/models | python3 -m json.tool
 ```
 
-**Agentic** — a real tool loop with sandboxing, via Codex, no code required:
+**Agentic** — a real tool loop with sandboxing, via Codex, no code required. **Any role
+that works in a worktree or read-only checkout needs this path**: `openai_compat` has no
+tool loop, so a local model can only edit files with the Codex CLI driving it. Without
+Codex installed (`npm i -g @openai/codex`, then `codex login`), such roles show as
+unavailable in the rail, with the reason and a **Fix** link beside them.
 
 ```toml
 [roles.local_builder]
 provider      = "codex"
-model         = "qwen3.6:35b-a3b"
+model         = "qwen/qwen3-coder-30b"     # as LM Studio lists it; Ollama tags look like qwen3.6:35b-a3b
 isolation     = "worktree"
 tools         = ["Read", "Edit", "Write", "Bash"]
 provider_opts = { model_provider = "lmstudio" }
 ```
 
-`lmstudio` and `ollama` are Codex built-ins pointing at `localhost:11434` and
-`localhost:1234`. **A server on another machine needs its own provider id**, because Codex
+`lmstudio` and `ollama` are Codex built-ins pointing at `localhost:1234` and
+`localhost:11434`. **A server on another machine needs its own provider id**, because Codex
 reserves those two names and refuses to override them. In `~/.codex/config.toml`:
 
 ```toml
@@ -244,6 +248,11 @@ wire_api = "chat"
 Then `provider_opts = { model_provider = "bionic" }`, plus `base_url` on the role so the
 harness health-checks the right host rather than assuming localhost. `base_url` on a
 `codex` role is used only for that check; it is never passed to the CLI.
+
+The model has to exist on that server, too. A role naming a model the server doesn't
+list shows as unavailable, with the missing model named, rather than failing on its first
+task. Model ids differ between servers: LM Studio's look like `qwen/qwen3-coder-30b`,
+Ollama's like `qwen3.6:35b-a3b`.
 
 Confirm what the harness can actually reach:
 
@@ -258,7 +267,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 157 engine tests, no network, no CLI login needed
+cargo test                        # 161 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -273,7 +282,7 @@ Preview discovery, URL safety, settings — run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **157 engine tests, 168 including the Tauri shell** — worth stating explicitly,
+That makes **161 engine tests, 172 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats

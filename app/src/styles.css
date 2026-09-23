@@ -700,3 +700,15 @@ button.swatch.chosen { border-color: var(--text); }
 .inline-form input.grow { flex: 1 1 220px; }
 .settings-actions .inline-form { flex: 1; }
 .settings-actions .inline-form input { flex: 1 1 260px; }
+
+/* Why a role is unavailable, visible without hovering. */
+.fleet li.unavailable { opacity: 1; }
+.fleet li.unavailable .role-name,
+.fleet li.unavailable .fleet-backend,
+.fleet li.unavailable .fleet-badges { opacity: 0.65; }
+.fleet-reason {
+  font-size: 11px; line-height: 1.4; color: var(--warn);
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.fleet-reason button.link { font-size: 11px; }
+.fleet-backend.wrap { white-space: normal; }

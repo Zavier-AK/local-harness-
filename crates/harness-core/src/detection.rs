@@ -84,7 +84,7 @@ pub async fn detect_backends() -> Vec<DetectedBackend> {
         "claude",
         &["sonnet", "opus", "haiku"],
         "Claude CLI found on PATH",
-        "Claude CLI not found — install Claude Code and run `claude /login`",
+        "not detected — install Claude Code, then `claude /login`",
     );
     let codex = cli_backend(
         "codex",
@@ -92,7 +92,7 @@ pub async fn detect_backends() -> Vec<DetectedBackend> {
         "codex",
         &[],
         "Codex CLI found on PATH",
-        "Codex CLI not found — Codex-backed roles remain unavailable",
+        "not detected — `npm i -g @openai/codex`, then `codex login`",
     );
 
     let (lm_studio, ollama) = tokio::join!(
@@ -142,17 +142,21 @@ fn cli_backend(
     }
 }
 
-async fn detect_openai_backend(id: &str, label: &str, base_url: &str) -> DetectedBackend {
+/// The models an OpenAI-compatible server lists at `{base_url}/models`. LM Studio and
+/// Ollama both serve this, so it is the one listing both detection and the availability
+/// probe use.
+pub(crate) async fn list_models(base_url: &str) -> Result<Vec<DetectedModel>, reqwest::Error> {
     let endpoint = format!("{}/models", base_url.trim_end_matches('/'));
-    let result = async {
-        let client = reqwest::Client::builder()
-            .timeout(DISCOVERY_TIMEOUT)
-            .build()?;
-        let response = client.get(&endpoint).send().await?.error_for_status()?;
-        let value: Value = response.json().await?;
-        Ok::<_, reqwest::Error>(models_from_openai_json(&value))
-    }
-    .await;
+    let client = reqwest::Client::builder()
+        .timeout(DISCOVERY_TIMEOUT)
+        .build()?;
+    let response = client.get(&endpoint).send().await?.error_for_status()?;
+    let value: Value = response.json().await?;
+    Ok(models_from_openai_json(&value))
+}
+
+async fn detect_openai_backend(id: &str, label: &str, base_url: &str) -> DetectedBackend {
+    let result = list_models(base_url).await;
 
     match result {
         Ok(models) => {

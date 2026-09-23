@@ -56,13 +56,16 @@ export default function WorkerRail({
             <span className={`backend-dot ${backend.available ? "ready" : "down"}`} />
             <span>
               <span className="backend-label">{backend.label}</span>
-              <span className="muted mono fleet-backend">
+              <span className={`muted mono fleet-backend ${backend.available ? "" : "wrap"}`}>
                 {backend.available
                   ? backend.models
                       .filter((model) => model.capability === "chat")
                       .map((model) => model.id)
                       .join(", ") || "connected"
-                  : "not detected"}
+                  : // A missing CLI says how to get it; a missing server just is not running.
+                    backend.base_url
+                    ? "not detected"
+                    : backend.message}
               </span>
             </span>
           </li>
@@ -93,6 +96,15 @@ export default function WorkerRail({
                   {role.provider}
                   {role.model ? `/${role.model}` : ""}
                 </span>
+                {!role.available && (
+                  // The reason used to live only in a tooltip, which is where nobody looks.
+                  <span className="fleet-reason">
+                    {role.unavailable_reason ?? "backend not reachable"}{" "}
+                    <button className="link" onClick={onChangeFleet}>
+                      Fix
+                    </button>
+                  </span>
+                )}
               </li>
             ))}
           </ul>
