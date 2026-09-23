@@ -818,3 +818,52 @@ button.swatch.chosen { border-color: var(--text); }
 .lanes { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .lane-card:disabled { opacity: 1; color: var(--text); }
 .lane-card.waiting, .lane-card.planned { border-style: dashed; }
+
+/* ---------- night shift ---------- */
+.night { padding: 18px 22px 28px; display: flex; flex-direction: column; gap: 14px; max-width: 760px; }
+.night .field { flex-direction: column; align-items: stretch; gap: 5px; }
+.night .field > span { width: auto; font-size: 12px; }
+.night .field input, .night .field select, .night .field textarea { width: 100%; box-sizing: border-box; }
+.night .field small { font-size: 11px; }
+.night .field input[type="number"] { width: 96px; }
+.night-row { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+.night-row .grow { flex: 1; min-width: 200px; }
+.night .actions { margin-top: 0; }
+.night-branch { margin-top: 4px !important; font-size: 11px; }
+.night-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.night-stats > div {
+  display: flex; flex-direction: column; gap: 3px; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--panel);
+}
+.night-stats span { font-size: 11px; }
+.night-stats strong { font-size: 18px; font-variant-numeric: tabular-nums; }
+.night-stats em { font-style: normal; font-size: 12px; color: var(--muted); }
+.night-stats em.up { color: var(--ok); }
+.night-chart { width: 100%; height: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+.night-chart .best-line { fill: none; stroke: var(--ok); stroke-width: 2; }
+.night-chart .dot.kept { fill: var(--ok); }
+.night-chart .dot.baseline { fill: var(--muted); }
+.night-chart .dot.thrown { fill: none; stroke: var(--muted); stroke-width: 1.5; }
+.night-outcome { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.night-outcome p { margin: 0; font-size: 12px; }
+.night-outcome button { margin-left: auto; }
+.night-experiments { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.experiment {
+  display: flex; flex-direction: column; gap: 2px; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--panel);
+}
+.experiment { border-left: 3px solid transparent; }
+.experiment.kept { border-left-color: var(--ok); }
+.experiment.pending { flex-direction: row; gap: 10px; border-style: dashed; font-size: 12px; }
+.experiment-open {
+  display: flex; gap: 10px; align-items: center; padding: 2px 0; text-align: left;
+  color: var(--text); font-size: 12px; min-width: 0;
+}
+.experiment-open .badge { font-size: 10px; white-space: nowrap; min-width: 74px; text-align: center; box-sizing: border-box; }
+.experiment-score { min-width: 48px; font-variant-numeric: tabular-nums; }
+.experiment-summary { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.experiment-reason { font-size: 11px; padding-left: 2px; overflow-wrap: anywhere; }
+@media (max-width: 560px) {
+  .night { padding: 14px 16px 24px; }
+  .night-stats strong { font-size: 15px; }
+}

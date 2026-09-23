@@ -1305,3 +1305,126 @@ async fn the_person_can_edit_or_stop_a_plan() {
     assert_eq!(stopped.status, PlanStatus::Discarded);
     assert_eq!(stopped.steps[1].state, StepState::Skipped);
 }
+
+// ---------------------------------------------------------------- night shift
+
+use harness_core::night::{Direction, NightConfig, NightStatus};
+
+fn night(goal: &str, direction: Direction, guard: Option<&str>, max: u32) -> NightConfig {
+    NightConfig {
+        goal: goal.into(),
+        metric: "cat score".into(),
+        direction,
+        guard: guard.map(str::to_string),
+        role: "local_builder".into(),
+        max_experiments: max,
+        max_hours: 1.0,
+        timeout_secs: 30,
+    }
+}
+
+async fn with_score(f: &Fixture, value: i32) {
+    tokio::fs::write(f.root.join("score"), format!("{value}\n")).await.unwrap();
+    git(&f.root, &["add", "-A"]).await;
+    git(&f.root, &["commit", "-qm", "score"]).await;
+}
+
+async fn night_until_done(f: &Fixture) -> harness_core::night::NightReport {
+    for _ in 0..400 {
+        if let Some(report) = f.harness.night_report().await {
+            if report.status != NightStatus::Running {
+                return report;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("night shift did not end: {:?}", f.harness.night_report().await);
+}
+
+const INCREMENT: &str = "MOCK-SH: echo $(( $(cat score) + 1 )) > score";
+const DECREMENT: &str = "MOCK-SH: echo $(( $(cat score) - 1 )) > score";
+
+#[tokio::test]
+async fn improvements_accumulate_on_the_night_branch_and_the_checkout_is_untouched() {
+    let f = fixture().await;
+    with_score(&f, 1).await;
+    let report = f.harness.start_night(night(INCREMENT, Direction::Higher, None, 3)).await.unwrap();
+    let done = night_until_done(&f).await;
+
+    assert_eq!(done.status, NightStatus::Finished, "{:?}", done.ended_because);
+    assert_eq!(done.baseline, Some(1.0));
+    assert_eq!(done.best, Some(4.0), "each round built on the one before");
+    assert_eq!(done.kept(), 3);
+    assert!(done.headline().starts_with("1 → 4"));
+    // The person's checkout never moved; the night's work is on its own branch.
+    assert_eq!(tokio::fs::read_to_string(f.root.join("score")).await.unwrap(), "1\n");
+    let out = Command::new("git").args(["show", &format!("{}:score", report.branch)]).current_dir(&f.root).output().await.unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "4\n");
+    // No experiment branches are left behind.
+    let branches = Command::new("git").args(["branch", "--list", "harness/w-night-*"]).current_dir(&f.root).output().await.unwrap();
+    assert!(branches.stdout.is_empty(), "{}", String::from_utf8_lossy(&branches.stdout));
+
+    // In the morning, the night's work goes through the ordinary merge gate.
+    let proposal = f.harness.propose_night().await.unwrap();
+    assert!(f.harness.propose_night().await.is_err(), "proposed once");
+    f.harness.approve_merge(&proposal).await.unwrap();
+    assert_eq!(tokio::fs::read_to_string(f.root.join("score")).await.unwrap(), "4\n");
+}
+
+#[tokio::test]
+async fn a_change_that_makes_things_worse_is_thrown_away() {
+    let f = fixture().await;
+    with_score(&f, 5).await;
+    let report = f.harness.start_night(night(DECREMENT, Direction::Higher, None, 2)).await.unwrap();
+    let done = night_until_done(&f).await;
+    assert_eq!(done.kept(), 0);
+    assert_eq!(done.best, Some(5.0));
+    assert!(done.experiments[0].reason.contains("not better"), "{:?}", done.experiments[0]);
+    let out = Command::new("git").args(["show", &format!("{}:score", report.branch)]).current_dir(&f.root).output().await.unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "5\n", "the night branch never moved");
+    assert!(f.harness.propose_night().await.is_err(), "nothing to propose");
+}
+
+#[tokio::test]
+async fn a_change_that_breaks_the_guard_is_thrown_away_even_if_it_scores_better() {
+    let f = fixture().await;
+    with_score(&f, 1).await;
+    // Better is higher, but the guard caps the score below 3.
+    f.harness
+        .start_night(night(INCREMENT, Direction::Higher, Some("test $(cat score) -lt 3"), 3))
+        .await
+        .unwrap();
+    let done = night_until_done(&f).await;
+    assert_eq!(done.best, Some(2.0));
+    assert_eq!(done.kept(), 1);
+    assert!(done.experiments[1].reason.contains("test $(cat score) -lt 3"), "{:?}", done.experiments[1]);
+}
+
+#[tokio::test]
+async fn a_night_that_cannot_score_its_starting_point_spends_nothing() {
+    let f = fixture().await;
+    let mut config = night(INCREMENT, Direction::Higher, None, 5);
+    config.metric = "echo no numbers here".into();
+    f.harness.start_night(config).await.unwrap();
+    let done = night_until_done(&f).await;
+    assert_eq!(done.status, NightStatus::Stopped);
+    assert!(done.ended_because.unwrap().contains("starting point"));
+    assert!(done.experiments.is_empty());
+    assert!(f.harness.workers().await.is_empty(), "no worker was started");
+}
+
+#[tokio::test]
+async fn a_night_shift_can_be_stopped() {
+    let f = fixture().await;
+    with_score(&f, 1).await;
+    f.harness
+        .start_night(night("MOCK-SH: sleep 30", Direction::Higher, None, 5))
+        .await
+        .unwrap();
+    assert!(f.harness.start_night(night(INCREMENT, Direction::Higher, None, 1)).await.is_err(), "one at a time");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(f.harness.stop_night().await);
+    let done = night_until_done(&f).await;
+    assert_eq!(done.status, NightStatus::Stopped);
+    assert_eq!(done.ended_because.as_deref(), Some("stopped by the person"));
+}

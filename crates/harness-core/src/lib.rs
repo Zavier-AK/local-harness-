@@ -19,6 +19,7 @@ pub mod extensions;
 pub mod hooks;
 pub mod isolation;
 pub mod mcp;
+pub mod night;
 pub mod native;
 pub mod orchestrator;
 pub mod plan;
