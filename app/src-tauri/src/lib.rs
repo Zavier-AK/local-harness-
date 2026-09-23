@@ -247,6 +247,13 @@ fn forward_events(
                     ))
                     .await;
                 }
+                HarnessEvent::PlanFinished { title, outcome, .. } => {
+                    tell_head(&app, &project, &format!(
+                        "The plan \"{title}\" has finished. Step by step: {outcome}. Tell the person \
+                         where that leaves the work, and what, if anything, is still to do."
+                    ))
+                    .await;
+                }
                 HarnessEvent::DelegationDeclined { worker_id, reason } => {
                     tell_head(&app, &project, &format!(
                         "The person declined delegation {worker_id}: {reason}. Do not retry it \
@@ -720,6 +727,94 @@ async fn pending_merges(
     let projects = state.projects.lock().await;
     let session = projects.get(&key).ok_or("no session for that project")?;
     Ok(session.harness.pending_merges().await)
+}
+
+// --------------------------------------------------------------------- plans
+
+#[tauri::command]
+async fn list_plans(
+    state: State<'_, AppState>,
+    project: Option<String>,
+) -> Result<Vec<harness_core::plan::Plan>, String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
+    Ok(session.harness.plans().await)
+}
+
+/// Run a plan, with the person's edits to it.
+#[tauri::command]
+async fn run_plan(
+    state: State<'_, AppState>,
+    plan_id: String,
+    steps: Vec<harness_core::plan::StepInput>,
+    project: Option<String>,
+) -> Result<(), String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
+    session
+        .harness
+        .run_plan(&plan_id, Some(steps))
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn discard_plan(
+    state: State<'_, AppState>,
+    plan_id: String,
+    project: Option<String>,
+) -> Result<(), String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
+    session.harness.discard_plan(&plan_id).await.map_err(|e| format!("{e:#}"))
+}
+
+#[derive(Deserialize)]
+struct StepComment {
+    step_id: String,
+    text: String,
+}
+
+/// Send the person's comments on a plan back to the head agent for a revision. Their
+/// edits so far are saved first, so the revision starts from what they changed.
+#[tauri::command]
+async fn plan_feedback(
+    state: State<'_, AppState>,
+    plan_id: String,
+    steps: Vec<harness_core::plan::StepInput>,
+    comments: Vec<StepComment>,
+    note: String,
+    project: Option<String>,
+) -> Result<(), String> {
+    let key = key_for(&state, project).await?;
+    let mut projects = state.projects.lock().await;
+    let session = projects.get_mut(&key).ok_or("no session for that project")?;
+    let plan = session
+        .harness
+        .edit_plan(&plan_id, steps)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+
+    let mut message = format!("The person reviewed your plan \"{}\".", plan.title);
+    if !note.trim().is_empty() {
+        message.push_str(&format!(" Overall: {}", note.trim()));
+    }
+    for comment in comments.iter().filter(|c| !c.text.trim().is_empty()) {
+        message.push_str(&format!("\n- On step `{}`: {}", comment.step_id, comment.text.trim()));
+    }
+    message.push_str(&format!(
+        "\nThe plan as it now stands, with their edits: {}\nRevise it and call `propose_plan` \
+         again; that replaces this one.",
+        serde_json::to_string(&plan.steps.iter().map(|s| &s.input).collect::<Vec<_>>())
+            .unwrap_or_default()
+    ));
+    match &mut session.head {
+        Head::Live(orchestrator) => orchestrator.send(&message).await.map_err(|e| format!("{e:#}")),
+        Head::Suspended => Err("the head agent is not running for this project".into()),
+    }
 }
 
 // ------------------------------------------------------------------ autonomy
@@ -1477,6 +1572,10 @@ pub fn run() {
             list_workers,
             worker_patch,
             worker_verification,
+            list_plans,
+            run_plan,
+            discard_plan,
+            plan_feedback,
             get_autonomy,
             set_autonomy,
             approve_delegation,

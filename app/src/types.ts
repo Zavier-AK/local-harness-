@@ -39,6 +39,8 @@ export type HarnessEvent =
   | { type: "merge_landed"; worker_id: string; branch: string; commit: string; automatic: boolean; risk: Risk | null }
   | { type: "merge_not_landed"; worker_id: string; reason: string }
   | { type: "merge_reverted"; worker_id: string; commit: string }
+  | { type: "plan_updated"; plan: Plan }
+  | { type: "plan_finished"; plan_id: string; title: string; outcome: string }
   | { type: "verification_started"; worker_id: string }
   | { type: "verification_check"; worker_id: string; check: VerifyCheck }
   | { type: "verification_finished"; worker_id: string; report: VerificationReport }
@@ -316,3 +318,38 @@ export type AppSettings = {
 
 /** What the head agent's CLI reported about MCP servers when it last started. */
 export type McpStatus = { connected: string[]; failed: string[] };
+
+// ---------- Plan board ----------
+
+export type StepInput = {
+  id: string;
+  title: string;
+  role: string;
+  task: string;
+  context_files: string[];
+  depends_on: string[];
+};
+
+export type StepState =
+  | "planned"
+  | "waiting"
+  | "running"
+  | "checking"
+  | "review"
+  | "landed"
+  | "failed"
+  | "skipped";
+
+export type PlanStep = StepInput & {
+  state: StepState;
+  worker_id: string | null;
+  note: string | null;
+};
+
+export type Plan = {
+  id: string;
+  title: string;
+  summary: string;
+  status: "draft" | "running" | "finished" | "discarded";
+  steps: PlanStep[];
+};

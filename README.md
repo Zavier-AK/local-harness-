@@ -164,6 +164,34 @@ reviewer    = "tester"      # cheap first pass
 escalate_to = "architect"   # only when the first pass is worried
 ```
 
+## The plan board
+
+For work with more than one step, the head agent calls `propose_plan` instead of
+delegating each piece. The plan opens in the **Plan** tab as one card per step: its
+title, its role, its task, and what it waits for. The idea comes from Kun Chen's
+[Lavish](https://github.com/kunchenguid/lavish-axi): "visual plans, not walls of
+markdown". The running view is borrowed from Vibe Kanban's lanes.
+
+- **Before it runs**, you can:
+  - edit any task, retitle a step, switch its role, or remove it (whatever depended on
+    it is unhooked);
+  - comment on individual steps, or on the plan as a whole;
+  - **Send feedback**, which gives your comments and edits to the head agent to revise;
+  - **Run plan**, which starts it.
+- **Once running**, the harness drives the plan itself, with no head-agent turns:
+  - steps with nothing to wait for start together, each in its own worktree;
+  - a step that depends on another starts only after that one has **landed**, so it
+    builds on real code on your branch, not on a branch you might still discard;
+  - the same cards move across *Up next → Running → Checking → Your review → Landed*.
+- **Every step is an ordinary worker.** Each is verified, goes through the merge gate,
+  and obeys the autonomy dial. At **Land safe**, a plan can run start to finish without
+  a click.
+- **If a step is discarded or fails,** anything that depends on it is skipped.
+- **Stop plan** keeps unstarted steps from starting. The head agent is told how the plan
+  ended, step by step.
+
+Headless, `harness-cli --run-plans` runs a proposed plan unedited.
+
 ## How much runs without you
 
 A four-stop dial in the title bar, set per project. ⌘⇧A cycles through it. This is
@@ -335,7 +363,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 196 engine tests, no network, no CLI login needed
+cargo test                        # 205 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -350,7 +378,7 @@ Preview discovery, URL safety, settings — run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **196 engine tests, 207 including the Tauri shell** — worth stating explicitly,
+That makes **205 engine tests, 216 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats

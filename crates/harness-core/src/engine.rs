@@ -80,6 +80,10 @@ pub struct Harness {
     approved: RwLock<std::collections::HashSet<String>>,
     /// Merges that landed, with their merge commit, so a landing can be undone.
     landed: RwLock<HashMap<String, Landed>>,
+    /// Merges the person discarded — a plan step whose work was thrown away failed.
+    discarded: RwLock<std::collections::HashSet<String>>,
+    /// Plans proposed in this session, keyed by id.
+    plans: RwLock<HashMap<String, crate::plan::Plan>>,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +135,8 @@ impl Harness {
             approvals: RwLock::new(HashMap::new()),
             approved: RwLock::new(Default::default()),
             landed: RwLock::new(HashMap::new()),
+            discarded: RwLock::new(Default::default()),
+            plans: RwLock::new(HashMap::new()),
         }
     }
 
@@ -821,6 +827,267 @@ impl Harness {
             .count()
     }
 
+    // ------------------------------------------------------------------ plans
+
+    /// Whether any plan is still moving — its next step may be seconds from starting.
+    pub async fn plans_running(&self) -> bool {
+        self.plans
+            .read()
+            .await
+            .values()
+            .any(|plan| plan.status == crate::plan::PlanStatus::Running)
+    }
+
+    pub async fn plans(&self) -> Vec<crate::plan::Plan> {
+        self.plans.read().await.values().cloned().collect()
+    }
+
+    /// Put a plan in front of the person. It replaces any plan still being reviewed —
+    /// a revision, usually — and runs nothing.
+    pub async fn propose_plan(
+        &self,
+        title: &str,
+        summary: &str,
+        steps: Vec<crate::plan::StepInput>,
+    ) -> Result<crate::plan::Plan> {
+        use crate::plan::{Plan, PlanStatus};
+        crate::plan::validate(&steps, &*self.registry.read().await)?;
+        let plan = Plan::new(
+            format!("p-{}", Uuid::new_v4().simple()),
+            title.trim().to_string(),
+            summary.trim().to_string(),
+            steps,
+        );
+        let replaced: Vec<Plan> = {
+            let mut plans = self.plans.write().await;
+            let drafts: Vec<String> = plans
+                .values()
+                .filter(|p| p.status == PlanStatus::Draft)
+                .map(|p| p.id.clone())
+                .collect();
+            let replaced = drafts
+                .iter()
+                .filter_map(|id| plans.remove(id))
+                .map(|mut p| {
+                    p.status = PlanStatus::Discarded;
+                    p
+                })
+                .collect();
+            plans.insert(plan.id.clone(), plan.clone());
+            replaced
+        };
+        for old in replaced {
+            self.record(HarnessEvent::PlanUpdated { plan: old }).await;
+        }
+        self.record(HarnessEvent::PlanUpdated { plan: plan.clone() }).await;
+        Ok(plan)
+    }
+
+    /// The person's edits to a plan they are still reviewing.
+    pub async fn edit_plan(
+        &self,
+        plan_id: &str,
+        steps: Vec<crate::plan::StepInput>,
+    ) -> Result<crate::plan::Plan> {
+        use crate::plan::{PlanStatus, PlanStep, StepState};
+        crate::plan::validate(&steps, &*self.registry.read().await)?;
+        let plan = {
+            let mut plans = self.plans.write().await;
+            let plan = plans.get_mut(plan_id).with_context(|| format!("no plan `{plan_id}`"))?;
+            if plan.status != PlanStatus::Draft {
+                bail!("the plan is already {}", if plan.status == PlanStatus::Running { "running" } else { "over" });
+            }
+            plan.steps = steps
+                .into_iter()
+                .map(|input| PlanStep { input, state: StepState::Planned, worker_id: None, note: None })
+                .collect();
+            plan.clone()
+        };
+        self.record(HarnessEvent::PlanUpdated { plan: plan.clone() }).await;
+        Ok(plan)
+    }
+
+    /// Drop a plan being reviewed, or stop a running one: steps not yet started never
+    /// will. Steps already running carry on — each can be stopped from its own card.
+    pub async fn discard_plan(&self, plan_id: &str) -> Result<()> {
+        use crate::plan::{PlanStatus, StepState};
+        let plan = {
+            let mut plans = self.plans.write().await;
+            let plan = plans.get_mut(plan_id).with_context(|| format!("no plan `{plan_id}`"))?;
+            if plan.status == PlanStatus::Running {
+                for step in plan.steps.iter_mut().filter(|s| s.worker_id.is_none()) {
+                    step.state = StepState::Skipped;
+                    step.note = Some("the plan was stopped".into());
+                }
+            }
+            plan.status = PlanStatus::Discarded;
+            plan.clone()
+        };
+        self.record(HarnessEvent::PlanUpdated { plan }).await;
+        Ok(())
+    }
+
+    /// Run a plan the person approved — with their edits, if they sent any. Independent
+    /// steps start together; a step with dependencies starts once they have all landed.
+    /// Running the plan is the approval, so steps start even under the `Ask` level.
+    pub async fn run_plan(
+        self: &Arc<Self>,
+        plan_id: &str,
+        steps: Option<Vec<crate::plan::StepInput>>,
+    ) -> Result<()> {
+        use crate::plan::PlanStatus;
+        if let Some(steps) = steps {
+            self.edit_plan(plan_id, steps).await?;
+        }
+        let plan = {
+            let mut plans = self.plans.write().await;
+            let plan = plans.get_mut(plan_id).with_context(|| format!("no plan `{plan_id}`"))?;
+            if plan.status != PlanStatus::Draft {
+                bail!("the plan has already been run or dropped");
+            }
+            plan.status = PlanStatus::Running;
+            plan.clone()
+        };
+        self.record(HarnessEvent::PlanUpdated { plan }).await;
+
+        let harness = Arc::clone(self);
+        let plan_id = plan_id.to_string();
+        tokio::spawn(async move { harness.drive_plan(plan_id).await });
+        Ok(())
+    }
+
+    /// Move a running plan along until every step is final. Polls rather than listening,
+    /// because a step moves on for many reasons (a worker ending, a check finishing, a
+    /// person merging or discarding) and reading the state is simpler than wiring each.
+    async fn drive_plan(self: Arc<Self>, plan_id: String) {
+        use crate::plan::{readiness, PlanStatus, Readiness, StepState};
+        loop {
+            let Some(mut plan) = self.plans.read().await.get(&plan_id).cloned() else { return };
+            if plan.status != PlanStatus::Running {
+                return;
+            }
+            let before = plan.clone();
+
+            for index in 0..plan.steps.len() {
+                let step = plan.steps[index].clone();
+                if step.state.is_final() {
+                    continue;
+                }
+                match &step.worker_id {
+                    None => match readiness(&plan, &step) {
+                        Readiness::Wait => plan.steps[index].state = StepState::Waiting,
+                        Readiness::Skip(why) => {
+                            plan.steps[index].state = StepState::Skipped;
+                            plan.steps[index].note = Some(why);
+                        }
+                        Readiness::Start => {
+                            let worker_id = format!("w-{}", Uuid::new_v4().simple());
+                            plan.steps[index].worker_id = Some(worker_id.clone());
+                            plan.steps[index].state = StepState::Running;
+                            self.start_step(worker_id, step.input.clone());
+                        }
+                    },
+                    Some(worker_id) => {
+                        let (state, note) = self.step_state(worker_id).await;
+                        plan.steps[index].state = state;
+                        if note.is_some() {
+                            plan.steps[index].note = note;
+                        }
+                    }
+                }
+            }
+
+            let finished = plan.steps.iter().all(|s| s.state.is_final());
+            if finished {
+                plan.status = PlanStatus::Finished;
+            }
+            if plan != before {
+                // A person may have stopped the plan while this pass ran; theirs wins.
+                let still_running = {
+                    let mut plans = self.plans.write().await;
+                    match plans.get_mut(&plan_id) {
+                        Some(current) if current.status == PlanStatus::Running => {
+                            *current = plan.clone();
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if !still_running {
+                    return;
+                }
+                self.record(HarnessEvent::PlanUpdated { plan: plan.clone() }).await;
+            }
+            if finished {
+                self.record(HarnessEvent::PlanFinished {
+                    plan_id: plan.id.clone(),
+                    title: plan.title.clone(),
+                    outcome: plan.outcome(),
+                })
+                .await;
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    }
+
+    fn start_step(self: &Arc<Self>, worker_id: String, step: crate::plan::StepInput) {
+        let harness = Arc::clone(self);
+        tokio::spawn(async move {
+            match harness
+                .run_delegation(worker_id.clone(), &step.role, &step.task, step.context_files)
+                .await
+            {
+                Ok(record) => {
+                    let changed = record.diff.as_ref().is_some_and(|d| d.files_changed > 0);
+                    if record.branch.is_some() && changed && !record.is_error {
+                        if let Err(err) = harness.request_merge(&worker_id).await {
+                            tracing::warn!("could not propose plan step {worker_id}: {err:#}");
+                        }
+                    }
+                }
+                Err(err) => harness.fail_before_start(&worker_id, &format!("{err:#}")).await,
+            }
+        });
+    }
+
+    /// A started step's lane, read from its worker and its merge.
+    async fn step_state(&self, worker_id: &str) -> (crate::plan::StepState, Option<String>) {
+        use crate::plan::StepState;
+        if self.landed.read().await.contains_key(worker_id) {
+            return (StepState::Landed, None);
+        }
+        if self.discarded.read().await.contains(worker_id) {
+            return (StepState::Failed, Some("discarded by the person".into()));
+        }
+        if self.pending_merges.read().await.contains_key(worker_id) {
+            let checking = matches!(
+                self.verification(worker_id).await,
+                Some(VerificationState::Running { .. }) | None
+            );
+            return (if checking { StepState::Checking } else { StepState::Review }, None);
+        }
+        let Some(record) = self.worker(worker_id).await else {
+            return (StepState::Running, None);
+        };
+        let first_line = || record.summary.lines().next().unwrap_or_default().to_string();
+        match record.status {
+            WorkerStatus::Done => {
+                let changed = record.diff.as_ref().is_some_and(|d| d.files_changed > 0);
+                if changed && record.branch.is_some() {
+                    // Finished, and about to be proposed for merge.
+                    (StepState::Checking, None)
+                } else {
+                    // A step that changes nothing — a review, an investigation — is done
+                    // when it reports.
+                    (StepState::Landed, Some(first_line()))
+                }
+            }
+            WorkerStatus::Failed | WorkerStatus::Cancelled => (StepState::Failed, Some(first_line())),
+            _ => (StepState::Running, None),
+        }
+    }
+
     /// Where a proposed merge's checks stand, if it has any.
     pub async fn verification(&self, worker_id: &str) -> Option<VerificationState> {
         self.verifications.read().await.get(worker_id).cloned()
@@ -1101,6 +1368,7 @@ impl Harness {
             .remove(worker_id)
             .with_context(|| format!("no merge pending for `{worker_id}`"))?;
 
+        self.discarded.write().await.insert(worker_id.to_string());
         self.workspaces.discard(&branch).await
     }
 
