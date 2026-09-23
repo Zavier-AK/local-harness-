@@ -114,6 +114,8 @@ pub fn hook_settings(hook: &[String]) -> String {
         "hooks": {
             "WorktreeCreate": [{ "hooks": [{ "type": "command", "command": command("worktree-create") }] }],
             "WorktreeRemove": [{ "hooks": [{ "type": "command", "command": command("worktree-remove") }] }],
+            // The autonomy slider's `Ask` stop, enforced on native delegation too.
+            "PreToolUse": [{ "matcher": "Agent|Task", "hooks": [{ "type": "command", "command": command("pre-tool-use") }] }],
         }
     })
     .to_string()

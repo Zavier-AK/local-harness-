@@ -8,6 +8,7 @@ type Props = {
   onClose: () => void;
   onApprove: () => void;
   onReject: () => void;
+  onUndo: () => void;
 };
 
 /** Classify a unified-diff line so it can be coloured. */
@@ -26,7 +27,7 @@ function lineKind(line: string): "add" | "del" | "meta" | "hunk" | "ctx" {
  * This is the only place work can land. The orchestrator can propose a merge; approving
  * it is a human action, and the engine exposes no path for a model to do it.
  */
-export default function DiffDrawer({ worker, onClose, onApprove, onReject }: Props) {
+export default function DiffDrawer({ worker, onClose, onApprove, onReject, onUndo }: Props) {
   const diff = worker.diff;
   const awaitingReview = Boolean(worker.branch && diff && diff.files_changed > 0);
 
@@ -182,6 +183,19 @@ export default function DiffDrawer({ worker, onClose, onApprove, onReject }: Pro
                   : "This worker changed nothing."}
             </p>
           </section>
+        )}
+
+        {worker.landed && (
+          <footer>
+            <p className="muted">
+              {worker.landed.automatic ? "Landed by itself" : "Merged"} as{" "}
+              <code className="mono">{worker.landed.commit.slice(0, 10)}</code>. Undo adds a commit
+              that reverses it; history is kept.
+            </p>
+            <div className="actions">
+              <button onClick={onUndo}>Undo</button>
+            </div>
+          </footer>
         )}
 
         {awaitingReview && (

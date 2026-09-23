@@ -10,6 +10,7 @@
 //! testable without a desktop.
 
 pub mod agents;
+pub mod autonomy;
 pub mod availability;
 pub mod detection;
 pub mod engine;

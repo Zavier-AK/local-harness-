@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { DetectedBackend, Role, Worker, WorkerActivity } from "./types";
 import { totalInput } from "./types";
 
@@ -9,6 +10,7 @@ type Props = {
   onSelect: (id: string) => void;
   onChangeFleet: () => void;
   onStopWorker: (id: string) => void;
+  onDecide: (id: string, approve: boolean, text?: string) => void;
 };
 
 /** Statuses a stop can still act on. */
@@ -25,6 +27,7 @@ const STATUS_LABEL: Record<Worker["status"], string> = {
   queued: "queued",
   blocked: "waiting for the shared lock",
   preparing: "preparing worktree",
+  awaiting_approval: "waiting for you",
   running: "running",
   done: "done",
   failed: "failed",
@@ -39,6 +42,7 @@ export default function WorkerRail({
   onSelect,
   onChangeFleet,
   onStopWorker,
+  onDecide,
 }: Props) {
   return (
     <aside className="rail">
@@ -111,7 +115,10 @@ export default function WorkerRail({
         </div>
       )}
 
-      {workers.map((worker) => (
+      {workers.map((worker) =>
+        worker.status === "awaiting_approval" ? (
+          <ApprovalCard key={worker.id} worker={worker} onDecide={onDecide} />
+        ) : (
         // The stop control sits beside the card rather than inside it: the card is itself
         // a button, and a button nested in a button is not valid markup.
         <div key={worker.id} className="worker-card-wrap">
@@ -173,7 +180,82 @@ export default function WorkerRail({
           </div>
         </button>
         </div>
-      ))}
+        ),
+      )}
     </aside>
+  );
+}
+
+/**
+ * A delegation the head agent proposed, waiting on you (autonomy "Ask"). Approve it as it
+ * is, edit the task first, or decline — with a reason the head agent will be told.
+ */
+function ApprovalCard({
+  worker,
+  onDecide,
+}: {
+  worker: Worker;
+  onDecide: (id: string, approve: boolean, text?: string) => void;
+}) {
+  const [mode, setMode] = useState<"view" | "edit" | "decline">("view");
+  const [text, setText] = useState(worker.task ?? "");
+
+  return (
+    <div className="worker-card awaiting">
+      <div className="worker-head">
+        <span className="role-name">{worker.role}</span>
+        <span className="status awaiting_approval">waiting for you</span>
+      </div>
+      {mode === "view" && <p className="approval-task">{worker.task}</p>}
+      {mode !== "view" && (
+        <textarea
+          className="approval-input"
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          placeholder={mode === "decline" ? "Why not? (optional — the head agent is told)" : ""}
+          rows={mode === "edit" ? 5 : 2}
+          autoFocus
+        />
+      )}
+      <div className="approval-actions">
+        {mode === "view" && (
+          <>
+            <button className="primary" onClick={() => onDecide(worker.id, true)}>
+              Approve
+            </button>
+            <button onClick={() => setMode("edit")}>Edit</button>
+            <button
+              className="ghost"
+              onClick={() => {
+                setText("");
+                setMode("decline");
+              }}
+            >
+              Decline
+            </button>
+          </>
+        )}
+        {mode === "edit" && (
+          <>
+            <button className="primary" onClick={() => onDecide(worker.id, true, text)} disabled={!text.trim()}>
+              Approve edited
+            </button>
+            <button className="ghost" onClick={() => setMode("view")}>
+              Cancel
+            </button>
+          </>
+        )}
+        {mode === "decline" && (
+          <>
+            <button className="danger" onClick={() => onDecide(worker.id, false, text)}>
+              Decline
+            </button>
+            <button className="ghost" onClick={() => setMode("view")}>
+              Cancel
+            </button>
+          </>
+        )}
+      </div>
+    </div>
   );
 }

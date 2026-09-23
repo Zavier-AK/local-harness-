@@ -66,6 +66,57 @@ fn worktree_setup(project: &Path) -> Result<WorktreeSetup> {
     Ok(RoleRegistry::load(&roles)?.worktree)
 }
 
+/// Answer a hook by name, returning what to print on stdout. Both binaries route here, so
+/// a new hook is added once.
+pub async fn run(which: &str, stdin: &str) -> Result<Option<String>> {
+    match which {
+        "worktree-create" => Ok(Some(worktree_create(stdin).await?.display().to_string())),
+        "worktree-remove" => worktree_remove(stdin).await.map(|()| None),
+        "pre-tool-use" => Ok(pre_tool_use(stdin)),
+        other => bail!("unknown hook `{other}`"),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PreToolUseInput {
+    cwd: PathBuf,
+    #[serde(default)]
+    tool_input: serde_json::Value,
+}
+
+/// Answer `PreToolUse` on the `Agent` tool: under the `Ask` autonomy level, a delegation to
+/// one of the project's own roles must go through `delegate`, where the person approves
+/// it. Built-in subagents (Explore and the like) only read, and are left alone.
+///
+/// Read from disk on every call rather than fixed at session start, so moving the slider
+/// mid-session applies to native subagents at once. Any doubt — no file, no roles, input
+/// it cannot read — means no decision, and Claude Code's normal flow applies.
+pub fn pre_tool_use(stdin: &str) -> Option<String> {
+    let input: PreToolUseInput = serde_json::from_str(stdin).ok()?;
+    if !crate::autonomy::load(&input.cwd).delegation_needs_approval() {
+        return None;
+    }
+    let subagent = input.tool_input.get("subagent_type")?.as_str()?;
+    let registry = RoleRegistry::load(input.cwd.join("roles.toml")).ok()?;
+    if !crate::native::native_roles(&registry).contains_key(subagent) {
+        return None;
+    }
+    Some(
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": format!(
+                    "The person has set this project to approve every delegation. Delegate to \
+                     `{subagent}` with the harness `delegate` tool instead, so they can approve \
+                     it; it will return at once as awaiting approval."
+                ),
+            }
+        })
+        .to_string(),
+    )
+}
+
 /// Answer `WorktreeCreate`: build the worktree and return the path Claude Code should use.
 pub async fn worktree_create(stdin: &str) -> Result<PathBuf> {
     let input: CreateInput = serde_json::from_str(stdin).context("reading WorktreeCreate input")?;
@@ -244,4 +295,51 @@ mod tests {
         assert!(worktree_remove(&input).await.is_err());
         assert!(other.exists(), "must not have touched it");
     }
+
+    fn project_with(level: Option<crate::autonomy::Autonomy>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("roles.toml"),
+            "[roles.builder]\nprovider = \"claude\"\nisolation = \"worktree\"\n",
+        )
+        .unwrap();
+        if let Some(level) = level {
+            crate::autonomy::save(dir.path(), level).unwrap();
+        }
+        dir
+    }
+
+    fn agent_call(cwd: &Path, subagent: &str) -> String {
+        serde_json::json!({
+            "cwd": cwd,
+            "tool_name": "Agent",
+            "tool_input": { "subagent_type": subagent, "prompt": "do it" }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn under_ask_a_native_role_is_sent_to_delegate() {
+        let dir = project_with(Some(crate::autonomy::Autonomy::Ask));
+        let out = pre_tool_use(&agent_call(dir.path(), "builder")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("`delegate`"));
+    }
+
+    #[test]
+    fn otherwise_the_hook_stays_out_of_the_way() {
+        // Not Ask; a built-in subagent; no setting at all; input it cannot read.
+        let review = project_with(Some(crate::autonomy::Autonomy::Review));
+        assert!(pre_tool_use(&agent_call(review.path(), "builder")).is_none());
+        let ask = project_with(Some(crate::autonomy::Autonomy::Ask));
+        assert!(pre_tool_use(&agent_call(ask.path(), "Explore")).is_none());
+        let unset = project_with(None);
+        assert!(pre_tool_use(&agent_call(unset.path(), "builder")).is_none());
+        assert!(pre_tool_use("not json").is_none());
+    }
 }
+

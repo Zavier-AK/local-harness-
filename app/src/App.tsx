@@ -11,11 +11,13 @@ import LimitsPanel from "./LimitsPanel";
 import BudgetMeter from "./BudgetMeter";
 import PreviewPanel from "./PreviewPanel";
 import ToolsView from "./ToolsView";
+import AutonomyDial, { nextStop } from "./AutonomyDial";
 import SettingsView from "./SettingsView";
 import { notifyIfAway } from "./notify";
 import { applySettings } from "./appSettings";
 import type {
   AppSettings,
+  Autonomy,
   ChatItem,
   HarnessEvent,
   McpStatus,
@@ -28,6 +30,7 @@ import type {
   Worker,
   WorkerActivity,
   Verification,
+  VerificationReport,
 } from "./types";
 
 export default function App() {
@@ -47,8 +50,26 @@ export default function App() {
   const [quotas, setQuotas] = useState<QuotaReport | null>(null);
   /** The session, or one of the two full-pane views that replace it. */
   const [view, setView] = useState<"session" | "tools" | "settings">("session");
+  const [autonomy, setAutonomy] = useState<Autonomy>("review");
   /** Per project: which MCP servers its head agent's CLI managed to connect. */
   const [mcpStatus, setMcpStatus] = useState<Record<string, McpStatus>>({});
+
+  // The project's autonomy level, read whenever a different project comes to the front.
+  const activeRoot = session?.project_root;
+  useEffect(() => {
+    if (!activeRoot) return;
+    invoke<Autonomy>("get_autonomy")
+      .then(setAutonomy)
+      .catch(() => setAutonomy("review"));
+  }, [activeRoot]);
+
+  async function changeAutonomy(level: Autonomy) {
+    try {
+      setAutonomy(await invoke<Autonomy>("set_autonomy", { level }));
+    } catch (err) {
+      setChat((prev) => [...prev, { kind: "notice", tone: "error", text: String(err) }]);
+    }
+  }
 
   // Settings that live in the page (accent, notifications) apply from the first frame.
   useEffect(() => {
@@ -188,7 +209,7 @@ export default function App() {
       }
       // Ready to review once it has been checked, not merely proposed — so the
       // notification can say how worried to be.
-      if (payload.type === "verification_finished") {
+      if (payload.type === "verification_finished" && !landsByItself(autonomy, payload.report)) {
         const { report } = payload;
         void notifyIfAway(
           report.verified
@@ -197,7 +218,24 @@ export default function App() {
           report.reasons[0] ?? "Checks passed.",
         );
       }
-      if (payload.type === "worker_spawned" || payload.type === "merge_requested") {
+      if (payload.type === "merge_landed" && payload.automatic) {
+        void notifyIfAway(
+          "A change landed by itself",
+          `${payload.risk ?? "verified"} risk — open the app to undo it if you disagree.`,
+        );
+      }
+      if (payload.type === "merge_not_landed") {
+        void notifyIfAway("A change could not land by itself", payload.reason);
+      }
+      if (payload.type === "delegation_requested") {
+        void notifyIfAway("The head agent wants to delegate", `${payload.role}: ${firstLine(payload.task)}`);
+      }
+      if (
+        payload.type === "worker_spawned" ||
+        payload.type === "merge_requested" ||
+        payload.type === "merge_landed" ||
+        payload.type === "delegation_requested"
+      ) {
         void refreshProjects();
       }
     });
@@ -231,7 +269,10 @@ export default function App() {
 
     function onKey(event: KeyboardEvent) {
       const mod = event.metaKey || event.ctrlKey;
-      if (mod && event.key === ",") {
+      if (mod && event.shiftKey && event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        void changeAutonomy(nextStop(autonomy));
+      } else if (mod && event.key === ",") {
         event.preventDefault();
         setView("settings");
       } else if (event.key === "Escape" && view !== "session" && !overlayOpen) {
@@ -272,17 +313,30 @@ export default function App() {
     }
   }
 
+  async function decide(workerId: string, approve: boolean, text?: string) {
+    try {
+      if (approve) await invoke("approve_delegation", { workerId, task: text ?? null });
+      else await invoke("decline_delegation", { workerId, reason: text ?? null });
+    } catch (err) {
+      setChat((prev) => [...prev, { kind: "notice", tone: "error", text: String(err) }]);
+    }
+  }
+
+  async function undoMerge(workerId: string) {
+    try {
+      await invoke("undo_merge", { workerId });
+    } catch (err) {
+      setChat((prev) => [...prev, { kind: "notice", tone: "error", text: String(err) }]);
+    }
+  }
+
   async function resolveMerge(workerId: string, approve: boolean) {
     try {
       await invoke(approve ? "approve_merge" : "reject_merge", { workerId });
-      setChat((prev) => [
-        ...prev,
-        {
-          kind: "notice",
-          tone: "info",
-          text: approve ? `Merged ${workerId} into your branch.` : `Discarded ${workerId}.`,
-        },
-      ]);
+      // A merge announces itself (with Undo) through its `merge_landed` event.
+      if (!approve) {
+        setChat((prev) => [...prev, { kind: "notice", tone: "info", text: `Discarded ${workerId}.` }]);
+      }
       setWorkers((prev) => {
         const next = { ...prev };
         if (next[workerId]) next[workerId] = { ...next[workerId], branch: null };
@@ -326,6 +380,7 @@ export default function App() {
       <header className="titlebar">
         <span className="title">Harness</span>
         <span className="muted mono">{session.project_root}</span>
+        <AutonomyDial level={autonomy} onChange={(level) => void changeAutonomy(level)} />
         <BudgetMeter
           usage={usage}
           rateLimited={rateLimited}
@@ -387,6 +442,7 @@ export default function App() {
                 busy={busy}
                 onSend={send}
                 onSelectWorker={setSelectedWorker}
+                onUndo={(id) => void undoMerge(id)}
               />
             </div>
             <div
@@ -411,6 +467,7 @@ export default function App() {
           onSelect={setSelectedWorker}
           onChangeFleet={() => setFleetOpen(true)}
           onStopWorker={(id) => void stopWorker(id)}
+          onDecide={(id, approve, text) => void decide(id, approve, text)}
         />
       </div>
 
@@ -447,6 +504,7 @@ export default function App() {
           onClose={() => setSelectedWorker(null)}
           onApprove={() => resolveMerge(selected.id, true)}
           onReject={() => resolveMerge(selected.id, false)}
+          onUndo={() => void undoMerge(selected.id)}
         />
       )}
     </div>
@@ -481,6 +539,34 @@ function reduceChat(
   headRun: React.MutableRefObject<string | null>,
 ): ChatItem[] {
   switch (event.type) {
+    case "merge_landed":
+      return [
+        ...prev,
+        {
+          kind: "landed",
+          workerId: event.worker_id,
+          text: event.automatic
+            ? `Landed ${event.worker_id} automatically${event.risk ? ` — ${event.risk} risk` : ""}.`
+            : `Merged ${event.worker_id} into your branch.`,
+          undone: false,
+        },
+      ];
+
+    case "merge_reverted":
+      return prev.map((item) =>
+        item.kind === "landed" && item.workerId === event.worker_id ? { ...item, undone: true } : item,
+      );
+
+    case "merge_not_landed":
+      return [
+        ...prev,
+        {
+          kind: "notice",
+          tone: "warn",
+          text: `${event.worker_id} would have landed by itself but could not: ${event.reason}. It is waiting for you.`,
+        },
+      ];
+
     case "session_started":
       // The first session to appear is the head agent; workers come later.
       if (headRun.current === null) headRun.current = event.run_id;
@@ -580,6 +666,8 @@ function reduceWorkers(
           currentTool: null,
           activity: [],
           verification: null,
+          // An approved delegation spawns under the id it waited with; keep its task.
+          task: prev[event.worker_id]?.task,
         },
       };
 
@@ -615,6 +703,57 @@ function reduceWorkers(
         ...prev,
         [event.worker_id]: { ...existing, branch: event.branch, diff: event.diff },
       };
+    }
+
+    case "delegation_requested":
+      return {
+        ...prev,
+        [event.worker_id]: {
+          id: event.worker_id,
+          role: event.role,
+          provider: "",
+          isolation: "",
+          cwd: "",
+          status: "awaiting_approval",
+          summary: "",
+          usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+          diff: null,
+          branch: null,
+          is_error: false,
+          startedAt: Date.now(),
+          currentTool: null,
+          activity: [],
+          verification: null,
+          task: event.task,
+        },
+      };
+
+    case "delegation_declined": {
+      const existing = prev[event.worker_id];
+      if (!existing) return prev;
+      return {
+        ...prev,
+        [event.worker_id]: { ...existing, status: "cancelled", summary: `Declined: ${event.reason}` },
+      };
+    }
+
+    case "merge_landed": {
+      const existing = prev[event.worker_id];
+      if (!existing) return prev;
+      return {
+        ...prev,
+        [event.worker_id]: {
+          ...existing,
+          branch: null,
+          landed: { commit: event.commit, automatic: event.automatic },
+        },
+      };
+    }
+
+    case "merge_reverted": {
+      const existing = prev[event.worker_id];
+      if (!existing) return prev;
+      return { ...prev, [event.worker_id]: { ...existing, landed: null } };
     }
 
     case "verification_started":
@@ -662,6 +801,18 @@ function reduceWorkers(
     default:
       return prev;
   }
+}
+
+/** The engine's landing rule (`Autonomy::lands`), so a change about to land by itself is
+ * not first announced as waiting for review. */
+function landsByItself(level: Autonomy, report: VerificationReport): boolean {
+  if (level !== "land_safe" && level !== "land_most") return false;
+  const ceiling = level === "land_safe" ? ["low"] : ["low", "medium"];
+  return (
+    report.verified &&
+    ceiling.includes(report.risk) &&
+    !report.checks.some((check) => check.status === "failed" || check.status === "error")
+  );
 }
 
 function reduceVerification(prev: Verification | null, event: HarnessEvent): Verification | null {
