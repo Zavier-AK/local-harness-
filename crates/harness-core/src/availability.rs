@@ -90,7 +90,7 @@ pub async fn probe_in_path(role: &Role, path_value: &OsStr) -> Availability {
         Provider::Codex => {
             if !binary_in_path("codex", path_value) {
                 return Availability::no(
-                    "the `codex` CLI is not on PATH — install Codex and run `codex login`",
+                    "the `codex` CLI is not on PATH — `npm i -g @openai/codex`, then `codex login`",
                 );
             }
 
@@ -107,10 +107,14 @@ pub async fn probe_in_path(role: &Role, path_value: &OsStr) -> Availability {
             match (role.base_url.as_deref(), model_provider) {
                 (Some(base_url), _) => {
                     let root = base_url.trim_end_matches('/').trim_end_matches("/v1");
-                    probe_http(root, "the model server").await
+                    probe_server(root, "the model server", role.model.as_deref()).await
                 }
-                (None, Some("ollama")) => probe_http("http://localhost:11434", "Ollama").await,
-                (None, Some("lmstudio")) => probe_http("http://localhost:1234", "LM Studio").await,
+                (None, Some("ollama")) => {
+                    probe_server("http://localhost:11434", "Ollama", role.model.as_deref()).await
+                }
+                (None, Some("lmstudio")) => {
+                    probe_server("http://localhost:1234", "LM Studio", role.model.as_deref()).await
+                }
                 (None, _) => Availability::yes(),
             }
         }
@@ -118,11 +122,37 @@ pub async fn probe_in_path(role: &Role, path_value: &OsStr) -> Availability {
         Provider::OpenaiCompat => match &role.base_url {
             Some(base_url) => {
                 let root = base_url.trim_end_matches('/').trim_end_matches("/v1");
-                probe_http(root, "the local model server").await
+                probe_server(root, "the local model server", role.model.as_deref()).await
             }
             None => Availability::no("no base_url configured"),
         },
     }
+}
+
+/// A model server must be up, and — where it says what it has — have the role's model.
+///
+/// Up but missing the model is the case worth catching: it otherwise reads as
+/// available and fails on the first delegation. A server that will not list its models
+/// is given the benefit of the doubt; this exists to report a real mismatch, not to
+/// invent one.
+async fn probe_server(root: &str, label: &str, model: Option<&str>) -> Availability {
+    let alive = probe_http(root, label).await;
+    let Some(model) = model.filter(|_| alive.available) else {
+        return alive;
+    };
+    match crate::detection::list_models(&format!("{root}/v1")).await {
+        Ok(models) if !models.is_empty() && !models.iter().any(|m| same_model(&m.id, model)) => {
+            Availability::no(format!(
+                "{label} is running but has no model `{model}` — load it, or pick one it has in Change fleet"
+            ))
+        }
+        _ => alive,
+    }
+}
+
+/// Ollama lists `llama3:latest` for a model asked for as `llama3`.
+fn same_model(listed: &str, wanted: &str) -> bool {
+    listed == wanted || (!wanted.contains(':') && listed == format!("{wanted}:latest"))
 }
 
 /// A liveness check, not a correctness check: any HTTP response means something is
@@ -287,5 +317,71 @@ mod tests {
     async fn openai_compat_without_a_base_url_is_unavailable() {
         let result = probe_in_path(&role(Provider::OpenaiCompat), OsStr::new("")).await;
         assert!(!result.available);
+    }
+
+    /// A model server on a free port: answers `/`, and `/v1/models` with `models` — or
+    /// with a 404 when `models` is `None`, like a server that will not list them.
+    async fn model_server(models: Option<&'static [&'static str]>) -> String {
+        use axum::{routing::get, Json, Router};
+        let mut app = Router::new().route("/", get(|| async { "ok" }));
+        if let Some(models) = models {
+            app = app.route(
+                "/v1/models",
+                get(move || async move {
+                    Json(serde_json::json!({
+                        "data": models.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>()
+                    }))
+                }),
+            );
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{address}/v1")
+    }
+
+    fn local_role(base_url: String, model: &str) -> Role {
+        let mut local = role(Provider::OpenaiCompat);
+        local.base_url = Some(base_url);
+        local.model = Some(model.into());
+        local
+    }
+
+    #[tokio::test]
+    async fn a_running_server_with_the_model_is_available() {
+        let url = model_server(Some(&["qwen/qwen2.5-coder-14b", "llama3:latest"])).await;
+        assert!(probe(&local_role(url.clone(), "qwen/qwen2.5-coder-14b")).await.available);
+        // Ollama lists the implicit tag.
+        assert!(probe(&local_role(url, "llama3")).await.available);
+    }
+
+    #[tokio::test]
+    async fn a_running_server_without_the_model_says_which_model_is_missing() {
+        // The case that used to read as available and fail on the first delegation.
+        let url = model_server(Some(&["qwen/qwen2.5-coder-14b"])).await;
+        let result = probe(&local_role(url, "gemma4:12b")).await;
+        assert!(!result.available);
+        let reason = result.reason.unwrap();
+        assert!(reason.contains("gemma4:12b") && reason.contains("Change fleet"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_will_not_list_its_models_gets_the_benefit_of_the_doubt() {
+        let url = model_server(None).await;
+        assert!(probe(&local_role(url, "anything")).await.available);
+    }
+
+    #[tokio::test]
+    async fn a_codex_role_on_a_local_server_is_checked_for_its_model_too() {
+        let dir = tempfile::tempdir().unwrap();
+        write_executable(dir.path(), "codex");
+        let url = model_server(Some(&["qwen/qwen3-coder-30b"])).await;
+
+        let mut builder = role(Provider::Codex);
+        builder.base_url = Some(url);
+        builder.model = Some("qwen3.6:35b-a3b".into());
+        let result = probe_in_path(&builder, &path_of(dir.path())).await;
+        assert!(!result.available);
+        assert!(result.reason.unwrap().contains("qwen3.6:35b-a3b"));
     }
 }
