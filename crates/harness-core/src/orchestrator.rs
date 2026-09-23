@@ -122,8 +122,12 @@ pub fn orchestrator_brief_with(roles: &[crate::engine::RoleInfo], native: &[Stri
          independent, so they run in parallel.\n\
          - Workers that edit files run in their own git worktree. Their changes are NOT on \
          the user's branch. To land them, call `request_merge` — this only queues the diff \
-         for the user to approve. Never tell the user work has landed; tell them it is \
-         waiting for their review.\n\
+         for the user to approve. Never tell the user work has landed unless \
+         `check_workers` says it did (they may let verified, low-risk changes land by \
+         themselves); otherwise tell them it is waiting for their review.\n\
+         - The user decides how much runs without them. A delegation that comes back \
+         `awaiting_approval` starts once they approve it, and you will be told how it \
+         ends; do not wait or poll for it.\n\
          - Report back concisely: what you delegated, what came back, what needs a decision."
     )
 }

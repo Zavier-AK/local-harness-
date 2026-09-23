@@ -499,11 +499,34 @@ impl Workspaces {
             bail!("refusing to merge `{branch}`: not a harness branch");
         }
 
-        git(
+        if let Err(err) = git(
             &self.project_root,
             &["merge", "--no-ff", "-m", &format!("harness: merge {branch}"), branch],
         )
         .await
+        {
+            // A conflicted merge must not leave the person's checkout half-merged, full of
+            // conflict markers. Back out; the branch is still there to resolve by hand.
+            let _ = git(&self.project_root, &["merge", "--abort"]).await;
+            return Err(err.context(format!("{branch} does not merge cleanly")));
+        }
+        // The merge commit, so a landing can be undone precisely.
+        git(&self.project_root, &["rev-parse", "HEAD"]).await
+    }
+
+    /// Undo a landed merge with a new commit that reverses it — history is kept, nothing
+    /// is rewritten. Refused for a commit that is not in the current checkout's history.
+    pub async fn revert_merge(&self, commit: &str) -> Result<()> {
+        if !commit.chars().all(|c| c.is_ascii_hexdigit()) || commit.len() < 7 {
+            bail!("refusing to revert `{commit}`: not a commit id");
+        }
+        git(&self.project_root, &["merge-base", "--is-ancestor", commit, "HEAD"])
+            .await
+            .with_context(|| format!("{commit} is not in the current branch's history"))?;
+        git(&self.project_root, &["revert", "-m", "1", "--no-edit", commit])
+            .await
+            .context("reverting the merge")?;
+        Ok(())
     }
 
     /// Drop a branch whose work was rejected.

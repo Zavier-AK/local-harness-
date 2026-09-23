@@ -981,3 +981,164 @@ async fn a_clean_first_review_spends_nothing_on_a_second() {
     assert_eq!(report.risk, Risk::Low);
 }
 
+
+// ------------------------------------------------------------------- autonomy
+
+use harness_core::autonomy::Autonomy;
+
+/// Wait for a worker to reach a terminal status.
+async fn finished(f: &Fixture, worker_id: &str) -> harness_core::engine::WorkerRecord {
+    for _ in 0..200 {
+        if let Some(record) = f.harness.worker(worker_id).await {
+            if record.status.is_terminal() {
+                return record;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("{worker_id} did not finish");
+}
+
+#[tokio::test]
+async fn under_ask_a_delegation_waits_and_runs_the_task_the_person_approved() {
+    let mut f = fixture().await;
+    f.harness.set_autonomy(Autonomy::Ask).await;
+
+    let id = f
+        .harness
+        .queue_for_approval("local_builder", "WRITE:original.txt:no", vec![])
+        .await
+        .unwrap();
+    assert_eq!(f.harness.worker(&id).await.unwrap().status, WorkerStatus::AwaitingApproval);
+    assert!(drain(&mut f.events)
+        .iter()
+        .any(|e| matches!(e, HarnessEvent::DelegationRequested { worker_id, .. } if worker_id == &id)));
+
+    // The person edits the task before approving; the edit is what runs, under the same id.
+    f.harness
+        .approve_delegation(&id, Some("WRITE:edited.txt:yes".into()))
+        .await
+        .unwrap();
+    let record = finished(&f, &id).await;
+    assert_eq!(record.status, WorkerStatus::Done);
+    assert_eq!(record.diff.unwrap().files, ["edited.txt"]);
+    assert!(f.harness.take_approved(&id).await, "its outcome is owed to the head agent");
+    assert!(!f.harness.take_approved(&id).await, "once");
+    assert!(f.harness.approve_delegation(&id, None).await.is_err(), "approval is single-use");
+}
+
+#[tokio::test]
+async fn a_declined_delegation_never_runs_and_says_why() {
+    let mut f = fixture().await;
+    let id = f.harness.queue_for_approval("local_builder", "WRITE:x.txt:no", vec![]).await.unwrap();
+    f.harness.decline_delegation(&id, "wrong approach").await.unwrap();
+
+    let record = f.harness.worker(&id).await.unwrap();
+    assert_eq!(record.status, WorkerStatus::Cancelled);
+    assert_eq!(record.summary, "Declined: wrong approach");
+    assert!(drain(&mut f.events).iter().any(|e| matches!(
+        e,
+        HarnessEvent::DelegationDeclined { reason, .. } if reason == "wrong approach"
+    )));
+    assert!(!f.root.join(".harness/worktrees").join(&id).exists(), "nothing was prepared");
+    // Stop on one that is waiting is the same as declining it.
+    let other = f.harness.queue_for_approval("local_builder", "WRITE:y.txt:no", vec![]).await.unwrap();
+    assert!(f.harness.cancel_worker(&other).await);
+    assert_eq!(f.harness.worker(&other).await.unwrap().status, WorkerStatus::Cancelled);
+}
+
+fn passing_verify() -> String {
+    with_verify("commands = [\"true\"]")
+}
+
+#[tokio::test]
+async fn land_safe_lands_a_verified_low_risk_change_by_itself() {
+    let mut f = fixture_with(&passing_verify()).await;
+    f.harness.set_autonomy(Autonomy::LandSafe).await;
+    let record = f.harness.delegate("local_builder", "WRITE:notes.md:hello", vec![]).await.unwrap();
+    f.harness.request_merge(&record.id).await.unwrap();
+
+    verification_of(&mut f, &record.id).await;
+    let landed = loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), f.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if let HarnessEvent::MergeLanded { automatic, commit, .. } = event {
+            break (automatic, commit);
+        }
+    };
+    assert!(landed.0, "landed without a click");
+    assert_eq!(landed.1.len(), 40, "the merge commit, so it can be undone");
+    assert!(f.root.join("notes.md").exists());
+    assert!(f.harness.pending_merges().await.is_empty());
+    let line = f.harness.verification_line(&record.id).await.unwrap();
+    assert!(line.contains("landed automatically"), "{line}");
+
+    // Undo puts it back, once.
+    f.harness.undo_merge(&record.id).await.unwrap();
+    assert!(!f.root.join("notes.md").exists());
+    assert!(drain(&mut f.events).iter().any(|e| matches!(e, HarnessEvent::MergeReverted { .. })));
+    assert!(f.harness.undo_merge(&record.id).await.is_err());
+}
+
+#[tokio::test]
+async fn nothing_lands_by_itself_that_should_wait() {
+    // (level, verify config, what the worker writes)
+    let cases = [
+        // Review never lands.
+        (Autonomy::Review, passing_verify(), "WRITE:notes.md:x"),
+        // Unverified: nothing ran.
+        (Autonomy::LandMost, ROLES.to_string(), "WRITE:notes.md:x"),
+        // A failed check.
+        (Autonomy::LandMost, with_verify("commands = [\"false\"]"), "WRITE:notes.md:x"),
+        // Medium risk (code without tests) is above Land safe's ceiling.
+        (Autonomy::LandSafe, passing_verify(), "WRITE:src/lib.rs:fn a() {}"),
+        // High risk (a sensitive path) is above Land most's.
+        (Autonomy::LandMost, passing_verify(), "WRITE:db/migrations/1.sql:drop table users;"),
+    ];
+    for (level, roles, task) in cases {
+        let mut f = fixture_with(&roles).await;
+        f.harness.set_autonomy(level).await;
+        let record = f.harness.delegate("local_builder", task, vec![]).await.unwrap();
+        f.harness.request_merge(&record.id).await.unwrap();
+        verification_of(&mut f, &record.id).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(f.harness.pending_merges().await.len(), 1, "{level:?} / {task} should wait");
+    }
+}
+
+#[tokio::test]
+async fn land_most_takes_medium_risk_that_land_safe_would_not() {
+    let mut f = fixture_with(&passing_verify()).await;
+    f.harness.set_autonomy(Autonomy::LandMost).await;
+    let record = f.harness.delegate("local_builder", "WRITE:src/lib.rs:fn a() {}", vec![]).await.unwrap();
+    f.harness.request_merge(&record.id).await.unwrap();
+    let (_, report) = verification_of(&mut f, &record.id).await;
+    assert_eq!(report.risk, Risk::Medium);
+    for _ in 0..50 {
+        if f.harness.pending_merges().await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(f.harness.pending_merges().await.is_empty());
+    assert!(f.root.join("src/lib.rs").exists());
+}
+
+#[tokio::test]
+async fn a_merge_that_fails_stays_proposed_for_the_person() {
+    let f = fixture().await;
+    let record = f.harness.delegate("local_builder", "WRITE:README.md:theirs", vec![]).await.unwrap();
+    f.harness.request_merge(&record.id).await.unwrap();
+    // A conflicting commit on the main line.
+    tokio::fs::write(f.root.join("README.md"), "ours\n").await.unwrap();
+    git(&f.root, &["commit", "-qam", "ours"]).await;
+
+    assert!(f.harness.approve_merge(&record.id).await.is_err());
+    assert_eq!(f.harness.pending_merges().await.len(), 1, "still reviewable after a conflict");
+    // And the checkout is not left mid-merge with conflict markers in it.
+    let status = Command::new("git").args(["status", "--porcelain"]).current_dir(&f.root).output().await.unwrap();
+    assert!(status.stdout.is_empty(), "{}", String::from_utf8_lossy(&status.stdout));
+    assert_eq!(tokio::fs::read_to_string(f.root.join("README.md")).await.unwrap(), "ours\n");
+}

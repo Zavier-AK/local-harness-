@@ -50,13 +50,11 @@ pub fn run_hook(which: Option<&str>) -> i32 {
         }
     };
     let outcome = runtime.block_on(async {
-        match which {
-            Some("worktree-create") => harness_core::hooks::worktree_create(&input)
-                .await
-                .map(|path| println!("{}", path.display())),
-            Some("worktree-remove") => harness_core::hooks::worktree_remove(&input).await,
-            other => Err(anyhow::anyhow!("unknown hook {other:?}")),
+        let out = harness_core::hooks::run(which.unwrap_or_default(), &input).await?;
+        if let Some(out) = out {
+            println!("{out}");
         }
+        Ok::<(), anyhow::Error>(())
     });
     match outcome {
         Ok(()) => 0,
@@ -228,8 +226,35 @@ fn forward_events(
     tokio::spawn(async move {
         while let Some(event) = events.recv().await {
             harness.note_event(&event).await;
-            if let HarnessEvent::VerificationFinished { worker_id, report } = &event {
-                tell_head_about_failed_checks(&app, &project, worker_id, report).await;
+            match &event {
+                HarnessEvent::VerificationFinished { worker_id, report } => {
+                    tell_head_about_failed_checks(&app, &project, worker_id, report).await;
+                }
+                // Under `Ask`, `delegate` returned before the work ran. Close the loop so
+                // the head agent learns how each approved delegation ended.
+                HarnessEvent::WorkerFinished { worker_id, summary, diff, is_error, .. }
+                    if harness.take_approved(worker_id).await =>
+                {
+                    let outcome = if *is_error { "failed" } else { "finished" };
+                    let merge = if diff.as_ref().is_some_and(|d| d.files_changed > 0) {
+                        " Its changes are on a branch; call `request_merge` to propose them."
+                    } else {
+                        ""
+                    };
+                    tell_head(&app, &project, &format!(
+                        "The delegation {worker_id} the person approved has {outcome}: {}.{merge}",
+                        first_line(summary)
+                    ))
+                    .await;
+                }
+                HarnessEvent::DelegationDeclined { worker_id, reason } => {
+                    tell_head(&app, &project, &format!(
+                        "The person declined delegation {worker_id}: {reason}. Do not retry it \
+                         as it was; ask them, or take a different approach."
+                    ))
+                    .await;
+                }
+                _ => {}
             }
             if let Err(err) = app.emit(EVENT_CHANNEL, ProjectEvent { project: &project, event: &event })
             {
@@ -267,12 +292,26 @@ async fn tell_head_about_failed_checks(
         failed.join(", "),
         report.reasons.join("; ")
     );
+    tell_head(app, project, &notice).await;
+}
+
+/// Send the project's live head agent one line. A suspended head is not woken for it.
+async fn tell_head(app: &AppHandle, project: &str, notice: &str) {
     let state = app.state::<AppState>();
     let mut projects = state.projects.lock().await;
     if let Some(Session { head: Head::Live(orchestrator), .. }) = projects.get_mut(project) {
-        if let Err(error) = orchestrator.send(&notice).await {
-            tracing::warn!("could not tell the head agent about failed checks: {error:#}");
+        if let Err(error) = orchestrator.send(notice).await {
+            tracing::warn!("could not send the head agent a notice: {error:#}");
         }
+    }
+}
+
+fn first_line(text: &str) -> String {
+    let line = text.lines().next().unwrap_or_default().trim();
+    if line.chars().count() > 200 {
+        format!("{}…", line.chars().take(200).collect::<String>())
+    } else {
+        line.to_string()
     }
 }
 
@@ -503,6 +542,9 @@ async fn start_session(
         tx,
     ));
     harness.set_extras(current_extras()).await;
+    harness
+        .set_autonomy(harness_core::autonomy::load(&project))
+        .await;
 
     let (orchestrator, orchestrator_events) = Orchestrator::start(
         Arc::clone(&harness),
@@ -678,6 +720,90 @@ async fn pending_merges(
     let projects = state.projects.lock().await;
     let session = projects.get(&key).ok_or("no session for that project")?;
     Ok(session.harness.pending_merges().await)
+}
+
+// ------------------------------------------------------------------ autonomy
+
+#[tauri::command]
+async fn get_autonomy(
+    state: State<'_, AppState>,
+    project: Option<String>,
+) -> Result<harness_core::autonomy::Autonomy, String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
+    Ok(session.harness.autonomy().await)
+}
+
+/// Move the slider: saved with the project, live at once, and the head agent told —
+/// its brief cannot change, but one line keeps it from planning around the old level.
+#[tauri::command]
+async fn set_autonomy(
+    state: State<'_, AppState>,
+    level: harness_core::autonomy::Autonomy,
+    project: Option<String>,
+) -> Result<harness_core::autonomy::Autonomy, String> {
+    let key = key_for(&state, project).await?;
+    let mut projects = state.projects.lock().await;
+    let session = projects.get_mut(&key).ok_or("no session for that project")?;
+    if session.harness.autonomy().await == level {
+        return Ok(level);
+    }
+    harness_core::autonomy::save(&session.project_root, level).map_err(|e| e.to_string())?;
+    session.harness.set_autonomy(level).await;
+    if let Head::Live(orchestrator) = &mut session.head {
+        let notice = format!("The person changed how much runs without them: {}.", level.summary());
+        if let Err(error) = orchestrator.send(&notice).await {
+            tracing::warn!("could not tell the head agent about the autonomy change: {error:#}");
+        }
+    }
+    Ok(level)
+}
+
+#[tauri::command]
+async fn approve_delegation(
+    state: State<'_, AppState>,
+    worker_id: String,
+    task: Option<String>,
+    project: Option<String>,
+) -> Result<(), String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
+    session
+        .harness
+        .approve_delegation(&worker_id, task)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn decline_delegation(
+    state: State<'_, AppState>,
+    worker_id: String,
+    reason: Option<String>,
+    project: Option<String>,
+) -> Result<(), String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
+    session
+        .harness
+        .decline_delegation(&worker_id, reason.as_deref().unwrap_or_default())
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn undo_merge(
+    state: State<'_, AppState>,
+    worker_id: String,
+    project: Option<String>,
+) -> Result<(), String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
+    session.harness.undo_merge(&worker_id).await.map_err(|e| format!("{e:#}"))
 }
 
 /// Where a proposed merge's checks stand — for a drawer opened after the events passed.
@@ -1351,6 +1477,11 @@ pub fn run() {
             list_workers,
             worker_patch,
             worker_verification,
+            get_autonomy,
+            set_autonomy,
+            approve_delegation,
+            decline_delegation,
+            undo_merge,
             pending_merges,
             approve_merge,
             reject_merge,

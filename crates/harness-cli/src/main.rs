@@ -41,6 +41,11 @@ struct Cli {
     #[arg(long, global = true)]
     db: Option<PathBuf>,
 
+    /// How much runs without you: ask, review, land-safe or land-most. Headless, so under
+    /// `ask` delegations are declined — there is no one here to approve them.
+    #[arg(long, global = true, default_value = "review", value_parser = parse_autonomy)]
+    autonomy: harness_core::autonomy::Autonomy,
+
     /// Skills and MCP servers for Claude workers. Defaults to the desktop app's, so
     /// both use one library.
     #[arg(long, global = true)]
@@ -186,6 +191,23 @@ fn render(event: &HarnessEvent, streaming: &mut bool) {
                 diff.files_changed, diff.insertions, diff.deletions
             );
         }
+        HarnessEvent::DelegationRequested { worker_id, role, task } => {
+            end_stream(streaming);
+            println!("  ? {worker_id} [{role}] awaits approval: {}", task.lines().next().unwrap_or_default());
+        }
+        HarnessEvent::DelegationDeclined { worker_id, reason } => {
+            end_stream(streaming);
+            println!("  ⊘ {worker_id} declined: {reason}");
+        }
+        HarnessEvent::MergeLanded { worker_id, branch, commit, automatic, .. } => {
+            end_stream(streaming);
+            let how = if *automatic { "landed automatically" } else { "merged" };
+            println!("  ⇲ {worker_id} {how}: {branch} at {}", &commit[..commit.len().min(10)]);
+        }
+        HarnessEvent::MergeNotLanded { worker_id, reason } => {
+            end_stream(streaming);
+            println!("  ⏸ {worker_id} could not land by itself, waiting for review: {reason}");
+        }
         HarnessEvent::VerificationCheck { worker_id, check } => {
             end_stream(streaming);
             println!("  ✔︎ check on {worker_id}: {} — {:?}: {}", check.name, check.status, check.summary);
@@ -264,6 +286,16 @@ fn spawn_renderer(
             // tail of the stream after it is gone is still worth doing.
             if let Some(harness) = harness.upgrade() {
                 harness.note_event(&event).await;
+                // Headless: there is nobody to approve a delegation, so under `Ask` say so
+                // and decline it rather than leave the head agent waiting forever.
+                if let HarnessEvent::DelegationRequested { worker_id, .. } = &event {
+                    let _ = harness
+                        .decline_delegation(
+                            worker_id,
+                            "the CLI cannot ask for approval; run with --autonomy review, or use the app",
+                        )
+                        .await;
+                }
             }
             render(&event, &mut streaming);
 
@@ -304,6 +336,7 @@ async fn build_harness(cli: &Cli, events: harness_core::agents::EventSink) -> Re
     }
 
     let harness = Arc::new(Harness::new(registry, workspaces, store, session_id, events));
+    harness.set_autonomy(cli.autonomy).await;
 
     // Skills and MCP servers are an addition, never a reason not to run.
     if let Some(dir) = cli.extensions.clone().or_else(harness_core::extensions::default_dir) {
@@ -313,6 +346,11 @@ async fn build_harness(cli: &Cli, events: harness_core::agents::EventSink) -> Re
         }
     }
     Ok(harness)
+}
+
+fn parse_autonomy(text: &str) -> Result<harness_core::autonomy::Autonomy, String> {
+    harness_core::autonomy::Autonomy::parse(text)
+        .ok_or_else(|| format!("`{text}` is not one of ask, review, land-safe, land-most"))
 }
 
 /// Small unique id without pulling uuid into this crate's surface.
@@ -345,13 +383,8 @@ async fn main() -> Result<()> {
         use std::io::Read;
         let mut input = String::new();
         std::io::stdin().read_to_string(&mut input)?;
-        match which.as_str() {
-            "worktree-create" => {
-                let path = harness_core::hooks::worktree_create(&input).await?;
-                println!("{}", path.display());
-            }
-            "worktree-remove" => harness_core::hooks::worktree_remove(&input).await?,
-            other => anyhow::bail!("unknown hook `{other}`"),
+        if let Some(out) = harness_core::hooks::run(which, &input).await? {
+            println!("{out}");
         }
         return Ok(());
     }

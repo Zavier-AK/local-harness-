@@ -39,6 +39,8 @@ Verified against live docs and against the real CLI, not assumed.
 | A session-level `--disallowedTools` binds subagents too | The head agent is kept read-only by approving only `Read`/`Grep`/`Glob`/`Agent`, not by a deny list — otherwise builder subagents cannot write. |
 | A head agent with `Bash` copied a subagent's work straight into the checkout, skipping review | The brief and subagent preamble now say outright that absence from the checkout is correct. |
 | `--plugin-dir` loads skills as `plugin:name` in headless mode | Skills reach workers without writing anything into the user's repository. |
+| Claude Code abandons an HTTP MCP tool call that is silent for ~5 minutes | Approval under the autonomy slider's **Ask** returns at once instead of blocking. The same limit threatens a synchronous `delegate` of a worker that runs longer — see known gaps. |
+| A `PreToolUse` hook's `permissionDecision: "deny"` on the `Agent` tool is honoured in `-p` mode | Ask is enforced on native subagents too: live, the head agent was refused `Agent` and fell back to `delegate`. |
 | `--mcp-config` takes several values | Placed last on a worker's argv, it swallows the prompt; extras go first. |
 | `pi-herdr` drives terminal panes and scrapes them | Wrong substrate for a GUI, and bound to the `pi` agent. Not forked; its preset/spawn concept borrowed, engine written fresh. |
 
@@ -74,7 +76,7 @@ output can merge anything.
 
 ### Working and verified
 
-- **184 engine tests** (195 including the separate Tauri shell workspace), no network or
+- **196 engine tests** (207 including the separate Tauri shell workspace), no network or
   CLI login required.
 - **Orchestrator** — live end-to-end against the real `claude` CLI: it called `list_roles`,
   then `delegate`, a worker wrote into its worktree, and it correctly reported the work as
@@ -106,6 +108,10 @@ output can merge anything.
   - a real Claude reviewer returned a JSON verdict that parsed, giving low risk;
   - the checkout was removed afterwards.
   Failure, escalation, "unverified" and merge-while-checking are covered by engine tests.
+- **Autonomy slider** — Ask verified live: with the level at Ask, the real head agent's
+  native `Agent` call was refused by the hook, it delegated through `delegate` instead,
+  and that returned awaiting approval. Auto-landing, its refusals, undo and conflict
+  abort are covered by engine tests.
 
 ### Not yet verified
 
@@ -130,7 +136,7 @@ output can merge anything.
 
 ### Known gaps
 
-- **No CI.** The repository has no workflows, so the 184 tests run only by hand. This
+- **No CI.** The repository has no workflows, so the 196 tests run only by hand. This
   matters more than usual here: both CLIs' JSON output is parsed leniently against
   fixtures rather than a stable contract, so upstream schema drift would go unnoticed
   until a live run misbehaved. Deferred by choice.
@@ -140,6 +146,9 @@ output can merge anything.
   agent is told so.
 - **Skill and MCP changes reach a running head agent only on reopen.** Workers get them on
   their next task.
+- **A synchronous `delegate` longer than ~5 minutes may be abandoned** by Claude Code's
+  MCP idle timeout. `delegate_async` and native subagents are unaffected. Fix: send
+  progress notifications from the MCP server during long calls.
 - **Diff drawer shows the current diff, not a history** of earlier ones. The chat itself
   is restored on restart and on switching projects.
 
@@ -173,8 +182,8 @@ In the order that unblocks the most.
    section of the review drawer — and report what feels off.
 6. **Turn on `[verify]`** in a real project: its test command, and a cheap reviewer. Watch
    whether the risk levels match your own judgement before trusting them for more.
-7. **Autonomy slider** (planned next): a per-project dial from "ask before each delegation"
-   to "land low-risk, verified changes automatically" — built on the risk levels above.
+7. **Try the autonomy slider** at Land safe on a project with `[verify]` set up, and see
+   whether what lands by itself is what you would have merged.
 8. **Push-to-talk voice assistant**: a menu-bar popover and global hotkey,
    on-device speech-to-text, fixed commands matched first, a *small* LM Studio model for
    the rest (not `qwen3-coder-30b`), and "ask the fleet" sent to the head agent.

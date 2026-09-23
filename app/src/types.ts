@@ -17,6 +17,7 @@ export type WorkerStatus =
   | "queued"
   | "blocked"
   | "preparing"
+  | "awaiting_approval"
   | "running"
   | "done"
   | "failed"
@@ -32,6 +33,12 @@ export type HarnessEvent =
   | { type: "worker_status_changed"; worker_id: string; status: WorkerStatus }
   | { type: "worker_finished"; worker_id: string; summary: string; usage: Usage; diff: DiffStat | null; is_error: boolean }
   | { type: "merge_requested"; worker_id: string; branch: string; diff: DiffStat }
+  | { type: "delegation_requested"; worker_id: string; role: string; task: string }
+  | { type: "delegation_approved"; worker_id: string }
+  | { type: "delegation_declined"; worker_id: string; reason: string }
+  | { type: "merge_landed"; worker_id: string; branch: string; commit: string; automatic: boolean; risk: Risk | null }
+  | { type: "merge_not_landed"; worker_id: string; reason: string }
+  | { type: "merge_reverted"; worker_id: string; commit: string }
   | { type: "verification_started"; worker_id: string }
   | { type: "verification_check"; worker_id: string; check: VerifyCheck }
   | { type: "verification_finished"; worker_id: string; report: VerificationReport }
@@ -149,7 +156,14 @@ export type Worker = {
   activity: WorkerActivity[];
   /** Checks on its proposed merge, once one is proposed. */
   verification: Verification | null;
+  /** What it was asked to do — shown while it waits for approval. */
+  task?: string;
+  /** Set once its merge landed, so it can be undone. */
+  landed?: { commit: string; automatic: boolean } | null;
 };
+
+/** How much runs without the person. Mirrors `Autonomy` in the engine. */
+export type Autonomy = "ask" | "review" | "land_safe" | "land_most";
 
 // ---------- Verification before merge ----------
 
@@ -200,7 +214,9 @@ export type ChatItem =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string }
   | { kind: "tool"; name: string; toolUseId?: string; workerId?: string }
-  | { kind: "notice"; text: string; tone: "info" | "warn" | "error" };
+  | { kind: "notice"; text: string; tone: "info" | "warn" | "error" }
+  /** A merge that landed, with the way back. */
+  | { kind: "landed"; workerId: string; text: string; undone: boolean };
 
 export const totalInput = (u: Usage) =>
   u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens;

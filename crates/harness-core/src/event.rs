@@ -43,6 +43,8 @@ pub enum WorkerStatus {
     Blocked,
     /// Building the worktree: copying files in and installing dependencies.
     Preparing,
+    /// Proposed by the head agent, waiting for the person to approve it (autonomy `Ask`).
+    AwaitingApproval,
     Running,
     Done,
     Failed,
@@ -127,6 +129,41 @@ pub enum HarnessEvent {
         worker_id: String,
         branch: String,
         diff: DiffStat,
+    },
+    /// A delegation the person must approve before it runs (autonomy `Ask`).
+    DelegationRequested {
+        worker_id: String,
+        role: String,
+        task: String,
+    },
+    DelegationApproved {
+        worker_id: String,
+    },
+    DelegationDeclined {
+        worker_id: String,
+        reason: String,
+    },
+    /// A merge landed — by a person's click, or by itself under an autonomy level that
+    /// allows it.
+    MergeLanded {
+        worker_id: String,
+        branch: String,
+        commit: String,
+        automatic: bool,
+        /// What verification made of it, when it was checked.
+        #[serde(default)]
+        risk: Option<crate::verify::Risk>,
+    },
+    /// A merge the autonomy level would have landed, that could not be (a conflict, most
+    /// likely). It stays proposed for the person.
+    MergeNotLanded {
+        worker_id: String,
+        reason: String,
+    },
+    /// A landed merge, undone.
+    MergeReverted {
+        worker_id: String,
+        commit: String,
     },
     /// Checks began on a proposed merge's branch.
     VerificationStarted {
@@ -240,6 +277,12 @@ impl HarnessEvent {
             | Self::WorkerStatusChanged { worker_id, .. }
             | Self::WorkerFinished { worker_id, .. }
             | Self::MergeRequested { worker_id, .. }
+            | Self::DelegationRequested { worker_id, .. }
+            | Self::DelegationApproved { worker_id }
+            | Self::DelegationDeclined { worker_id, .. }
+            | Self::MergeLanded { worker_id, .. }
+            | Self::MergeNotLanded { worker_id, .. }
+            | Self::MergeReverted { worker_id, .. }
             | Self::VerificationStarted { worker_id }
             | Self::VerificationCheck { worker_id, .. }
             | Self::VerificationFinished { worker_id, .. } => worker_id,

@@ -9,6 +9,7 @@ type Props = {
   onSend: (text: string) => void;
   onStop: () => void;
   onSelectWorker: (id: string) => void;
+  onUndo: (workerId: string) => void;
 };
 
 /** Tool calls into the harness read as delegation, not as plumbing. */
@@ -32,7 +33,7 @@ function toolLabel(name: string): string {
   }
 }
 
-export default function HeadChat({ items, busy, onSend, onStop, onSelectWorker }: Props) {
+export default function HeadChat({ items, busy, onSend, onStop, onSelectWorker, onUndo }: Props) {
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -82,6 +83,19 @@ export default function HeadChat({ items, busy, onSend, onStop, onSelectWorker }
               return (
                 <div key={i} className={`notice ${item.tone}`}>
                   {item.text}
+                </div>
+              );
+            case "landed":
+              // The way back sits right next to the news, so letting changes land by
+              // themselves never means losing control of them.
+              return (
+                <div key={i} className={`notice landed ${item.undone ? "undone" : ""}`}>
+                  <span>{item.undone ? `${item.text} Undone.` : item.text}</span>
+                  {!item.undone && (
+                    <button className="link" onClick={() => onUndo(item.workerId)}>
+                      Undo
+                    </button>
+                  )}
                 </div>
               );
           }

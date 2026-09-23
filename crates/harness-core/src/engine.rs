@@ -72,6 +72,28 @@ pub struct Harness {
     verifications: RwLock<HashMap<String, VerificationState>>,
     /// Verification runs tests and possibly a local model, both heavy; one at a time.
     verify_slots: Arc<tokio::sync::Semaphore>,
+    /// How much runs without the person. See [`crate::autonomy`].
+    autonomy: RwLock<crate::autonomy::Autonomy>,
+    /// Delegations waiting for the person's approval, keyed by worker id.
+    approvals: RwLock<HashMap<String, PendingDelegation>>,
+    /// Workers the person approved, so their outcome can be reported to the head agent.
+    approved: RwLock<std::collections::HashSet<String>>,
+    /// Merges that landed, with their merge commit, so a landing can be undone.
+    landed: RwLock<HashMap<String, Landed>>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingDelegation {
+    role: String,
+    task: String,
+    context_files: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct Landed {
+    commit: String,
+    automatic: bool,
+    risk: Option<crate::verify::Risk>,
 }
 
 /// Where a proposed merge's checks stand.
@@ -105,6 +127,10 @@ impl Harness {
             extras: RwLock::new(Default::default()),
             verifications: RwLock::new(HashMap::new()),
             verify_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            autonomy: RwLock::new(Default::default()),
+            approvals: RwLock::new(HashMap::new()),
+            approved: RwLock::new(Default::default()),
+            landed: RwLock::new(HashMap::new()),
         }
     }
 
@@ -161,10 +187,143 @@ impl Harness {
     /// Its process is killed, whatever it had written is committed to its branch so
     /// nothing is lost, and it finishes with status `Cancelled`.
     pub async fn cancel_worker(&self, worker_id: &str) -> bool {
+        // Stopping one that never started is declining it.
+        if self.approvals.read().await.contains_key(worker_id) {
+            return self.decline_delegation(worker_id, "stopped by the person").await.is_ok();
+        }
         match self.cancels.read().await.get(worker_id) {
             Some(stop) => stop.send(true).is_ok(),
             None => false,
         }
+    }
+
+    pub async fn autonomy(&self) -> crate::autonomy::Autonomy {
+        *self.autonomy.read().await
+    }
+
+    /// Takes effect from the next delegation and the next finished verification. Saving
+    /// it to the project is the caller's business; this is the live setting.
+    pub async fn set_autonomy(&self, level: crate::autonomy::Autonomy) {
+        *self.autonomy.write().await = level;
+    }
+
+    /// Hold a delegation for the person's approval instead of running it. Returns at once
+    /// with the worker id: a tool call blocked on a person would time out long before most
+    /// people answer.
+    pub async fn queue_for_approval(
+        &self,
+        requested_role: &str,
+        task: &str,
+        context_files: Vec<String>,
+    ) -> Result<String> {
+        let role_name = self.resolve_role(requested_role).await?;
+        self.registry.read().await.get(&role_name)?;
+        let worker_id = format!("w-{}", Uuid::new_v4().simple());
+        self.approvals.write().await.insert(
+            worker_id.clone(),
+            PendingDelegation { role: role_name.clone(), task: task.to_string(), context_files },
+        );
+        self.upsert(WorkerRecord {
+            id: worker_id.clone(),
+            role: role_name.clone(),
+            status: WorkerStatus::AwaitingApproval,
+            task: task.to_string(),
+            summary: String::new(),
+            usage: Usage::default(),
+            diff: None,
+            branch: None,
+            is_error: false,
+        })
+        .await;
+        self.record(HarnessEvent::DelegationRequested {
+            worker_id: worker_id.clone(),
+            role: role_name,
+            task: task.to_string(),
+        })
+        .await;
+        Ok(worker_id)
+    }
+
+    /// Start a delegation the person approved — with their edit of the task, if they made
+    /// one. It runs in the background under the id it was proposed with.
+    pub async fn approve_delegation(
+        self: &Arc<Self>,
+        worker_id: &str,
+        task_override: Option<String>,
+    ) -> Result<()> {
+        let pending = self
+            .approvals
+            .write()
+            .await
+            .remove(worker_id)
+            .with_context(|| format!("no delegation `{worker_id}` is waiting for approval"))?;
+        let task = task_override
+            .map(|task| task.trim().to_string())
+            .filter(|task| !task.is_empty())
+            .unwrap_or(pending.task);
+        self.approved.write().await.insert(worker_id.to_string());
+        self.record(HarnessEvent::DelegationApproved { worker_id: worker_id.to_string() })
+            .await;
+
+        let harness = Arc::clone(self);
+        let worker_id = worker_id.to_string();
+        tokio::spawn(async move {
+            if let Err(err) = harness
+                .run_delegation(worker_id.clone(), &pending.role, &task, pending.context_files)
+                .await
+            {
+                harness.fail_before_start(&worker_id, &format!("{err:#}")).await;
+            }
+        });
+        Ok(())
+    }
+
+    pub async fn decline_delegation(&self, worker_id: &str, reason: &str) -> Result<()> {
+        self.approvals
+            .write()
+            .await
+            .remove(worker_id)
+            .with_context(|| format!("no delegation `{worker_id}` is waiting for approval"))?;
+        let reason = if reason.trim().is_empty() { "no reason given" } else { reason.trim() };
+        if let Some(mut record) = self.worker(worker_id).await {
+            record.status = WorkerStatus::Cancelled;
+            record.summary = format!("Declined: {reason}");
+            self.upsert(record).await;
+        }
+        self.record(HarnessEvent::WorkerStatusChanged {
+            worker_id: worker_id.to_string(),
+            status: WorkerStatus::Cancelled,
+        })
+        .await;
+        self.record(HarnessEvent::DelegationDeclined {
+            worker_id: worker_id.to_string(),
+            reason: reason.to_string(),
+        })
+        .await;
+        Ok(())
+    }
+
+    /// Whether the person approved this worker, forgetting it once asked — so its outcome
+    /// is reported to the head agent exactly once.
+    pub async fn take_approved(&self, worker_id: &str) -> bool {
+        self.approved.write().await.remove(worker_id)
+    }
+
+    async fn fail_before_start(&self, worker_id: &str, reason: &str) {
+        if let Some(mut record) = self.worker(worker_id).await {
+            record.status = WorkerStatus::Failed;
+            record.is_error = true;
+            record.summary = reason.to_string();
+            self.upsert(record).await;
+        }
+        self.record(HarnessEvent::WorkerFinished {
+            worker_id: worker_id.to_string(),
+            summary: reason.to_string(),
+            usage: Usage::default(),
+            diff: None,
+            is_error: true,
+        })
+        .await;
     }
 
     /// The latest Claude quota this session has seen, as `(observed_at, windows)`.
@@ -337,10 +496,22 @@ impl Harness {
         task: &str,
         context_files: Vec<String>,
     ) -> Result<WorkerRecord> {
+        let worker_id = format!("w-{}", Uuid::new_v4().simple());
+        self.run_delegation(worker_id, requested_role, task, context_files).await
+    }
+
+    /// [`Harness::delegate`], under an id chosen beforehand — the one an approved
+    /// delegation was proposed with, so its card carries straight on.
+    async fn run_delegation(
+        self: &Arc<Self>,
+        worker_id: String,
+        requested_role: &str,
+        task: &str,
+        context_files: Vec<String>,
+    ) -> Result<WorkerRecord> {
         let role_name = self.resolve_role(requested_role).await?;
         // Cloned out of the lock: the worker runs for minutes and must not hold it.
         let role = self.registry.read().await.get(&role_name)?.clone();
-        let worker_id = format!("w-{}", Uuid::new_v4().simple());
 
         let (stop, mut stopped) = tokio::sync::watch::channel(false);
         self.cancels.write().await.insert(worker_id.clone(), stop);
@@ -658,6 +829,13 @@ impl Harness {
     /// The same, as one line for the head agent — enough to act on a failure (delegate a
     /// fix) without reading the whole report.
     pub async fn verification_line(&self, worker_id: &str) -> Option<String> {
+        if let Some(landed) = self.landed.read().await.get(worker_id) {
+            let how = if landed.automatic { "landed automatically" } else { "merged by the person" };
+            return Some(match landed.risk {
+                Some(risk) => format!("{how} ({} risk)", risk.as_str()),
+                None => how.to_string(),
+            });
+        }
         Some(match self.verification(worker_id).await? {
             VerificationState::Running { checks } => {
                 format!("verifying ({} check(s) done so far)", checks.len())
@@ -830,7 +1008,22 @@ impl Harness {
             worker_id.clone(),
             VerificationState::Done { report: report.clone() },
         );
-        self.record(HarnessEvent::VerificationFinished { worker_id, report }).await;
+        let lands = self.autonomy().await.lands(&report);
+        self.record(HarnessEvent::VerificationFinished { worker_id: worker_id.clone(), report })
+            .await;
+
+        // The person chose a level that lets verified, safe-enough changes land on their
+        // own. Still only a proposal that is pending — one they already merged or
+        // discarded is left alone.
+        if lands && self.pending_merges.read().await.contains_key(&worker_id) {
+            if let Err(err) = self.land(&worker_id, true).await {
+                self.record(HarnessEvent::MergeNotLanded {
+                    worker_id,
+                    reason: format!("{err:#}"),
+                })
+                .await;
+            }
+        }
     }
 
     pub async fn pending_merges(&self) -> Vec<(String, String)> {
@@ -845,14 +1038,58 @@ impl Harness {
     /// Land a proposed merge. Host-side only — deliberately not exposed as an MCP tool,
     /// so no amount of model output can land code on its own.
     pub async fn approve_merge(&self, worker_id: &str) -> Result<String> {
+        self.land(worker_id, false).await
+    }
+
+    /// Land a proposed merge and say so. It stays proposed if the merge fails — a
+    /// conflict must leave it reviewable, not silently drop it.
+    async fn land(&self, worker_id: &str, automatic: bool) -> Result<String> {
         let branch = self
             .pending_merges
-            .write()
+            .read()
             .await
-            .remove(worker_id)
+            .get(worker_id)
+            .cloned()
             .with_context(|| format!("no merge pending for `{worker_id}`"))?;
 
-        self.workspaces.merge(&branch).await
+        let commit = self.workspaces.merge(&branch).await?;
+        self.pending_merges.write().await.remove(worker_id);
+        let risk = match self.verification(worker_id).await {
+            Some(VerificationState::Done { report }) => Some(report.risk),
+            _ => None,
+        };
+        self.landed.write().await.insert(
+            worker_id.to_string(),
+            Landed { commit: commit.clone(), automatic, risk },
+        );
+        self.record(HarnessEvent::MergeLanded {
+            worker_id: worker_id.to_string(),
+            branch,
+            commit: commit.clone(),
+            automatic,
+            risk,
+        })
+        .await;
+        Ok(commit)
+    }
+
+    /// Undo a landed merge with a reverting commit. Once only.
+    pub async fn undo_merge(&self, worker_id: &str) -> Result<()> {
+        let landed = self
+            .landed
+            .read()
+            .await
+            .get(worker_id)
+            .cloned()
+            .with_context(|| format!("nothing landed for `{worker_id}` to undo"))?;
+        self.workspaces.revert_merge(&landed.commit).await?;
+        self.landed.write().await.remove(worker_id);
+        self.record(HarnessEvent::MergeReverted {
+            worker_id: worker_id.to_string(),
+            commit: landed.commit,
+        })
+        .await;
+        Ok(())
     }
 
     /// Reject a proposed merge and drop its branch.

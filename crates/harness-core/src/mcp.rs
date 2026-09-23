@@ -83,7 +83,11 @@ impl From<crate::engine::WorkerRecord> for WorkerSummary {
         Self {
             worker_id: record.id,
             role: record.role,
-            status: format!("{:?}", record.status).to_lowercase(),
+            // The wire name (`awaiting_approval`), not the Debug one (`awaitingapproval`).
+            status: serde_json::to_value(record.status)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default(),
             summary: record.summary,
             is_error: record.is_error,
             files_changed: record.diff.as_ref().map(|d| d.files_changed).unwrap_or(0),
@@ -105,6 +109,42 @@ pub struct MergeRequestResult {
     /// Always false: the request is queued for a human, never applied here.
     pub merged: bool,
     pub note: String,
+}
+
+/// A delegation that failed before it ran — surfaced as a tool result rather than a
+/// protocol error, so the orchestrator can read the reason and pick another role instead
+/// of the turn dying.
+fn failed_summary(role: String, err: anyhow::Error) -> WorkerSummary {
+    WorkerSummary {
+        worker_id: String::new(),
+        role,
+        status: "failed".into(),
+        summary: format!("{err:#}"),
+        is_error: true,
+        files_changed: 0,
+        branch: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        verification: None,
+    }
+}
+
+fn awaiting_approval(worker_id: String, role: String) -> WorkerSummary {
+    WorkerSummary {
+        worker_id,
+        role,
+        status: "awaiting_approval".into(),
+        summary: "The person approves each delegation in this project. This one starts when \
+                  they approve it, and you will be told how it ends. Do not wait or poll for \
+                  it; carry on, or end your turn."
+            .into(),
+        is_error: false,
+        files_changed: 0,
+        branch: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        verification: None,
+    }
 }
 
 #[derive(Clone)]
@@ -154,26 +194,25 @@ impl HarnessTools {
                        yourself: workers are cheaper and run in isolated workspaces."
     )]
     async fn delegate(&self, Parameters(params): Parameters<DelegateParams>) -> Json<WorkerSummary> {
+        // Under the `Ask` autonomy level the person approves each delegation. Waiting for
+        // them inside this call would time out, so it returns at once instead.
+        if self.harness.autonomy().await.delegation_needs_approval() {
+            return Json(match self
+                .harness
+                .queue_for_approval(&params.role, &params.task, params.context_files)
+                .await
+            {
+                Ok(worker_id) => awaiting_approval(worker_id, params.role),
+                Err(err) => failed_summary(params.role, err),
+            });
+        }
         match self
             .harness
             .delegate(&params.role, &params.task, params.context_files)
             .await
         {
             Ok(record) => Json(record.into()),
-            // Surfaced as a tool result rather than a protocol error, so the orchestrator
-            // can read the reason and pick another role instead of the turn dying.
-            Err(err) => Json(WorkerSummary {
-                worker_id: String::new(),
-                role: params.role,
-                status: "failed".into(),
-                summary: format!("{err:#}"),
-                is_error: true,
-                files_changed: 0,
-                branch: None,
-                input_tokens: 0,
-                output_tokens: 0,
-                verification: None,
-            }),
+            Err(err) => Json(failed_summary(params.role, err)),
         }
     }
 
@@ -187,6 +226,17 @@ impl HarnessTools {
         &self,
         Parameters(params): Parameters<DelegateParams>,
     ) -> Json<serde_json::Value> {
+        if self.harness.autonomy().await.delegation_needs_approval() {
+            return Json(match self
+                .harness
+                .queue_for_approval(&params.role, &params.task, params.context_files)
+                .await
+            {
+                Ok(worker_id) => serde_json::to_value(awaiting_approval(worker_id, params.role))
+                    .unwrap_or_default(),
+                Err(err) => serde_json::json!({ "error": format!("{err:#}") }),
+            });
+        }
         match self
             .harness
             .delegate_async(&params.role, &params.task, params.context_files)

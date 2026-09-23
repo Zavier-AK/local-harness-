@@ -164,6 +164,37 @@ reviewer    = "tester"      # cheap first pass
 escalate_to = "architect"   # only when the first pass is worried
 ```
 
+## How much runs without you
+
+A four-stop dial in the title bar, set per project. ⌘⇧A cycles through it. This is
+Karpathy's "autonomy slider": you decide how much the fleet does alone, and the
+**engine** enforces it; the model isn't just asked to behave.
+
+| Stop | Delegation | Merging |
+|---|---|---|
+| **Ask** | each delegation waits for you: approve, edit the task, or decline with a reason | you merge |
+| **Review** (default) | runs freely | you merge |
+| **Land safe** | runs freely | verified *and* low-risk changes land by themselves |
+| **Land most** | runs freely | verified changes land by themselves unless high risk |
+
+- **Auto-landing needs something to trust.** It never lands a change that is unverified,
+  has a failed or broken check, or doesn't merge cleanly; those wait for you. Every
+  landing, automatic or yours, gets an **Undo** in the chat and the drawer. Undo adds a
+  reverting commit and never rewrites history.
+- **A failed merge no longer leaves a mess.** Your checkout is no longer left
+  half-merged with conflict markers: the merge is aborted and the change stays proposed.
+- **Ask covers every delegation path.** Under **Ask**, `delegate` returns immediately as
+  awaiting approval. It can't wait for you, because Claude Code abandons an MCP tool call
+  that goes silent for about five minutes. The head agent is told how each delegation
+  ended once it has. Native subagents are covered too: a `PreToolUse` hook refuses the
+  `Agent` tool for the project's own roles and points the head agent at `delegate`.
+  Checked against the real CLI.
+- **Where the level lives.** It's saved in `.harness/autonomy.json`, which is
+  git-excluded because it's your setting, not the repository's. The hook reads it on
+  every call, so moving the dial applies mid-session. `harness-cli --autonomy <level>`
+  sets it for a headless run. Nobody is there to approve, so under `ask` the CLI declines
+  delegations, and says why.
+
 ## Getting started
 
 Requirements: Rust, Node 18+, `git`. For the full fleet, `claude` and `codex` on `PATH` and
@@ -304,7 +335,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 184 engine tests, no network, no CLI login needed
+cargo test                        # 196 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -319,7 +350,7 @@ Preview discovery, URL safety, settings — run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **184 engine tests, 195 including the Tauri shell** — worth stating explicitly,
+That makes **196 engine tests, 207 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats
