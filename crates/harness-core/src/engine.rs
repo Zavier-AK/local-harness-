@@ -68,6 +68,18 @@ pub struct Harness {
     /// Skills and MCP servers from the Tools & Skills tab. Read per delegation, so a
     /// change reaches the next worker without restarting anything.
     extras: RwLock<crate::extensions::WorkerExtras>,
+    /// Checks on proposed merges, keyed by worker.
+    verifications: RwLock<HashMap<String, VerificationState>>,
+    /// Verification runs tests and possibly a local model, both heavy; one at a time.
+    verify_slots: Arc<tokio::sync::Semaphore>,
+}
+
+/// Where a proposed merge's checks stand.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum VerificationState {
+    Running { checks: Vec<crate::verify::Check> },
+    Done { report: crate::verify::VerificationReport },
 }
 
 impl Harness {
@@ -91,6 +103,8 @@ impl Harness {
             cancels: RwLock::new(HashMap::new()),
             claude_quota: RwLock::new(None),
             extras: RwLock::new(Default::default()),
+            verifications: RwLock::new(HashMap::new()),
+            verify_slots: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
 
@@ -576,7 +590,7 @@ impl Harness {
 
     /// Propose landing a worker's branch. Records the request and surfaces it; it does
     /// not merge. Only [`Harness::approve_merge`], driven by a human click, does that.
-    pub async fn request_merge(&self, worker_id: &str) -> Result<DiffStat> {
+    pub async fn request_merge(self: &Arc<Self>, worker_id: &str) -> Result<DiffStat> {
         let record = self
             .worker(worker_id)
             .await
@@ -598,12 +612,225 @@ impl Harness {
 
         self.record(HarnessEvent::MergeRequested {
             worker_id: worker_id.to_string(),
-            branch,
+            branch: branch.clone(),
             diff: diff.clone(),
         })
         .await;
 
+        // Checked in the background, so proposing returns at once. A merge proposed twice
+        // — natively, then again by the head agent — is checked once.
+        let fresh = {
+            let mut verifications = self.verifications.write().await;
+            if verifications.contains_key(worker_id) {
+                false
+            } else {
+                verifications.insert(
+                    worker_id.to_string(),
+                    VerificationState::Running { checks: Vec::new() },
+                );
+                true
+            }
+        };
+        if fresh {
+            let harness = Arc::clone(self);
+            let worker_id = worker_id.to_string();
+            tokio::spawn(async move { harness.verify(worker_id, branch).await });
+        }
+
         Ok(diff)
+    }
+
+    /// How many proposed merges are still being checked.
+    pub async fn verifications_running(&self) -> usize {
+        self.verifications
+            .read()
+            .await
+            .values()
+            .filter(|state| matches!(state, VerificationState::Running { .. }))
+            .count()
+    }
+
+    /// Where a proposed merge's checks stand, if it has any.
+    pub async fn verification(&self, worker_id: &str) -> Option<VerificationState> {
+        self.verifications.read().await.get(worker_id).cloned()
+    }
+
+    /// The same, as one line for the head agent — enough to act on a failure (delegate a
+    /// fix) without reading the whole report.
+    pub async fn verification_line(&self, worker_id: &str) -> Option<String> {
+        Some(match self.verification(worker_id).await? {
+            VerificationState::Running { checks } => {
+                format!("verifying ({} check(s) done so far)", checks.len())
+            }
+            VerificationState::Done { report } => {
+                let mut line = format!("{} risk", report.risk.as_str());
+                if !report.verified {
+                    line.push_str(", unverified");
+                }
+                if !report.reasons.is_empty() {
+                    line.push_str(": ");
+                    line.push_str(&report.reasons.join("; "));
+                }
+                line
+            }
+        })
+    }
+
+    async fn push_check(&self, worker_id: &str, check: crate::verify::Check) {
+        if let Some(VerificationState::Running { checks }) =
+            self.verifications.write().await.get_mut(worker_id)
+        {
+            checks.push(check.clone());
+        }
+        self.record(HarnessEvent::VerificationCheck { worker_id: worker_id.to_string(), check })
+            .await;
+    }
+
+    /// Check a proposed merge: signals from the diff, the project's own commands in a
+    /// fresh checkout, then an independent review. See [`crate::verify`].
+    async fn verify(self: Arc<Self>, worker_id: String, branch: String) {
+        use crate::verify::{self as v, Check, CheckKind, CheckStatus};
+
+        self.record(HarnessEvent::VerificationStarted { worker_id: worker_id.clone() })
+            .await;
+        let _slot = self.verify_slots.acquire().await;
+
+        let config = self.registry.read().await.verify.clone();
+        let record = self.worker(&worker_id).await;
+        let diff = record.as_ref().and_then(|r| r.diff.clone()).unwrap_or_default();
+        let patch = self
+            .workspaces
+            .patch(&branch, v::REVIEW_PATCH_LINES)
+            .await
+            .unwrap_or(crate::isolation::Patch { text: String::new(), truncated: false, total_lines: 0 });
+
+        self.push_check(&worker_id, v::signals_check(&v::signals(&diff, &patch.text)))
+            .await;
+
+        // Only pay for a checkout (and its setup, e.g. `npm ci`) when something will use it.
+        let checkout = if config.commands.is_empty() && config.reviewer.is_none() {
+            None
+        } else {
+            match self.workspaces.checkout_branch(&worker_id, &branch).await {
+                Ok(workspace) => Some(workspace),
+                Err(err) => {
+                    self.push_check(
+                        &worker_id,
+                        Check {
+                            kind: CheckKind::Command,
+                            name: "Checkout".into(),
+                            status: CheckStatus::Error,
+                            summary: format!("could not check the branch out: {err:#}"),
+                            output: None,
+                            risk: None,
+                            findings: Vec::new(),
+                            reviewer: None,
+                        },
+                    )
+                    .await;
+                    None
+                }
+            }
+        };
+
+        if let Some(workspace) = &checkout {
+            for command in &config.commands {
+                let check = v::run_command(
+                    &workspace.cwd,
+                    command,
+                    std::time::Duration::from_secs(config.timeout_secs),
+                )
+                .await;
+                self.push_check(&worker_id, check).await;
+            }
+        }
+
+        let request = v::ReviewRequest {
+            task: record.as_ref().map(|r| r.task.as_str()).unwrap_or_default(),
+            summary: record.as_ref().map(|r| r.summary.as_str()).unwrap_or_default(),
+            patch: &patch.text,
+            patch_truncated: patch.truncated,
+            has_checkout: checkout.is_some(),
+        };
+        let mut previous: Option<v::Risk> = None;
+        for (index, name) in config.reviewer.iter().chain(config.escalate_to.iter()).enumerate() {
+            // The second reviewer is the escalation: only when the first found something,
+            // and never the same role twice.
+            if index > 0
+                && (previous.is_none_or(|risk| risk < v::Risk::Medium)
+                    || config.reviewer.as_deref() == Some(name.as_str()))
+            {
+                break;
+            }
+            let role = self.registry.read().await.roles.get(name).cloned();
+            let check = match role {
+                None => Check {
+                    kind: CheckKind::Review,
+                    name: format!("Review by {name}"),
+                    status: CheckStatus::Skipped,
+                    summary: format!("skipped: no role named `{name}`"),
+                    output: None,
+                    risk: None,
+                    findings: Vec::new(),
+                    reviewer: None,
+                },
+                // A CLI reviewer runs in the checkout; without one, only a reviewer that
+                // needs no files can be trusted to read the right code.
+                Some(role) if checkout.is_none() && role.provider != Provider::OpenaiCompat => Check {
+                    kind: CheckKind::Review,
+                    name: format!("Review by {name}"),
+                    status: CheckStatus::Skipped,
+                    summary: "skipped: there is no checkout of the branch to review in".into(),
+                    output: None,
+                    risk: None,
+                    findings: Vec::new(),
+                    reviewer: Some(v::reviewer_label(name, &role)),
+                },
+                Some(role) => {
+                    let cwd = checkout
+                        .as_ref()
+                        .map(|w| w.cwd.clone())
+                        .unwrap_or_else(|| self.workspaces.project_root().to_path_buf());
+                    let run_id = format!("review-{worker_id}-{name}");
+                    let (check, usage) =
+                        v::review(name, &role, &run_id, &cwd, &v::review_prompt(&request)).await;
+                    if usage.total_input() + usage.output_tokens > 0 {
+                        self.store
+                            .lock()
+                            .await
+                            .record_usage(
+                                &self.session_id,
+                                &run_id,
+                                role.provider.as_str(),
+                                role.model.as_deref(),
+                                &usage,
+                                None,
+                            )
+                            .ok();
+                    }
+                    check
+                }
+            };
+            previous = check.risk.or(previous);
+            self.push_check(&worker_id, check).await;
+        }
+
+        if let Some(workspace) = checkout {
+            if let Err(err) = workspace.release().await {
+                tracing::warn!("failed to release the verification checkout for {worker_id}: {err:#}");
+            }
+        }
+
+        let checks = match self.verifications.read().await.get(&worker_id) {
+            Some(VerificationState::Running { checks }) => checks.clone(),
+            _ => Vec::new(),
+        };
+        let report = v::assess(checks);
+        self.verifications.write().await.insert(
+            worker_id.clone(),
+            VerificationState::Done { report: report.clone() },
+        );
+        self.record(HarnessEvent::VerificationFinished { worker_id, report }).await;
     }
 
     pub async fn pending_merges(&self) -> Vec<(String, String)> {
@@ -671,7 +898,7 @@ impl Harness {
     ///
     /// Wired to the orchestrator's stream, this turns "am I near the limit?" from a guess
     /// into something the engine reacts to.
-    pub async fn note_event(&self, event: &HarnessEvent) {
+    pub async fn note_event(self: &Arc<Self>, event: &HarnessEvent) {
         let head = self.orchestrator_run.read().await.clone();
         let is_head = |run_id: &str| head.as_deref() == Some(run_id);
 
@@ -874,7 +1101,7 @@ impl Harness {
     /// branch, then remove the worktree. The merge is proposed automatically, because the
     /// head agent cannot see the work in the checkout (by design) and would otherwise have
     /// to be told a worker id it never chose. Proposing lands nothing; only the person can.
-    async fn native_finished(&self, task_id: &str, status: &str, summary: &str, total_tokens: u64) {
+    async fn native_finished(self: &Arc<Self>, task_id: &str, status: &str, summary: &str, total_tokens: u64) {
         let worker_id = crate::native::worker_id(task_id);
         let Some(record) = self.worker(&worker_id).await else {
             return;

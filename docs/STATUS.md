@@ -1,6 +1,6 @@
 # local-harness — project status
 
-_Last updated: 22 September 2026_
+_Last updated: 23 September 2026_
 
 ## What this is
 
@@ -74,7 +74,7 @@ output can merge anything.
 
 ### Working and verified
 
-- **161 engine tests** (172 including the separate Tauri shell workspace), no network or
+- **184 engine tests** (195 including the separate Tauri shell workspace), no network or
   CLI login required.
 - **Orchestrator** — live end-to-end against the real `claude` CLI: it called `list_roles`,
   then `delegate`, a worker wrote into its worktree, and it correctly reported the work as
@@ -100,6 +100,12 @@ output can merge anything.
   covered by tests (a stopped worker keeps what it wrote, on its branch).
 - **Real Claude quota** — the parser is tested against a `rate_limit_event` captured from a
   live run.
+- **Verification before merge** — live against the real CLI:
+  - a haiku builder subagent's merge was checked in a detached checkout of its branch;
+  - both `[verify]` commands passed;
+  - a real Claude reviewer returned a JSON verdict that parsed, giving low risk;
+  - the checkout was removed afterwards.
+  Failure, escalation, "unverified" and merge-while-checking are covered by engine tests.
 
 ### Not yet verified
 
@@ -124,7 +130,7 @@ output can merge anything.
 
 ### Known gaps
 
-- **No CI.** The repository has no workflows, so the 161 tests run only by hand. This
+- **No CI.** The repository has no workflows, so the 184 tests run only by hand. This
   matters more than usual here: both CLIs' JSON output is parsed leniently against
   fixtures rather than a stable contract, so upstream schema drift would go unnoticed
   until a live run misbehaved. Deferred by choice.
@@ -163,12 +169,16 @@ In the order that unblocks the most.
    If it is tight, that argues for Max rather than for API keys.
 4. **Tune the fleet from evidence.** Turn limits, which roles exist, which model backs
    each. The current values are educated guesses.
-5. **Try this round's UI on the Mac** — Stop, Tools & Skills, Settings — and report what
-   feels off.
-6. **Push-to-talk voice assistant** (planned next): a menu-bar popover and global hotkey,
+5. **Try this round's UI on the Mac** — Stop, Tools & Skills, Settings, the Verification
+   section of the review drawer — and report what feels off.
+6. **Turn on `[verify]`** in a real project: its test command, and a cheap reviewer. Watch
+   whether the risk levels match your own judgement before trusting them for more.
+7. **Autonomy slider** (planned next): a per-project dial from "ask before each delegation"
+   to "land low-risk, verified changes automatically" — built on the risk levels above.
+8. **Push-to-talk voice assistant**: a menu-bar popover and global hotkey,
    on-device speech-to-text, fixed commands matched first, a *small* LM Studio model for
    the rest (not `qwen3-coder-30b`), and "ask the fleet" sent to the head agent.
-7. **Add CI** when the schema-drift risk starts to bite.
+9. **Add CI** when the schema-drift risk starts to bite.
 
 ## Risks worth tracking
 

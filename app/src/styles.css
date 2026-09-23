@@ -712,3 +712,33 @@ button.swatch.chosen { border-color: var(--text); }
 }
 .fleet-reason button.link { font-size: 11px; }
 .fleet-backend.wrap { white-space: normal; }
+
+/* ---------- verification before merge ---------- */
+.badge.risk-low { border-color: var(--ok); color: var(--ok); }
+.badge.risk-medium { border-color: var(--warn); color: var(--warn); background: var(--warn-soft); }
+.badge.risk-high { border-color: var(--error); color: var(--error); background: var(--error-soft); }
+.badge.risk-unverified { border-color: var(--muted); color: var(--muted); border-style: dashed; }
+.badge.risk-pending { border-color: var(--border-strong); color: var(--muted); }
+.verification h3 { display: flex; align-items: center; gap: 6px; }
+.verification h3 .badge { text-transform: none; letter-spacing: 0; }
+.risk-reasons { margin: 0 0 10px; padding-left: 18px; font-size: 12px; line-height: 1.5; }
+.checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.check { display: grid; grid-template-columns: 16px 1fr; gap: 6px; font-size: 12px; line-height: 1.45; }
+.check.pending { display: block; padding-left: 22px; }
+.check-mark { font-weight: 700; text-align: center; }
+.check.passed .check-mark { color: var(--ok); }
+.check.failed .check-mark { color: var(--error); }
+.check.flagged .check-mark { color: var(--warn); }
+.check.error .check-mark { color: var(--muted); }
+.check.skipped .check-mark { color: var(--muted); }
+.check-body { min-width: 0; overflow-wrap: anywhere; }
+.check-by { font-size: 11px; }
+.findings { margin: 4px 0 0; padding-left: 16px; }
+.finding.high { color: var(--error); }
+.finding.medium { color: var(--warn); }
+.check-output {
+  margin: 4px 0 0; padding: 8px; max-height: 220px; overflow: auto;
+  background: rgba(0, 0, 0, 0.22); border-radius: 6px; font-size: 11px; white-space: pre-wrap;
+}
+.worker-foot { flex-wrap: wrap; row-gap: 4px; }
+.worker-foot .badge { font-size: 10px; white-space: nowrap; }

@@ -127,6 +127,43 @@ silently destroy each other's work.
 
 See [`roles.toml`](roles.toml) for the default fleet.
 
+## Verification before merge
+
+Every proposed merge is checked before it reaches you, in a fresh checkout of exactly
+what would land. The idea comes from Kun Chen's
+[No Mistakes](https://github.com/kunchenguid/no-mistakes), and from Boris Cherny's point
+that giving an agent a way to check its work is what makes it good. The checks run
+cheapest first:
+
+1. **Change shape**, which is free and always runs. It flags:
+   - size;
+   - sensitive paths: migrations, auth, `.env`, CI, `roles.toml`;
+   - dependency and build changes;
+   - deleted files and binaries;
+   - code changed without a test touched. A test added inline in the patch counts.
+2. **Your commands** from `[verify] commands`, such as `cargo test`. A failure makes the
+   change high risk, and its output is shown on the card.
+3. **An independent review** by `[verify] reviewer`, a readonly role. It sees the diff
+   and can read the checkout, and it must answer in a strict JSON format. A reply it
+   can't parse is retried once, then reported as an error, never as a verdict. If the
+   first reviewer says medium or high risk, `[verify] escalate_to` takes a second look,
+   and its verdict wins. So a cheap local model can handle the easy majority, and Opus
+   is only spent on changes that worried it.
+
+The card leads with a **low / medium / high** badge and the reasons for it. **A change
+nothing actually checked is marked *unverified*, never low risk.** The same summary
+reaches the head agent through `check_workers` and `collect`. When a check actually
+*fails*, the app sends the head agent a one-line note so it can delegate a fix while you
+haven't looked yet. Checks run one at a time, since tests and local models are both
+heavy. You can still merge before they finish; the button says "Merge anyway".
+
+```toml
+[verify]
+commands    = ["cargo test"]
+reviewer    = "tester"      # cheap first pass
+escalate_to = "architect"   # only when the first pass is worried
+```
+
 ## Getting started
 
 Requirements: Rust, Node 18+, `git`. For the full fleet, `claude` and `codex` on `PATH` and
@@ -267,7 +304,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 161 engine tests, no network, no CLI login needed
+cargo test                        # 184 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -282,7 +319,7 @@ Preview discovery, URL safety, settings — run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **161 engine tests, 172 including the Tauri shell** — worth stating explicitly,
+That makes **184 engine tests, 195 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats

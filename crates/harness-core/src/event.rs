@@ -128,6 +128,20 @@ pub enum HarnessEvent {
         branch: String,
         diff: DiffStat,
     },
+    /// Checks began on a proposed merge's branch.
+    VerificationStarted {
+        worker_id: String,
+    },
+    /// One check finished; the card fills in as they do.
+    VerificationCheck {
+        worker_id: String,
+        check: crate::verify::Check,
+    },
+    /// Every check is done and the change has a risk level.
+    VerificationFinished {
+        worker_id: String,
+        report: crate::verify::VerificationReport,
+    },
     /// The subscription's own account of how much of each limit window is used.
     ///
     /// Claude's stream-json output carries a `rate_limit_event` with every turn —
@@ -225,7 +239,10 @@ impl HarnessEvent {
             Self::WorkerSpawned { worker_id, .. }
             | Self::WorkerStatusChanged { worker_id, .. }
             | Self::WorkerFinished { worker_id, .. }
-            | Self::MergeRequested { worker_id, .. } => worker_id,
+            | Self::MergeRequested { worker_id, .. }
+            | Self::VerificationStarted { worker_id }
+            | Self::VerificationCheck { worker_id, .. }
+            | Self::VerificationFinished { worker_id, .. } => worker_id,
         }
     }
 }
