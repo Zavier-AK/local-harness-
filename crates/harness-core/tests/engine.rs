@@ -50,6 +50,10 @@ struct Fixture {
 }
 
 async fn fixture() -> Fixture {
+    fixture_with(ROLES).await
+}
+
+async fn fixture_with(roles: &str) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
 
@@ -65,7 +69,7 @@ async fn fixture() -> Fixture {
     store.create_session("s1", None, &root.display().to_string()).unwrap();
 
     let harness = Arc::new(Harness::new(
-        RoleRegistry::from_toml(ROLES).unwrap(),
+        RoleRegistry::from_toml(roles).unwrap(),
         Workspaces::new(root.clone()),
         store,
         "s1",
@@ -773,3 +777,207 @@ async fn a_built_in_subagent_is_shown_but_offers_nothing_to_merge() {
     assert!(worker.branch.is_none());
     assert!(f.harness.pending_merges().await.is_empty());
 }
+
+// ------------------------------------------------------------- verification
+
+use harness_core::verify::{CheckKind, CheckStatus, Risk, VerificationReport};
+
+/// Collect events until this worker's verification finishes.
+async fn verification_of(
+    f: &mut Fixture,
+    worker_id: &str,
+) -> (Vec<HarnessEvent>, VerificationReport) {
+    let mut seen = Vec::new();
+    loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(30), f.events.recv())
+            .await
+            .expect("verification did not finish in time")
+            .expect("event stream closed");
+        let done = match &event {
+            HarnessEvent::VerificationFinished { worker_id: id, report } if id == worker_id => {
+                Some(report.clone())
+            }
+            _ => None,
+        };
+        seen.push(event);
+        if let Some(report) = done {
+            return (seen, report);
+        }
+    }
+}
+
+fn with_verify(verify: &str) -> String {
+    format!("{ROLES}\n[verify]\n{verify}\n")
+}
+
+#[tokio::test]
+async fn with_nothing_configured_a_merge_is_reported_unverified() {
+    let mut f = fixture().await;
+    let record = f.harness.delegate("local_builder", "WRITE:notes.md:hello", vec![]).await.unwrap();
+    f.harness.request_merge(&record.id).await.unwrap();
+
+    let (events, report) = verification_of(&mut f, &record.id).await;
+    assert!(!report.verified, "nothing ran, so nothing may claim to be verified");
+    assert!(report.reasons.iter().any(|r| r.contains("[verify]")));
+    // Started, then the free signals check, then finished — in that order.
+    let order: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            HarnessEvent::VerificationStarted { .. } => Some("started"),
+            HarnessEvent::VerificationCheck { .. } => Some("check"),
+            HarnessEvent::VerificationFinished { .. } => Some("finished"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(order, ["started", "check", "finished"]);
+    assert!(f.harness.verification_line(&record.id).await.unwrap().contains("unverified"));
+}
+
+#[tokio::test]
+async fn commands_run_against_exactly_what_would_be_merged() {
+    // `test -f` only passes if the checkout holds the worker's file.
+    let mut f = fixture_with(&with_verify("commands = [\"test -f notes.md\"]")).await;
+    let record = f.harness.delegate("local_builder", "WRITE:notes.md:hello", vec![]).await.unwrap();
+    f.harness.request_merge(&record.id).await.unwrap();
+
+    let (_, report) = verification_of(&mut f, &record.id).await;
+    let command = report.checks.iter().find(|c| c.kind == CheckKind::Command).unwrap();
+    assert_eq!(command.status, CheckStatus::Passed, "{command:?}");
+    assert!(report.verified);
+    assert_eq!(report.risk, Risk::Low);
+    // The checkout is gone afterwards; the branch is still there to merge.
+    assert!(!f.root.join(".harness/verify").join(&record.id).exists());
+    f.harness.approve_merge(&record.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failing_command_makes_the_merge_high_risk_and_says_why() {
+    let mut f =
+        fixture_with(&with_verify("commands = [\"echo 2 tests failed; exit 1\"]")).await;
+    let record = f.harness.delegate("local_builder", "WRITE:notes.md:hello", vec![]).await.unwrap();
+    f.harness.request_merge(&record.id).await.unwrap();
+
+    let (_, report) = verification_of(&mut f, &record.id).await;
+    assert_eq!(report.risk, Risk::High);
+    let command = report.checks.iter().find(|c| c.kind == CheckKind::Command).unwrap();
+    assert_eq!(command.output.as_deref(), Some("2 tests failed"));
+    assert!(report.reasons[0].contains("exit 1"), "{:?}", report.reasons);
+    // The head agent can see it, and delegate a fix.
+    let line = f.harness.verification_line(&record.id).await.unwrap();
+    assert!(line.starts_with("high risk"), "{line}");
+}
+
+#[tokio::test]
+async fn a_person_can_merge_while_checks_are_still_running() {
+    let mut f = fixture_with(&with_verify("commands = [\"sleep 2\"]")).await;
+    let record = f.harness.delegate("local_builder", "WRITE:notes.md:hello", vec![]).await.unwrap();
+    f.harness.request_merge(&record.id).await.unwrap();
+
+    // A human decision always wins over a check that has not finished.
+    f.harness.approve_merge(&record.id).await.unwrap();
+    assert!(f.root.join("notes.md").exists());
+    let (_, report) = verification_of(&mut f, &record.id).await;
+    assert!(report.verified);
+}
+
+#[tokio::test]
+async fn a_reviewer_that_does_not_answer_in_json_is_an_error_not_a_verdict() {
+    // The mock echoes its prompt back, which contains the contract but no verdict.
+    let mut f = fixture_with(&with_verify("reviewer = \"reviewer\"")).await;
+    let record = f.harness.delegate("local_builder", "WRITE:notes.md:hello", vec![]).await.unwrap();
+    f.harness.request_merge(&record.id).await.unwrap();
+
+    let (_, report) = verification_of(&mut f, &record.id).await;
+    let review = report.checks.iter().find(|c| c.kind == CheckKind::Review).unwrap();
+    assert_eq!(review.status, CheckStatus::Error);
+    assert!(!report.verified);
+}
+
+/// An OpenAI-compatible server whose reply depends on the model asked for.
+async fn review_server(replies: &'static [(&'static str, &'static str)]) -> String {
+    use axum::{routing::get, routing::post, Json, Router};
+    let app = Router::new()
+        .route("/", get(|| async { "ok" }))
+        .route(
+            "/v1/models",
+            get(move || async move {
+                Json(serde_json::json!({
+                    "data": replies.iter().map(|(model, _)| serde_json::json!({ "id": model })).collect::<Vec<_>>()
+                }))
+            }),
+        )
+        .route(
+            "/v1/chat/completions",
+            post(move |Json(body): Json<serde_json::Value>| async move {
+                let model = body["model"].as_str().unwrap_or_default().to_string();
+                let reply = replies.iter().find(|(m, _)| *m == model).map(|(_, r)| *r).unwrap_or("");
+                Json(serde_json::json!({
+                    "choices": [{ "message": { "role": "assistant", "content": reply } }],
+                    "usage": { "prompt_tokens": 100, "completion_tokens": 20 }
+                }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{address}/v1")
+}
+
+fn with_reviewers(url: &str) -> String {
+    format!(
+        "{ROLES}
+[roles.quick]
+provider = \"openai_compat\"
+base_url = \"{url}\"
+model = \"quick\"
+isolation = \"none\"
+
+[roles.careful]
+provider = \"openai_compat\"
+base_url = \"{url}\"
+model = \"careful\"
+isolation = \"none\"
+
+[verify]
+reviewer = \"quick\"
+escalate_to = \"careful\"
+"
+    )
+}
+
+#[tokio::test]
+async fn a_worrying_first_review_escalates_and_the_second_has_the_last_word() {
+    let url = review_server(&[
+        ("quick", r#"Sure! {"risk_level": "medium", "summary": "not sure about the parser", "findings": [{"severity": "medium", "file": "notes.md", "line": 1, "message": "unclear"}]}"#),
+        ("careful", r#"{"risk_level": "low", "summary": "fine on a closer look", "findings": []}"#),
+    ])
+    .await;
+    let mut f = fixture_with(&with_reviewers(&url)).await;
+    let record = f.harness.delegate("local_builder", "WRITE:notes.md:hello", vec![]).await.unwrap();
+    f.harness.request_merge(&record.id).await.unwrap();
+
+    let (_, report) = verification_of(&mut f, &record.id).await;
+    let reviews: Vec<_> = report.checks.iter().filter(|c| c.kind == CheckKind::Review).collect();
+    assert_eq!(reviews.len(), 2, "the first review worried, so the second ran");
+    assert_eq!(reviews[0].findings[0].file.as_deref(), Some("notes.md"));
+    assert_eq!(report.risk, Risk::Low, "the escalated reviewer overrules the first");
+    assert!(report.verified);
+    assert!(reviews[1].reviewer.as_deref().unwrap().contains("careful"));
+}
+
+#[tokio::test]
+async fn a_clean_first_review_spends_nothing_on_a_second() {
+    let url = review_server(&[
+        ("quick", r#"{"risk_level": "low", "summary": "trivial", "findings": []}"#),
+        ("careful", r#"{"risk_level": "high", "summary": "should never be asked", "findings": []}"#),
+    ])
+    .await;
+    let mut f = fixture_with(&with_reviewers(&url)).await;
+    let record = f.harness.delegate("local_builder", "WRITE:notes.md:hello", vec![]).await.unwrap();
+    f.harness.request_merge(&record.id).await.unwrap();
+
+    let (_, report) = verification_of(&mut f, &record.id).await;
+    assert_eq!(report.checks.iter().filter(|c| c.kind == CheckKind::Review).count(), 1);
+    assert_eq!(report.risk, Risk::Low);
+}
+

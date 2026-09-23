@@ -186,6 +186,23 @@ fn render(event: &HarnessEvent, streaming: &mut bool) {
                 diff.files_changed, diff.insertions, diff.deletions
             );
         }
+        HarnessEvent::VerificationCheck { worker_id, check } => {
+            end_stream(streaming);
+            println!("  ✔︎ check on {worker_id}: {} — {:?}: {}", check.name, check.status, check.summary);
+        }
+        HarnessEvent::VerificationFinished { worker_id, report } => {
+            end_stream(streaming);
+            println!(
+                "  ◆ {worker_id}: {} risk{}{}",
+                report.risk.as_str(),
+                if report.verified { "" } else { ", unverified" },
+                if report.reasons.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", report.reasons.join("; "))
+                }
+            );
+        }
         HarnessEvent::ApiRetry {
             attempt,
             max_retries,
@@ -498,6 +515,18 @@ async fn main() -> Result<()> {
                         break;
                     }
                 }
+            }
+
+            // Workers — native subagents especially — can still be running when the last
+            // turn ends, and checks on a proposed merge run in the background after them.
+            // Exiting now would cut both off and leave the verdict unprinted.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
+            while std::time::Instant::now() < deadline {
+                let working = harness.workers().await.iter().any(|w| !w.status.is_terminal());
+                if !working && harness.verifications_running().await == 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
 
             orchestrator.shutdown().await?;

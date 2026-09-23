@@ -24,6 +24,7 @@ pub mod quota;
 pub mod roles;
 pub mod roles_patch;
 pub mod store;
+pub mod verify;
 
 pub use detection::{
     ConfigurableRole, DetectedBackend, DetectedModel, FleetInspection, ModelOption, RoleModelPatch,

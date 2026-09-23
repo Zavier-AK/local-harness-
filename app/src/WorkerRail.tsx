@@ -157,6 +157,19 @@ export default function WorkerRail({
                 {worker.branch ? " · review" : ""}
               </span>
             )}
+            {worker.verification &&
+              (worker.verification.state === "running" ? (
+                <span className="badge risk-pending">checking</span>
+              ) : (
+                <span
+                  className={`badge risk-${worker.verification.report.verified ? worker.verification.report.risk : "unverified"}`}
+                  title={worker.verification.report.reasons.join("\n")}
+                >
+                  {worker.verification.report.verified
+                    ? `${worker.verification.report.risk} risk`
+                    : "unverified"}
+                </span>
+              ))}
           </div>
         </button>
         </div>

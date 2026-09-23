@@ -72,6 +72,10 @@ pub struct WorkerSummary {
     pub branch: Option<String>,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Checks on a proposed merge: "verifying", or the risk level and why. A failure here
+    /// is worth delegating a fix for before the person reviews it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification: Option<String>,
 }
 
 impl From<crate::engine::WorkerRecord> for WorkerSummary {
@@ -86,6 +90,7 @@ impl From<crate::engine::WorkerRecord> for WorkerSummary {
             branch: record.branch,
             input_tokens: record.usage.total_input(),
             output_tokens: record.usage.output_tokens,
+            verification: None,
         }
     }
 }
@@ -167,6 +172,7 @@ impl HarnessTools {
                 branch: None,
                 input_tokens: 0,
                 output_tokens: 0,
+                verification: None,
             }),
         }
     }
@@ -208,7 +214,13 @@ impl HarnessTools {
                 .filter(|w| params.worker_ids.contains(&w.id))
                 .collect()
         };
-        Json(filtered.into_iter().map(Into::into).collect())
+        let mut summaries = Vec::with_capacity(filtered.len());
+        for record in filtered {
+            let mut summary = WorkerSummary::from(record);
+            summary.verification = self.harness.verification_line(&summary.worker_id).await;
+            summaries.push(summary);
+        }
+        Json(summaries)
     }
 
     #[tool(
@@ -218,7 +230,11 @@ impl HarnessTools {
     )]
     async fn collect(&self, Parameters(params): Parameters<WorkerIdParams>) -> Json<serde_json::Value> {
         match self.harness.worker(&params.worker_id).await {
-            Some(record) => Json(serde_json::to_value(WorkerSummary::from(record)).unwrap_or_default()),
+            Some(record) => {
+                let mut summary = WorkerSummary::from(record);
+                summary.verification = self.harness.verification_line(&summary.worker_id).await;
+                Json(serde_json::to_value(summary).unwrap_or_default())
+            }
             None => Json(serde_json::json!({
                 "error": format!("no worker `{}`", params.worker_id)
             })),
@@ -245,7 +261,9 @@ impl HarnessTools {
                     files: diff.files,
                     merged: false,
                     note: "Queued for human review. Nothing is landed until it is approved \
-                           in the app."
+                           in the app. It is being checked (tests, an independent review) in the \
+                           meantime; `check_workers` shows the result, and a failure is worth \
+                           delegating a fix for."
                         .into(),
                 })
                 .unwrap_or_default(),

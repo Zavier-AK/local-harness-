@@ -46,6 +46,32 @@ setup = []
 # timeout_secs = 600
 
 # ---------------------------------------------------------------------------
+# Verification before merge.
+#
+# Every proposed merge is checked before it reaches you, in a fresh checkout of
+# exactly what would land. Its card then carries a low / medium / high risk
+# level and the reasons for it.
+#
+#   commands     — the project's own checks, run in order. A failure makes the
+#                  change high risk and its output is shown on the card.
+#   reviewer     — a role that reviews the diff and returns a verdict. Cheap is
+#                  ideal: a local model costs nothing. Must be readonly or none.
+#   escalate_to  — a second, stronger reviewer, asked only when the first
+#                  calls the change medium or high risk. Its verdict wins.
+#
+# With nothing set, only the free checks run (size, sensitive paths, deletions,
+# code changed without tests) and the change is shown as *unverified* — never
+# as safe just because nothing looked at it.
+# ---------------------------------------------------------------------------
+
+[verify]
+commands = []
+# commands     = ["cargo test", "npm test"]
+# reviewer     = "tester"
+# escalate_to  = "architect"
+# timeout_secs = 900
+
+# ---------------------------------------------------------------------------
 # Claude Pro — rare, high-value calls.
 # ---------------------------------------------------------------------------
 

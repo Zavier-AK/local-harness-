@@ -27,6 +27,7 @@ import type {
   UsageRow,
   Worker,
   WorkerActivity,
+  Verification,
 } from "./types";
 
 export default function App() {
@@ -185,10 +186,15 @@ export default function App() {
           firstLine(payload.summary),
         );
       }
-      if (payload.type === "merge_requested") {
+      // Ready to review once it has been checked, not merely proposed — so the
+      // notification can say how worried to be.
+      if (payload.type === "verification_finished") {
+        const { report } = payload;
         void notifyIfAway(
-          "A change is ready to review",
-          `${payload.diff.files_changed} file(s) on ${payload.branch}`,
+          report.verified
+            ? `A change is ready to review — ${report.risk} risk`
+            : "A change is ready to review — unverified",
+          report.reasons[0] ?? "Checks passed.",
         );
       }
       if (payload.type === "worker_spawned" || payload.type === "merge_requested") {
@@ -573,6 +579,7 @@ function reduceWorkers(
           startedAt: Date.now(),
           currentTool: null,
           activity: [],
+          verification: null,
         },
       };
 
@@ -610,6 +617,17 @@ function reduceWorkers(
       };
     }
 
+    case "verification_started":
+    case "verification_check":
+    case "verification_finished": {
+      const existing = prev[event.worker_id];
+      if (!existing) return prev;
+      return {
+        ...prev,
+        [event.worker_id]: { ...existing, verification: reduceVerification(existing.verification, event) },
+      };
+    }
+
     // A worker's own stream: its run id is its worker id. Kept, rather than dropped, so
     // the rail shows what a worker is doing instead of only that it is running.
     case "tool_call": {
@@ -641,6 +659,22 @@ function reduceWorkers(
       };
     }
 
+    default:
+      return prev;
+  }
+}
+
+function reduceVerification(prev: Verification | null, event: HarnessEvent): Verification | null {
+  switch (event.type) {
+    case "verification_started":
+      return { state: "running", checks: [] };
+    case "verification_check":
+      // A check can arrive without its start when the window opened mid-run.
+      return prev?.state === "done"
+        ? prev
+        : { state: "running", checks: [...(prev?.checks ?? []), event.check] };
+    case "verification_finished":
+      return { state: "done", report: event.report };
     default:
       return prev;
   }

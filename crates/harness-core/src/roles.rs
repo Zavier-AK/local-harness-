@@ -194,6 +194,45 @@ impl WorktreeSetup {
     }
 }
 
+/// What checks a worker's branch before its merge is put in front of a person.
+///
+/// Every field is optional. With none set, only the free, deterministic checks run and
+/// the change is reported as unverified — never as verified when nothing ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyConfig {
+    /// Shell commands run in a fresh checkout of the branch, e.g. `cargo test`.
+    #[serde(default)]
+    pub commands: Vec<String>,
+
+    /// Ceiling for each command, so a test suite waiting on input cannot hang forever.
+    #[serde(default = "default_verify_timeout")]
+    pub timeout_secs: u64,
+
+    /// Role that reviews the change first. Ideally cheap: a local model costs nothing.
+    #[serde(default)]
+    pub reviewer: Option<String>,
+
+    /// Role that takes a second look, only when the first reviewer calls the change
+    /// medium or high risk — so the expensive model is spent where it matters.
+    #[serde(default)]
+    pub escalate_to: Option<String>,
+}
+
+fn default_verify_timeout() -> u64 {
+    900
+}
+
+impl Default for VerifyConfig {
+    fn default() -> Self {
+        Self {
+            commands: Vec::new(),
+            timeout_secs: default_verify_timeout(),
+            reviewer: None,
+            escalate_to: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoleRegistry {
     #[serde(default)]
@@ -206,6 +245,10 @@ pub struct RoleRegistry {
     /// Bootstrap applied to every worktree this project creates.
     #[serde(default)]
     pub worktree: WorktreeSetup,
+
+    /// Checks run on a worker's branch before its merge is reviewed.
+    #[serde(default)]
+    pub verify: VerifyConfig,
 }
 
 impl RoleRegistry {
@@ -273,6 +316,29 @@ impl RoleRegistry {
         }
 
         self.worktree.validate()?;
+
+        // A reviewer looks and reports. One that can write — its own worktree, or the
+        // project root itself under `shared` — could change the very thing it is judging.
+        for (field, reviewer) in [
+            ("reviewer", &self.verify.reviewer),
+            ("escalate_to", &self.verify.escalate_to),
+        ] {
+            let Some(name) = reviewer else { continue };
+            let role = self
+                .roles
+                .get(name)
+                .with_context(|| format!("verify.{field} names `{name}`, which is not defined"))?;
+            if !matches!(role.isolation, Isolation::Readonly | Isolation::None) {
+                bail!(
+                    "verify.{field} role `{name}` has isolation `{}`; a reviewer must be \
+                     `readonly` or `none` so it cannot change what it reviews",
+                    role.isolation.as_str()
+                );
+            }
+        }
+        if self.verify.timeout_secs == 0 {
+            bail!("verify.timeout_secs must be greater than zero");
+        }
 
         Ok(())
     }
@@ -448,5 +514,29 @@ isolation = "worktree"
         assert!(!Isolation::Readonly.is_mergeable());
         assert!(!Isolation::Shared.is_mergeable());
         assert!(!Isolation::None.is_mergeable());
+    }
+
+    #[test]
+    fn verify_is_optional_and_parsed_when_present() {
+        let bare = RoleRegistry::from_toml(SAMPLE).unwrap();
+        assert_eq!(bare.verify, VerifyConfig::default());
+
+        let with = format!(
+            "{SAMPLE}\n[verify]\ncommands = [\"cargo test\"]\nreviewer = \"tester\"\n"
+        );
+        let registry = RoleRegistry::from_toml(&with).unwrap();
+        assert_eq!(registry.verify.commands, ["cargo test"]);
+        assert_eq!(registry.verify.reviewer.as_deref(), Some("tester"));
+        assert_eq!(registry.verify.timeout_secs, 900);
+    }
+
+    #[test]
+    fn a_reviewer_that_could_write_is_refused() {
+        let unknown = format!("{SAMPLE}\n[verify]\nreviewer = \"nobody\"\n");
+        assert!(RoleRegistry::from_toml(&unknown).unwrap_err().to_string().contains("not defined"));
+
+        let writer = format!("{SAMPLE}\n[verify]\nescalate_to = \"builder\"\n");
+        let err = RoleRegistry::from_toml(&writer).unwrap_err().to_string();
+        assert!(err.contains("cannot change what it reviews"), "{err}");
     }
 }

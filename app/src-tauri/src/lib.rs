@@ -228,6 +228,9 @@ fn forward_events(
     tokio::spawn(async move {
         while let Some(event) = events.recv().await {
             harness.note_event(&event).await;
+            if let HarnessEvent::VerificationFinished { worker_id, report } = &event {
+                tell_head_about_failed_checks(&app, &project, worker_id, report).await;
+            }
             if let Err(err) = app.emit(EVENT_CHANNEL, ProjectEvent { project: &project, event: &event })
             {
                 tracing::warn!("dropping event, webview gone: {err}");
@@ -235,6 +238,42 @@ fn forward_events(
             }
         }
     });
+}
+
+/// Close the loop on a failed check: tell the head agent, once, so it can delegate a fix
+/// while the person has not looked yet. Only on an actual failure — a change that is
+/// merely large or touches a sensitive path is the person's call, and a passing change
+/// costs no turn at all.
+async fn tell_head_about_failed_checks(
+    app: &AppHandle,
+    project: &str,
+    worker_id: &str,
+    report: &harness_core::verify::VerificationReport,
+) {
+    use harness_core::verify::CheckStatus;
+    let failed: Vec<&str> = report
+        .checks
+        .iter()
+        .filter(|check| check.status == CheckStatus::Failed)
+        .map(|check| check.name.as_str())
+        .collect();
+    if failed.is_empty() {
+        return;
+    }
+    let notice = format!(
+        "Checks on {worker_id}'s proposed merge failed ({}): {}. The person has not merged \
+         it. If you can fix it, delegate a fix with these findings and propose that instead; \
+         otherwise say why it should land as it is.",
+        failed.join(", "),
+        report.reasons.join("; ")
+    );
+    let state = app.state::<AppState>();
+    let mut projects = state.projects.lock().await;
+    if let Some(Session { head: Head::Live(orchestrator), .. }) = projects.get_mut(project) {
+        if let Err(error) = orchestrator.send(&notice).await {
+            tracing::warn!("could not tell the head agent about failed checks: {error:#}");
+        }
+    }
 }
 
 /// An engine event, tagged with the project it came from.
@@ -639,6 +678,19 @@ async fn pending_merges(
     let projects = state.projects.lock().await;
     let session = projects.get(&key).ok_or("no session for that project")?;
     Ok(session.harness.pending_merges().await)
+}
+
+/// Where a proposed merge's checks stand — for a drawer opened after the events passed.
+#[tauri::command]
+async fn worker_verification(
+    state: State<'_, AppState>,
+    worker_id: String,
+    project: Option<String>,
+) -> Result<Option<harness_core::engine::VerificationState>, String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
+    Ok(session.harness.verification(&worker_id).await)
 }
 
 /// The diff a worker left behind, so it can be read before it is landed.
@@ -1298,6 +1350,7 @@ pub fn run() {
             send_turn,
             list_workers,
             worker_patch,
+            worker_verification,
             pending_merges,
             approve_merge,
             reject_merge,

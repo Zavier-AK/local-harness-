@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Patch, Worker } from "./types";
+import type { Patch, Verification, VerifyCheck, Worker } from "./types";
 import { describeActivity } from "./WorkerRail";
 
 type Props = {
@@ -29,6 +29,21 @@ function lineKind(line: string): "add" | "del" | "meta" | "hunk" | "ctx" {
 export default function DiffDrawer({ worker, onClose, onApprove, onReject }: Props) {
   const diff = worker.diff;
   const awaitingReview = Boolean(worker.branch && diff && diff.files_changed > 0);
+
+  // Events fill this in live; asking covers a drawer opened after they went by.
+  const [fetched, setFetched] = useState<Verification | null>(null);
+  useEffect(() => {
+    if (worker.verification || !worker.branch) return;
+    let cancelled = false;
+    invoke<Verification | null>("worker_verification", { workerId: worker.id })
+      .then((found) => !cancelled && setFetched(found))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [worker.id, worker.branch, worker.verification]);
+  const verification = worker.verification ?? fetched;
+  const stillChecking = verification?.state === "running";
 
   const [patch, setPatch] = useState<Patch | null>(null);
   const [patchError, setPatchError] = useState<string | null>(null);
@@ -108,6 +123,8 @@ export default function DiffDrawer({ worker, onClose, onApprove, onReject }: Pro
           </section>
         )}
 
+        {verification && <VerificationSection verification={verification} />}
+
         {diff && diff.files_changed > 0 ? (
           <section className="diff-section">
             <h3>
@@ -171,18 +188,108 @@ export default function DiffDrawer({ worker, onClose, onApprove, onReject }: Pro
           <footer>
             <p className="muted">
               Nothing has landed yet. Approving merges this branch into your checkout.
+              {stillChecking && " Checks are still running — you can merge now, but they have not finished."}
             </p>
             <div className="actions">
               <button className="danger" onClick={onReject}>
                 Discard
               </button>
               <button className="primary" onClick={onApprove}>
-                Merge
+                {stillChecking ? "Merge anyway" : "Merge"}
               </button>
             </div>
           </footer>
         )}
       </aside>
     </div>
+  );
+}
+
+type Shown = VerifyCheck["status"] | "flagged";
+
+const CHECK_MARK: Record<Shown, string> = {
+  passed: "✓",
+  flagged: "!",
+  failed: "✕",
+  skipped: "–",
+  error: "?",
+};
+
+/** A check that ran fine but found something worth a look is not a green tick. */
+function shown(check: VerifyCheck): Shown {
+  return check.status === "passed" && check.risk && check.risk !== "low" ? "flagged" : check.status;
+}
+
+/**
+ * What checked this change before you did: a risk level that says why, then each check.
+ *
+ * The level is the first thing read, so it leads — but "unverified" is never dressed up
+ * as low risk: a change nothing checked says so.
+ */
+function VerificationSection({ verification }: { verification: Verification }) {
+  const checks = verification.state === "done" ? verification.report.checks : verification.checks;
+  return (
+    <section className="verification">
+      <h3>
+        Verification{" "}
+        {verification.state === "running" ? (
+          <span className="badge risk-pending">checking…</span>
+        ) : (
+          <>
+            <span className={`badge risk-${verification.report.risk}`}>
+              {verification.report.risk} risk
+            </span>
+            {!verification.report.verified && <span className="badge risk-unverified">unverified</span>}
+          </>
+        )}
+      </h3>
+
+      {verification.state === "done" && verification.report.reasons.length > 0 && (
+        <ul className="risk-reasons">
+          {verification.report.reasons.map((reason, i) => (
+            <li key={i}>{reason}</li>
+          ))}
+        </ul>
+      )}
+
+      <ul className="checks">
+        {checks.map((check, i) => (
+          <li key={i} className={`check ${shown(check)}`}>
+            <span className="check-mark" aria-label={shown(check)}>
+              {CHECK_MARK[shown(check)]}
+            </span>
+            <div className="check-body">
+              <div>
+                <span className={check.kind === "command" ? "mono" : ""}>{check.name}</span>
+                <span className="muted"> — {check.summary}</span>
+              </div>
+              {check.reviewer && <div className="muted mono check-by">{check.reviewer}</div>}
+              {check.findings && check.findings.length > 0 && (
+                <ul className="findings">
+                  {check.findings.map((finding, j) => (
+                    <li key={j} className={`finding ${finding.severity}`}>
+                      {finding.file && (
+                        <span className="mono">
+                          {finding.file}
+                          {finding.line ? `:${finding.line}` : ""}
+                        </span>
+                      )}{" "}
+                      {finding.message}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {check.output && (
+                <details open={check.status === "failed"}>
+                  <summary className="muted">output</summary>
+                  <pre className="check-output mono">{check.output}</pre>
+                </details>
+              )}
+            </div>
+          </li>
+        ))}
+        {verification.state === "running" && <li className="check pending muted">Running the next check…</li>}
+      </ul>
+    </section>
   );
 }

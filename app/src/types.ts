@@ -32,6 +32,9 @@ export type HarnessEvent =
   | { type: "worker_status_changed"; worker_id: string; status: WorkerStatus }
   | { type: "worker_finished"; worker_id: string; summary: string; usage: Usage; diff: DiffStat | null; is_error: boolean }
   | { type: "merge_requested"; worker_id: string; branch: string; diff: DiffStat }
+  | { type: "verification_started"; worker_id: string }
+  | { type: "verification_check"; worker_id: string; check: VerifyCheck }
+  | { type: "verification_finished"; worker_id: string; report: VerificationReport }
   | { type: "api_retry"; run_id: string; attempt: number; max_retries: number; retry_delay_ms: number; error: string }
   | { type: "run_finished"; run_id: string; text: string; usage: Usage; cost_usd: number | null; is_error: boolean }
   | { type: "error"; run_id: string; message: string }
@@ -144,7 +147,43 @@ export type Worker = {
   currentTool: string | null;
   /** Recent tool calls and messages, newest last — what the worker is actually doing. */
   activity: WorkerActivity[];
+  /** Checks on its proposed merge, once one is proposed. */
+  verification: Verification | null;
 };
+
+// ---------- Verification before merge ----------
+
+export type Risk = "low" | "medium" | "high";
+
+export type VerifyFinding = {
+  severity: string;
+  file?: string | null;
+  line?: number | null;
+  message: string;
+};
+
+export type VerifyCheck = {
+  kind: "signals" | "command" | "review";
+  name: string;
+  status: "passed" | "failed" | "skipped" | "error";
+  summary: string;
+  output?: string;
+  risk?: Risk;
+  findings?: VerifyFinding[];
+  reviewer?: string;
+};
+
+export type VerificationReport = {
+  risk: Risk;
+  /** False when nothing actually checked the change. */
+  verified: boolean;
+  reasons: string[];
+  checks: VerifyCheck[];
+};
+
+export type Verification =
+  | { state: "running"; checks: VerifyCheck[] }
+  | { state: "done"; report: VerificationReport };
 
 export type UsageRow = {
   provider: string;

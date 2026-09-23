@@ -24,6 +24,9 @@ use crate::roles::{Isolation, WorktreeSetup};
 /// Directory under the project root holding worker worktrees.
 pub const WORKTREE_DIR: &str = ".harness/worktrees";
 
+/// Directory under the project root holding checkouts made to verify a branch.
+pub const VERIFY_DIR: &str = ".harness/verify";
+
 /// Prefix for branches the harness creates.
 pub const BRANCH_PREFIX: &str = "harness";
 
@@ -396,6 +399,64 @@ impl Workspaces {
         }
     }
 
+    /// A detached checkout of a worker's branch, bootstrapped like any worktree, for
+    /// running checks against exactly what would be merged.
+    ///
+    /// Detached rather than on the branch: nothing is ever committed here, and a branch
+    /// cannot be checked out twice. Released like a readonly worktree — removed, with the
+    /// branch untouched.
+    pub async fn checkout_branch(&self, id: &str, branch: &str) -> Result<Workspace> {
+        if !branch.starts_with(&format!("{BRANCH_PREFIX}/")) {
+            bail!("refusing to check out `{branch}`: not a harness branch");
+        }
+        let path = self.project_root.join(VERIFY_DIR).join(id);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        {
+            let _guard = self.git_lock.lock().await;
+            let _file_lock = lock_worktree_admin(&self.project_root).await?;
+            // A checkout left behind by a crash would make `worktree add` refuse.
+            if path.exists() {
+                let _ = git(
+                    &self.project_root,
+                    &["worktree", "remove", "--force", &path.to_string_lossy()],
+                )
+                .await;
+                let _ = tokio::fs::remove_dir_all(&path).await;
+                let _ = git(&self.project_root, &["worktree", "prune"]).await;
+            }
+            git(
+                &self.project_root,
+                &["worktree", "add", "--detach", &path.to_string_lossy(), branch],
+            )
+            .await
+            .with_context(|| format!("checking out {branch} to verify it"))?;
+        }
+
+        if let Err(error) = self.bootstrap(&path).await {
+            let _guard = self.git_lock.lock().await;
+            let _file_lock = lock_worktree_admin(&self.project_root).await;
+            let _ = git(
+                &self.project_root,
+                &["worktree", "remove", "--force", &path.to_string_lossy()],
+            )
+            .await;
+            return Err(error);
+        }
+
+        Ok(Workspace {
+            cwd: path,
+            // Not mergeable, never committed from: only `release` is meant to be used.
+            isolation: Isolation::Readonly,
+            branch: Some(branch.to_string()),
+            project_root: self.project_root.clone(),
+            _shared_guard: None,
+            git_lock: Arc::clone(&self.git_lock),
+        })
+    }
+
     /// The unified diff a branch carries, for review before it is landed.
     ///
     /// Computed from the branch rather than the worktree, because the worktree is torn
@@ -578,6 +639,36 @@ mod tests {
         tokio::fs::write(workspace.cwd.join("feature.txt"), "real work\n").await.unwrap();
         let stat = workspace.diff().await.unwrap();
         assert_eq!(stat.files, ["feature.txt"]);
+    }
+
+    #[tokio::test]
+    async fn a_branch_can_be_checked_out_to_verify_and_left_as_it_was() {
+        let (dir, workspaces) = scratch_repo().await;
+        let worker = workspaces.prepare("w-v", Isolation::Worktree).await.unwrap();
+        tokio::fs::write(worker.cwd.join("feature.txt"), "work\n").await.unwrap();
+        worker.commit("work").await.unwrap();
+        let branch = worker.branch.clone().unwrap();
+        worker.release().await.unwrap();
+
+        // Twice: a second verification of the same worker must not trip over the first.
+        for _ in 0..2 {
+            let checkout = workspaces.checkout_branch("w-v", &branch).await.unwrap();
+            assert!(checkout.cwd.starts_with(dir.path().join(VERIFY_DIR)));
+            assert_eq!(
+                tokio::fs::read_to_string(checkout.cwd.join("feature.txt")).await.unwrap(),
+                "work\n",
+                "the checkout must hold exactly what would be merged"
+            );
+            assert!(checkout.mergeable_branch().is_none());
+            let path = checkout.cwd.clone();
+            checkout.release().await.unwrap();
+            assert!(!path.exists());
+        }
+
+        // The branch is untouched, and still mergeable.
+        let log = git(dir.path(), &["log", "--oneline", &branch]).await.unwrap();
+        assert!(log.contains("work"));
+        assert!(workspaces.checkout_branch("w-x", "main").await.is_err(), "harness branches only");
     }
 
     /// Two engines — or an engine and a hook process — share nothing in memory, so only
