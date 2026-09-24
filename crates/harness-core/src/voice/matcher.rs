@@ -129,7 +129,7 @@ pub fn normalize(text: &str) -> String {
 }
 
 /// `text` without the leading words `prefix`, if it starts with them as whole words.
-fn strip_words<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+pub(crate) fn strip_words<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     let rest = text.strip_prefix(prefix)?;
     if rest.is_empty() {
         Some(rest)
@@ -138,25 +138,25 @@ fn strip_words<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     }
 }
 
-fn has_word(text: &str, word: &str) -> bool {
+pub(crate) fn has_word(text: &str, word: &str) -> bool {
     text.split(' ').any(|w| w == word)
 }
 
-fn has_phrase(text: &str, phrase: &str) -> bool {
+pub(crate) fn has_phrase(text: &str, phrase: &str) -> bool {
     format!(" {text} ").contains(&format!(" {phrase} "))
 }
 
-fn is_any(text: &str, phrases: &[&str]) -> bool {
+pub(crate) fn is_any(text: &str, phrases: &[&str]) -> bool {
     phrases.contains(&text)
 }
 
-fn starts_any<'a>(text: &'a str, prefixes: &[&str]) -> Option<&'a str> {
+pub(crate) fn starts_any<'a>(text: &'a str, prefixes: &[&str]) -> Option<&'a str> {
     prefixes.iter().find_map(|p| strip_words(text, p))
 }
 
 /// The original words after the first whole-word, case-insensitive occurrence of
 /// `marker`, with leading punctuation and "to"/"that" trimmed.
-fn original_after(original: &str, markers: &[&str]) -> Option<String> {
+pub(crate) fn original_after(original: &str, markers: &[&str]) -> Option<String> {
     let lower = original.to_lowercase();
     let mut best: Option<usize> = None;
     for marker in markers {
@@ -202,7 +202,7 @@ pub struct Slots {
 
 pub fn slots(original: &str) -> Slots {
     Slots {
-        app: app_name(original),
+        app: spoken_app(original),
         url: url_in(original),
         message: original_after(
             original,
@@ -235,7 +235,9 @@ const WORK_NOUNS: [&str; 16] = [
     "readme", "pr", "pull", "worker", "plan", "project",
 ];
 
-fn app_name(original: &str) -> Option<String> {
+/// What was said after "open" when it could be an app: lowercase, without "the", "my" or
+/// a trailing "app". `None` when it is plainly about the code ("open the test file").
+fn spoken_app(original: &str) -> Option<String> {
     let normalized = normalize(original);
     let rest = starts_any(&normalized, &OPEN_VERBS)?;
     if rest.is_empty()
@@ -244,35 +246,161 @@ fn app_name(original: &str) -> Option<String> {
     {
         return None;
     }
-    let name = original_after(original, &OPEN_VERBS)?;
-    let name = name
-        .trim_start_matches("the ")
-        .trim_start_matches("The ")
-        .trim_end_matches(" app")
-        .trim_end_matches(" application")
-        .trim_end_matches(['.', '!', '?'])
-        .trim()
-        .to_string();
-    let words = name.split_whitespace().count();
-    ((1..=4).contains(&words)).then(|| app_alias(&name))
+    let mut words: Vec<&str> = rest.split(' ').collect();
+    while matches!(words.first(), Some(&("the" | "my" | "up"))) {
+        words.remove(0);
+    }
+    while matches!(words.last(), Some(&("app" | "application"))) {
+        words.pop();
+    }
+    ((1..=6).contains(&words.len())).then(|| words.join(" "))
 }
 
-/// The names people say for apps whose real names differ.
+/// Lowercase words only, for comparing app names however they are written.
+fn plain(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let next = (row[j + 1] + 1)
+                .min(row[j] + 1)
+                .min(prev + usize::from(ca != *cb));
+            prev = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+    row[b.len()]
+}
+
+/// One app for one phrase, or none: an alias, the exact name, the name without spaces,
+/// a whole word of exactly one app's name ("word" → Microsoft Word), or a near-miss
+/// spelling of exactly one ("curser" → Cursor).
+fn match_app(phrase: &str, apps: &[String]) -> Option<String> {
+    if let Some(real) = alias(phrase) {
+        if let Some(app) = apps.iter().find(|a| plain(a) == plain(real)) {
+            return Some(app.clone());
+        }
+    }
+    if let Some(app) = apps.iter().find(|a| plain(a) == phrase) {
+        return Some(app.clone());
+    }
+    let squashed = phrase.replace(' ', "");
+    if let Some(app) = apps.iter().find(|a| plain(a).replace(' ', "") == squashed) {
+        return Some(app.clone());
+    }
+    if squashed.len() >= 4 {
+        let containing: Vec<&String> = apps
+            .iter()
+            .filter(|a| has_phrase(&plain(a), phrase))
+            .collect();
+        if containing.len() == 1 {
+            return Some(containing[0].clone());
+        }
+        let allowed = if squashed.len() >= 7 { 2 } else { 1 };
+        let mut near: Vec<(usize, &String)> = apps
+            .iter()
+            .map(|a| (levenshtein(&squashed, &plain(a).replace(' ', "")), a))
+            .filter(|(d, _)| *d <= allowed)
+            .collect();
+        near.sort_by_key(|(d, _)| *d);
+        match near.as_slice() {
+            [(_, only)] => return Some((*only).clone()),
+            [(d1, first), (d2, _), ..] if d1 < d2 => return Some((*first).clone()),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The installed app a spoken phrase names. Every run of its words is tried, longest
+/// first, so "notes for me" and "apple notes" both find Notes.
+pub fn find_app(phrase: &str, apps: &[String]) -> Option<String> {
+    let words: Vec<&str> = phrase.split(' ').filter(|w| !w.is_empty()).collect();
+    for len in (1..=words.len()).rev() {
+        for start in 0..=words.len() - len {
+            let candidate = words[start..start + len].join(" ");
+            if len == 1 && candidate.len() < 3 {
+                continue;
+            }
+            if let Some(app) = match_app(&candidate, apps) {
+                return Some(app);
+            }
+        }
+    }
+    None
+}
+
+/// Sites people open by name.
+fn known_site(phrase: &str) -> Option<&'static str> {
+    let phrase = phrase
+        .trim_end_matches(" website")
+        .trim_end_matches(" site")
+        .trim_end_matches(" com");
+    Some(match phrase {
+        "github" => "https://github.com",
+        "gmail" | "my email" | "email" => "https://mail.google.com",
+        "google" => "https://www.google.com",
+        "youtube" => "https://www.youtube.com",
+        "reddit" => "https://www.reddit.com",
+        "twitter" | "x" => "https://x.com",
+        "linkedin" => "https://www.linkedin.com",
+        "stack overflow" | "stackoverflow" => "https://stackoverflow.com",
+        "hacker news" => "https://news.ycombinator.com",
+        "claude" | "claude ai" => "https://claude.ai",
+        "chatgpt" | "chat gpt" => "https://chatgpt.com",
+        _ => return None,
+    })
+}
+
+/// What "open <phrase>" does: an installed app, else a well-known site. With no app list
+/// (not a Mac, or not scanned), the phrase is taken as the app's name. `None` means it is
+/// not something to open — most likely it is about the work, for the head agent.
+pub fn resolve_open(phrase: &str, snapshot: &Snapshot) -> Option<VoiceAction> {
+    if !snapshot.apps.is_empty() {
+        if let Some(name) = find_app(phrase, &snapshot.apps) {
+            return Some(VoiceAction::OpenApp { name });
+        }
+    }
+    if let Some(url) = known_site(phrase) {
+        return Some(VoiceAction::OpenUrl { url: url.into() });
+    }
+    snapshot.apps.is_empty().then(|| VoiceAction::OpenApp {
+        name: app_alias(phrase),
+    })
+}
+
+fn alias(phrase: &str) -> Option<&'static str> {
+    Some(match phrase {
+        "vs code" | "vscode" | "code" | "visual studio" => "Visual Studio Code",
+        "chrome" => "Google Chrome",
+        "iterm" | "i term" => "iTerm",
+        "lm studio" => "LM Studio",
+        "system settings" | "system preferences" | "preferences" => "System Settings",
+        "word" => "Microsoft Word",
+        "excel" => "Microsoft Excel",
+        "outlook" => "Microsoft Outlook",
+        "teams" => "Microsoft Teams",
+        "powerpoint" => "Microsoft PowerPoint",
+        _ => return None,
+    })
+}
+
+/// The name to open when there is no app list to check against.
 fn app_alias(name: &str) -> String {
     let lower = name.to_lowercase();
-    let known = [
-        ("vs code", "Visual Studio Code"),
-        ("vscode", "Visual Studio Code"),
-        ("code", "Visual Studio Code"),
-        ("chrome", "Google Chrome"),
-        ("iterm", "iTerm"),
-        ("finder", "Finder"),
-        ("terminal", "Terminal"),
-        ("safari", "Safari"),
-        ("slack", "Slack"),
-        ("lm studio", "LM Studio"),
-    ];
-    if let Some((_, real)) = known.iter().find(|(spoken, _)| *spoken == lower) {
+    if let Some(real) = alias(&lower) {
         return real.to_string();
     }
     name.split_whitespace()
@@ -551,7 +679,9 @@ pub fn match_command(original: &str, snapshot: &Snapshot, pending: bool) -> Opti
             "be quiet",
             "hold on",
         ],
-    ) {
+    ) || n.ends_with(" stop talking")
+        || n.ends_with(" be quiet")
+    {
         return Some(VoiceAction::StopTurn);
     }
 
@@ -578,6 +708,9 @@ pub fn match_command(original: &str, snapshot: &Snapshot, pending: bool) -> Opti
             "stop the plan",
             "drop the plan",
             "throw away the plan",
+            "forget the plan",
+            "forget that plan",
+            "cancel that plan",
         ],
     ) {
         return Some(VoiceAction::DiscardPlan);
@@ -657,6 +790,10 @@ pub fn match_command(original: &str, snapshot: &Snapshot, pending: bool) -> Opti
         n,
         &[
             "show me",
+            "let me see",
+            "back to",
+            "go back to",
+            "switch back to",
             "show",
             "open",
             "go to",
@@ -704,6 +841,11 @@ pub fn match_command(original: &str, snapshot: &Snapshot, pending: bool) -> Opti
     }
 
     if let Some(action) = worker_command(original, n, snapshot) {
+        return Some(action);
+    }
+
+    // Everyday things on the Mac: search, music, notes, reminders, volume.
+    if let Some(action) = super::everyday::match_everyday(original, snapshot) {
         return Some(action);
     }
 
@@ -760,8 +902,8 @@ pub fn match_command(original: &str, snapshot: &Snapshot, pending: bool) -> Opti
             return Some(VoiceAction::OpenUrl { url });
         }
     }
-    if let Some(name) = app_name(original) {
-        return Some(VoiceAction::OpenApp { name });
+    if let Some(phrase) = spoken_app(original) {
+        return resolve_open(&phrase, snapshot);
     }
     None
 }
@@ -955,10 +1097,8 @@ mod tests {
             slots("open github dot com slash anthropics").url.as_deref(),
             Some("https://github.com/anthropics")
         );
-        assert_eq!(
-            slots("launch vs code").app.as_deref(),
-            Some("Visual Studio Code")
-        );
+        assert_eq!(slots("launch vs code").app.as_deref(), Some("vs code"));
+        assert_eq!(slots("open up the notes app").app.as_deref(), Some("notes"));
         assert_eq!(
             slots("open the fetcher test file").app,
             None,
@@ -970,6 +1110,46 @@ mod tests {
                 .as_deref(),
             Some("make the tests faster")
         );
+    }
+
+    #[test]
+    fn apps_are_found_by_what_people_actually_say() {
+        let apps: Vec<String> = [
+            "Notes",
+            "Cursor",
+            "Microsoft Word",
+            "Microsoft Teams",
+            "Visual Studio Code",
+            "LM Studio",
+            "Xcode",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let find = |said: &str| find_app(said, &apps);
+        assert_eq!(find("notes").as_deref(), Some("Notes"));
+        assert_eq!(
+            find("notes for me").as_deref(),
+            Some("Notes"),
+            "extra words don't matter"
+        );
+        assert_eq!(find("apple notes").as_deref(), Some("Notes"));
+        assert_eq!(find("curser").as_deref(), Some("Cursor"), "a near miss");
+        assert_eq!(
+            find("word").as_deref(),
+            Some("Microsoft Word"),
+            "one word of one app"
+        );
+        assert_eq!(find("vs code").as_deref(), Some("Visual Studio Code"));
+        assert_eq!(find("lmstudio").as_deref(), Some("LM Studio"));
+        assert_eq!(
+            find("code").as_deref(),
+            Some("Visual Studio Code"),
+            "not Xcode"
+        );
+        assert_eq!(find("microsoft"), None, "two apps say microsoft");
+        assert_eq!(find("the fetcher"), None);
+        assert_eq!(find("spotify"), None, "not installed");
     }
 
     #[test]

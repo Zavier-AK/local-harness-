@@ -84,6 +84,24 @@ pub fn fixture() -> Snapshot {
         }),
         autonomy: Autonomy::Review,
         landed: vec!["w-old".into()],
+        apps: [
+            "Notes",
+            "Safari",
+            "Visual Studio Code",
+            "Slack",
+            "Google Chrome",
+            "Cursor",
+            "Terminal",
+            "Finder",
+            "Microsoft Word",
+            "Microsoft Excel",
+            "LM Studio",
+            "Spotify",
+            "System Settings",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
     }
 }
 
@@ -133,6 +151,20 @@ pub fn label(outcome: &Outcome, snapshot: &Snapshot) -> String {
                 .to_string(),
         ),
         OpenFolder { path } => Some(path.clone()),
+        Search { query, site, .. } => Some(format!("{} {query}", site.label().to_lowercase())),
+        Media { control, .. } => Some(
+            control
+                .label()
+                .split(' ')
+                .next()
+                .unwrap_or("")
+                .to_lowercase(),
+        ),
+        PlayPlaylist { name, .. } => Some(name.clone()),
+        PlayQuery { query, .. } => Some(query.clone()),
+        NewNote { text } => Some(text.clone()),
+        Remind { text, .. } => Some(text.to_lowercase()),
+        System { control } => Some(control.label().to_lowercase()),
         _ => None,
     };
     match argument {
@@ -333,6 +365,13 @@ mod tests {
             "open_folder",
             "reveal_project",
             "open_project_in_editor",
+            "search",
+            "media",
+            "play_playlist",
+            "play_query",
+            "new_note",
+            "remind",
+            "system",
         ];
         let all = phrases();
         assert!(all.len() >= 55, "{} phrases", all.len());

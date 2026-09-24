@@ -267,9 +267,11 @@ Karpathy's "autonomy slider": you decide how much the fleet does alone, and the
 
 ## Talk to it
 
-Hold **⌥Space** anywhere, not only in the app, say what you want, and let go. Voice is a
-commander for the harness itself, plus a small, safe list of things on the Mac. It is off
-until you turn it on in **Settings › Voice**.
+Hold **⌥Space** anywhere, not only in the app, and talk. Each command runs at the pause
+after it, so you can keep talking: "open Notes … show me the plan … what's waiting for
+me?" is three commands in one hold. Letting go finishes whatever you were saying. Voice
+is a commander for the harness itself, plus a small, safe list of things on the Mac. It
+is off until you turn it on in **Settings › Voice** and click **Save**.
 
 - **Look:** "what's waiting for me?", "what's running", "how's the night shift going?",
   "show me the plan", "switch to blog", "open worker 3".
@@ -277,10 +279,37 @@ until you turn it on in **Settings › Voice**.
   "undo that", "let the reviewer start", "stop worker 2".
 - **Steer:** "set autonomy to land safe", "run the plan", "stop the night shift",
   "start a night shift to make the tests faster" (opens the form with that goal).
-- **Ask:** "tell Claude to add retries to the fetcher". Anything that isn't a command
-  goes to the head agent as a message.
-- **The Mac:** "open Safari", "go to github.com", "open my downloads folder", "show the
-  project in Finder", "open the project in VS Code".
+- **Ask:** "tell Claude to add retries to the fetcher". Anything that isn't a command is
+  **typed into the chat box**, never sent. Edit it and press Enter yourself. More
+  dictation is added after what is already there.
+- **The Mac:** "open Notes", "open Safari", "go to github.com", "open my downloads
+  folder", "show the project in Finder", "open the project in VS Code".
+  - "Open …" is an app command only if the app is **installed**. It's checked against
+    `/Applications` and the system apps, allowing for extra words ("open notes for me",
+    "apple notes"), a word of the name ("word" means Microsoft Word), and near misses
+    ("curser").
+  - A few well-known sites open by name ("open github").
+  - Anything else after "open" ("open the login page and…") is about the work, so it goes
+    to the chat box.
+- **Inside apps.** Each of these is a fixed recipe with your words filled in, never a
+  script written on the fly:
+  - **Search:** "search for shoes", "google salt and pepper grinders", "open chrome and
+    search for shoes", "search YouTube for lofi beats", "search for running shoes on
+    Amazon". GitHub, Maps, Wikipedia and Reddit work too. It opens in the browser you name,
+    or your default.
+  - **Music:** "pause the music", "play", "skip this song", "previous song", "play some
+    jazz on Spotify".
+    - "Play my playlist called Top 200" plays it directly in **Apple Music**. **Spotify**
+      doesn't let other apps play a playlist by name, so it opens Spotify's search for it,
+      one click from playing.
+    - With no app named, it uses whichever one is playing.
+  - **Notes and reminders:** "make a note: call the dentist about Thursday", "remind me to
+    push the branch at 5", "…in 20 minutes", "…tomorrow at 9:30". "At 5" means 5 PM.
+  - **The Mac:** "turn it up", "volume down", "mute", "set the volume to 30 percent",
+    "lock my screen" (sleeps the display).
+  - macOS asks once per app ("Harness wants to control Spotify"). Click OK.
+- **Two at once:** "open notes and show me the plan" runs both, in order. It splits only
+  when every part is a command on its own; "search for salt and pepper" stays one search.
 
 **Workers have numbers now.** Each card in the rail shows **#1**, **#2**, …, in the order
 they started, so "worker 3" means something. Ids are UUIDs nobody can say.
@@ -299,8 +328,8 @@ Everything runs on the Mac; no audio leaves it.
      workers that actually exist) with a calibrated probability, in about 0.15 s.
    - It can never invent a worker.
    - Below the confidence you set (0.75 by default), nothing is done on its word.
-4. **Otherwise the words go to Claude**, after a 2-second countdown on the voice bar that
-   you can cancel.
+4. **Otherwise the words go into the chat box**, for you to edit and send. Nothing
+   reaches Claude unless you send it.
 
 ### What stays safe
 
@@ -481,7 +510,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 242 engine tests, no network, no CLI login needed
+cargo test                        # 249 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -496,7 +525,7 @@ Preview discovery, URL safety, settings — run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **242 engine tests, 259 including the Tauri shell** — worth stating explicitly,
+That makes **249 engine tests, 270 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats

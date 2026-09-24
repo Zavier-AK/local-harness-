@@ -20,6 +20,7 @@ function megabytes(bytes: number): string {
 
 /** What an interpretation comes to, in a few words, for "Try a phrase". */
 function summarize(heard: Interpretation): string {
+  // (to_head: put in the chat box, never sent.)
   const o = heard.outcome;
   const how =
     heard.source === "laya"
@@ -35,7 +36,7 @@ function summarize(heard: Interpretation): string {
     case "reply":
       return `Would say: ${o.text}${how}`;
     case "to_head":
-      return `Would send to Claude: “${o.text}”`;
+      return `Would put in the chat box for Claude: “${o.text}”`;
     case "nothing":
       return "Nothing to do.";
   }
@@ -110,9 +111,7 @@ export default function VoiceSettingsPanel({ value, onChange }: Props) {
       <h3>Voice</h3>
       <p className="muted">
         Hold <kbd>{value.hotkey.replace("Alt", "⌥").replace("Cmd", "⌘").replace("Shift", "⇧").replace(/\+/g, "")}</kbd>{" "}
-        anywhere and speak; let go to send. Everything runs on this Mac: Whisper writes down what
-        you said, exact commands are matched instantly, and Laya works out the rest. What it
-        cannot place goes to Claude as a message. Merges, plans and stopping things always ask
+        anywhere and speak. Each command runs at the pause after it, so you can keep talking. Everything runs on this Mac: Whisper writes down what you said, exact commands are matched instantly, and Laya works out the rest. Anything else goes into the chat box for you to edit and send. Merges, plans and stopping things always ask
         you first.
       </p>
       {status && !status.built && (
@@ -192,8 +191,26 @@ export default function VoiceSettingsPanel({ value, onChange }: Props) {
         <span className="mono">{value.confidence.toFixed(2)}</span>
       </label>
       <p className="muted hint">
-        How sure Laya must be before it acts. Lower acts on more; higher sends more to Claude.{" "}
+        How sure Laya must be before it acts. Lower acts on more; higher leaves more for you in the chat box.{" "}
         <code>harness-cli voice --eval --laya</code> measures it on real phrases.
+      </p>
+
+      <label className="field">
+        <span>Pause before acting</span>
+        <input
+          type="range"
+          min={300}
+          max={2000}
+          step={100}
+          value={value.pause_ms}
+          onChange={(e) => set({ pause_ms: Number(e.target.value) })}
+          aria-valuetext={`${(value.pause_ms / 1000).toFixed(1)} seconds`}
+        />
+        <span className="mono">{(value.pause_ms / 1000).toFixed(1)}s</span>
+      </label>
+      <p className="muted hint">
+        How long you pause before what you just said runs, while you keep holding the key.
+        Shorter feels snappier; longer lets you think mid-sentence.
       </p>
 
       <label className="field">

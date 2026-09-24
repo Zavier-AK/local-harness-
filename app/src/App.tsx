@@ -15,7 +15,6 @@ import AutonomyDial, { nextStop } from "./AutonomyDial";
 import PlanBoard from "./PlanBoard";
 import NightView from "./NightView";
 import SettingsView from "./SettingsView";
-import { SEND_DELAY_MS } from "./VoiceHud";
 import { dispatch, type VoiceHandlers } from "./voice";
 import { notifyIfAway } from "./notify";
 import { applySettings } from "./appSettings";
@@ -57,6 +56,8 @@ export default function App() {
   const [nightGoal, setNightGoal] = useState<{ goal: string | null; at: number } | null>(null);
   const [voicePhase, setVoicePhase] = useState<VoicePhase>("idle");
   const [voiceOn, setVoiceOn] = useState(false);
+  /** Words said for the head agent, handed to the chat box. */
+  const [dictated, setDictated] = useState<{ text: string; at: number } | null>(null);
   /** The latest handlers, for voice events that arrive between renders. */
   const voiceHandlers = useRef<VoiceHandlers | null>(null);
   /** The plan on the board: the one under review or running, else the last one. */
@@ -96,39 +97,31 @@ export default function App() {
     void invoke<{ settings: { enabled: boolean } }>("voice_status")
       .then((status) => setVoiceOn(status.settings.enabled))
       .catch(() => setVoiceOn(false));
-    let pendingSend: number | null = null;
     const offs = [
       listen<{ action: import("./types").VoiceAction }>("voice://run", ({ payload }) => {
         if (voiceHandlers.current) dispatch(payload.action, voiceHandlers.current);
       }),
       listen<{ phase: VoicePhase }>("voice://state", ({ payload }) => setVoicePhase(payload.phase)),
       listen<Heard>("voice://heard", ({ payload }) => {
-        setVoicePhase("idle");
         const { interpretation, done, error, pending } = payload;
         const outcome = interpretation.outcome;
-        const said = `🎙 “${interpretation.transcript}”`;
+        // Words for the head agent are never sent unseen: they go in the chat box.
         if (outcome.outcome === "to_head") {
-          // A moment to cancel from the voice bar before it reaches the head agent.
-          const text = outcome.text;
-          pendingSend = window.setTimeout(() => {
-            pendingSend = null;
-            voiceHandlers.current?.askHead(text);
-          }, SEND_DELAY_MS);
+          voiceHandlers.current?.askHead(outcome.text);
           return;
         }
-        if (outcome.outcome === "nothing" || (outcome.outcome === "act" && outcome.action.action === "status")) return;
+        if (
+          outcome.outcome === "nothing" ||
+          (outcome.outcome === "act" && (outcome.action.action === "status" || outcome.action.action === "ask_head"))
+        ) {
+          return;
+        }
+        const said = `🎙 “${interpretation.transcript}”`;
         const result = error ?? (pending ? `${pending.describe} — waiting for your yes` : done ?? (outcome.outcome === "act" ? outcome.describe : outcome.outcome === "clarify" ? outcome.question : outcome.text));
         setChat((prev) => [...prev, { kind: "notice", tone: error ? "error" : "info", text: `${said} → ${result}` }]);
       }),
-      listen("voice://cancel-send", () => {
-        if (pendingSend !== null) {
-          window.clearTimeout(pendingSend);
-          pendingSend = null;
-        }
-      }),
     ];
     return () => {
-      if (pendingSend !== null) window.clearTimeout(pendingSend);
       offs.forEach((off) => void off.then((f) => f()));
     };
   }, []);
@@ -520,7 +513,12 @@ export default function App() {
     },
     switchProject: (root) => void focusProject(root),
     openWorker: (id) => setSelectedWorker(id),
-    askHead: (text) => void send(text, `🎙 ${text}`),
+    // Into the chat box, to edit and send by hand.
+    askHead: (text) => {
+      setView("session");
+      setActivePane("chat");
+      setDictated({ text, at: Date.now() });
+    },
     stopTurn: () => void stopTurn(),
     stopWorker: (id) => void stopWorker(id),
     resolveMerge: (id, approve) => void resolveMerge(id, approve),
@@ -688,6 +686,7 @@ export default function App() {
               aria-hidden={activePane !== "chat"}
             >
               <HeadChat
+                dictated={dictated}
                 items={chat}
                 onStop={() => void stopTurn()}
                 busy={busy}
