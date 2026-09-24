@@ -470,20 +470,24 @@ pub fn create_hud(app: &AppHandle) -> tauri::Result<()> {
     if hud(app).is_some() {
         return Ok(());
     }
-    let window = tauri::WebviewWindowBuilder::new(app, HUD_LABEL, tauri::WebviewUrl::App("index.html".into()))
-        .title("Harness voice")
-        .inner_size(460.0, 280.0)
-        .resizable(false)
-        .decorations(false)
-        .transparent(true)
-        .shadow(false)
-        .always_on_top(true)
-        .visible_on_all_workspaces(true)
-        .skip_taskbar(true)
-        .focused(false)
-        .accept_first_mouse(true)
-        .visible(false)
-        .build()?;
+    let window = tauri::WebviewWindowBuilder::new(
+        app,
+        HUD_LABEL,
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("Harness voice")
+    .inner_size(HUD_WIDTH, 280.0)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .always_on_top(true)
+    .visible_on_all_workspaces(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .accept_first_mouse(true)
+    .visible(false)
+    .build()?;
     #[cfg(target_os = "macos")]
     bar_panel::make(&window)?;
     #[cfg(not(target_os = "macos"))]
@@ -504,7 +508,7 @@ fn show_hud(app: &AppHandle) {
     if let Some(monitor) = monitor {
         let size = monitor.size();
         let scale = monitor.scale_factor();
-        let width = (460.0 * scale) as i32;
+        let width = (HUD_WIDTH * scale) as i32;
         let x = monitor.position().x + (size.width as i32 - width) / 2;
         let y = monitor.position().y + (48.0 * scale) as i32;
         let _ = window.set_position(tauri::PhysicalPosition { x, y });
@@ -588,6 +592,23 @@ pub async fn voice_open_browser(app: AppHandle) -> Result<(), String> {
         .map_err(|e| format!("{e:#}"))
 }
 
+/// The bar's width, and how tall it may grow before its text scrolls, in points.
+const HUD_WIDTH: f64 = 460.0;
+const HUD_MIN_HEIGHT: f64 = 80.0;
+const HUD_MAX_HEIGHT: f64 = 560.0;
+
+/// The bar asks to be as tall as what it shows, so a long answer isn't cut off. Past
+/// the maximum its text scrolls.
+#[tauri::command]
+pub fn voice_hud_fit(app: AppHandle, height: f64) {
+    let Some(window) = hud(&app) else { return };
+    if !height.is_finite() {
+        return;
+    }
+    let height = height.clamp(HUD_MIN_HEIGHT, HUD_MAX_HEIGHT).ceil();
+    let _ = window.set_size(tauri::LogicalSize::new(HUD_WIDTH, height));
+}
+
 #[tauri::command]
 pub fn voice_hide_hud(app: AppHandle) {
     #[cfg(target_os = "macos")]
@@ -606,7 +627,9 @@ pub fn voice_hide_hud(app: AppHandle) {
 mod bar_panel {
     use super::HUD_LABEL;
     use tauri::AppHandle;
-    use tauri_nspanel::{tauri_panel, CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt};
+    use tauri_nspanel::{
+        tauri_panel, CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt,
+    };
 
     tauri_panel! {
         panel!(VoiceBarPanel {

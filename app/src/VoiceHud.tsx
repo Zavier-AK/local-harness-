@@ -102,6 +102,34 @@ export default function VoiceHud() {
     return () => offs.forEach((off) => void off.then((f) => f()));
   }, []);
 
+  // The window is as tall as the bar's content (up to a limit; then the text scrolls).
+  const barRef = useRef<HTMLDivElement>(null);
+  const textRef = useRef<HTMLDivElement>(null);
+  const askedHeight = useRef(0);
+  useEffect(() => {
+    const bar = barRef.current;
+    if (!bar || typeof ResizeObserver === "undefined") return;
+    const fit = () => {
+      const text = textRef.current;
+      const hidden = text ? text.scrollHeight - text.clientHeight : 0;
+      const style = getComputedStyle(bar);
+      const margins = parseFloat(style.marginTop) + parseFloat(style.marginBottom);
+      const height = Math.ceil(bar.offsetHeight + hidden + margins);
+      if (Math.abs(height - askedHeight.current) < 2) return;
+      askedHeight.current = height;
+      void invoke("voice_hud_fit", { height }).catch(() => {});
+    };
+    const observer = new ResizeObserver(fit);
+    observer.observe(bar);
+    const mutations = new MutationObserver(fit);
+    mutations.observe(bar, { childList: true, subtree: true, characterData: true });
+    fit();
+    return () => {
+      observer.disconnect();
+      mutations.disconnect();
+    };
+  }, []);
+
   const interpretation = heard?.interpretation;
   const source =
     interpretation?.source === "agent"
@@ -122,7 +150,12 @@ export default function VoiceHud() {
         : null;
 
   return (
-    <div className={`voice-hud phase-${phase} ${heard?.error || phase === "error" ? "failed" : ""}`} role="status" aria-live="polite">
+    <div
+      ref={barRef}
+      className={`voice-hud phase-${phase} ${heard?.error || phase === "error" ? "failed" : ""}`}
+      role="status"
+      aria-live="polite"
+    >
       <button
         className="hud-close"
         aria-label="Hide the voice bar"
@@ -149,7 +182,7 @@ export default function VoiceHud() {
       )}
 
       {(heard || status || steps.length > 0 || (!listening && line)) && (
-        <div className="hud-row">
+        <div className="hud-row hud-body" ref={textRef}>
           {!listening && (
             <span className={`hud-mic ${phase}`} aria-hidden>
               ●
