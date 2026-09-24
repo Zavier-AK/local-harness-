@@ -410,6 +410,9 @@ export type VoiceSettings = {
   pause_ms: number;
   agent: boolean;
   agent_model: string;
+  browser: boolean;
+  browser_model: string;
+  about_me: string;
 };
 
 export type Pane = "chat" | "plan" | "night" | "preview" | "tools" | "settings";
@@ -447,6 +450,9 @@ export type VoiceAction =
   | { action: "play_query"; app: "spotify" | "music" | null; query: string }
   | { action: "new_note"; text: string }
   | { action: "remind"; text: string; when: unknown }
+  | { action: "draft_email"; to: string; subject: string; body: string }
+  | { action: "browser_do"; step: unknown; describe: string }
+  | { action: "stop_browsing" }
   | { action: "system"; control: { control: string; percent?: number } }
   | { action: "confirm" }
   | { action: "cancel" };

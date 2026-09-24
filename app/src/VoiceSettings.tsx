@@ -195,6 +195,57 @@ export default function VoiceSettingsPanel({ value, onChange }: Props) {
         </label>
       )}
 
+      {value.agent && (
+        <>
+          <label className="toggle-row">
+            <input type="checkbox" checked={value.browser} onChange={(e) => set({ browser: e.target.checked })} />
+            <span>Let it use a browser for longer web tasks</span>
+          </label>
+          <p className="muted hint">
+            "Find the cheapest trail runners on Amazon and add them to the basket": a stronger model works through it
+            in its own Chrome window, in the background, and tells you what it found. It reads, scrolls, types and
+            clicks freely, but asks for your yes before anything that sends, buys, posts, deletes or submits a form,
+            and never types passwords or card details. Sign in to the sites you want it to use once, in its window.
+            Needs Google Chrome, and <code>npm install</code> in <code>app/voice-sidecar</code>.
+          </p>
+          {value.browser && (
+            <>
+              <div className="field">
+                <span>Its window</span>
+                <button
+                  className="ghost"
+                  onClick={() => void invoke("voice_open_browser").catch((err) => setError(String(err)))}
+                >
+                  Open it to sign in to sites
+                </button>
+              </div>
+              <label className="field">
+                <span>Browser model</span>
+                <input
+                  value={value.browser_model}
+                  onChange={(e) => set({ browser_model: e.target.value })}
+                  spellCheck={false}
+                />
+                <span className="muted">sonnet keeps track of long tasks; haiku tends to get lost</span>
+              </label>
+            </>
+          )}
+          <label className="field">
+            <span>About you</span>
+            <textarea
+              rows={5}
+              value={value.about_me}
+              maxLength={4000}
+              placeholder={"How you write and who people are, e.g.\nI keep emails short and friendly, sign off with “Cheers, Z”.\nSam is my co-founder (sam@example.com). My manager is Priya."}
+              onChange={(e) => set({ about_me: e.target.value })}
+            />
+            <span className="muted">
+              Both agents read this. Emails are drafted in your words and open in Gmail for you to send.
+            </span>
+          </label>
+        </>
+      )}
+
       <label className="field">
         <span>Confidence</span>
         <input

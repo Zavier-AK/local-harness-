@@ -17,6 +17,7 @@
 //! a plan to run? a merge to approve?) and marks what must be confirmed before it runs.
 
 pub mod agent;
+pub mod browser;
 pub mod computer;
 pub mod eval;
 pub mod everyday;
@@ -128,6 +129,21 @@ pub enum VoiceAction {
     System {
         control: everyday::SystemControl,
     },
+    /// A draft in Gmail, for the person to check and send. Never sent.
+    DraftEmail {
+        /// Addresses, comma-separated; empty when not known.
+        to: String,
+        subject: String,
+        body: String,
+    },
+    /// A step in the voice browser that waits for the person's yes: a click that sends,
+    /// buys, posts, deletes or submits.
+    BrowserDo {
+        step: browser::BrowserStep,
+        describe: String,
+    },
+    /// Stop the browser task that is running.
+    StopBrowsing,
     /// Answers to a pending confirmation.
     Confirm,
     Cancel,
@@ -351,7 +367,8 @@ pub fn needs_confirmation(action: &VoiceAction, snapshot: &Snapshot) -> bool {
         | StopWorker { .. }
         | RunPlan
         | DiscardPlan
-        | StopNight => true,
+        | StopNight
+        | BrowserDo { .. } => true,
         SetAutonomy { level } => autonomy_rank(*level) > autonomy_rank(snapshot.autonomy),
         _ => false,
     }
@@ -545,6 +562,12 @@ pub fn finalize(action: VoiceAction, snapshot: &Snapshot) -> Outcome {
         } => format!("Remind you to {text} {}", when.label()),
         Remind { text, when: None } => format!("Remind you to {text}"),
         System { control } => control.label().to_string(),
+        DraftEmail { to, subject, .. } if to.trim().is_empty() => {
+            format!("Draft an email: “{subject}”")
+        }
+        DraftEmail { to, subject, .. } => format!("Draft an email to {to}: “{subject}”"),
+        BrowserDo { describe, .. } => describe.clone(),
+        StopBrowsing => "Stop browsing".into(),
         Confirm => "Yes".into(),
         Cancel => "Cancel".into(),
     };

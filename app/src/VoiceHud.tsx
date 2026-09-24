@@ -21,12 +21,17 @@ export default function VoiceHud() {
   const [busy, setBusy] = useState(false);
   /** What the voice agent has done so far for this request. */
   const [steps, setSteps] = useState<string[]>([]);
+  /** The browser task working in the background, if any. */
+  const [browsing, setBrowsing] = useState<string | null>(null);
+  const browsingRef = useRef<string | null>(null);
   const phaseRef = useRef<VoicePhase>("idle");
   const heardThisTurn = useRef(false);
   const hideTimer = useRef<number | null>(null);
 
   function scheduleHide(ms: number) {
     if (hideTimer.current) window.clearTimeout(hideTimer.current);
+    // Stays up while the browser works, showing its steps; × hides it.
+    if (browsingRef.current) return;
     hideTimer.current = window.setTimeout(() => void invoke("voice_hide_hud"), ms);
   }
   function keep() {
@@ -64,6 +69,14 @@ export default function VoiceHud() {
       listen<string>("voice://step", ({ payload }) => {
         keep();
         setSteps((prev) => [...prev, payload].slice(-5));
+      }),
+      listen<{ task: string | null }>("voice://browsing", ({ payload }) => {
+        browsingRef.current = payload.task;
+        setBrowsing(payload.task);
+        if (payload.task) {
+          keep();
+          setSteps([]);
+        }
       }),
       listen<Heard>("voice://heard", async ({ payload }) => {
         heardThisTurn.current = true;
@@ -147,9 +160,21 @@ export default function VoiceHud() {
         </div>
       )}
 
+      {browsing && (
+        <div className="hud-actions hud-browsing">
+          <span className="muted">🌐 Working in the browser: {browsing}</span>
+          <button className="ghost" onClick={() => void invoke("voice_stop_browsing")}>
+            Stop
+          </button>
+        </div>
+      )}
+
       {heard?.pending && (
         <div className="hud-actions">
-          <span className="muted">{listening ? "Say yes — or" : "Hold the key and say yes — or"}</span>
+          <span className="muted">
+            {interpretation?.source === "agent" ? `${heard.pending.describe} — ` : ""}
+            {listening ? "say yes, or" : "hold the key and say yes, or"}
+          </span>
           <button className="ghost" onClick={() => void invoke("voice_confirm", { yes: false })}>
             Cancel
           </button>

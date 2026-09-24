@@ -13,6 +13,8 @@
 //!   stops work, or raises autonomy, only *asks* the person — it happens on their yes.
 //! * **Coding is not its job.** Requests about the work go to the coding agent's chat
 //!   box, for the person to send.
+//! * **Web tasks are handed on** to the browser agent ([`VoiceAgent::start_browser`]),
+//!   a stronger model whose only tools are the voice browser ([`super::browser`]).
 //!
 //! One long-lived `claude -p` process (Haiku by default) keeps its context between
 //! requests, so a follow-up like "and add bread" makes sense and costs little.
@@ -27,6 +29,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use super::browser::{BrowserClient, BrowserTools, BROWSE_BRIEF};
 use super::everyday::{Control, Player, Site, SystemControl, When};
 use super::matcher::{find_app, normalize};
 use super::{finalize, spoken_status, Outcome, Pane, Snapshot, StatusTopic, VoiceAction};
@@ -56,6 +59,14 @@ pub trait Hands: Send + Sync + 'static {
     fn chat_box(&self, text: String) -> BoxFuture<'static, ()>;
     /// One step is being taken, for the voice bar.
     fn step(&self, line: String);
+    /// Hand a task that needs web pages to the browser agent. In the app it runs in the
+    /// background and reports when done; returns what to tell the voice agent now.
+    fn browse(&self, task: String) -> BoxFuture<'static, Result<String, String>>;
+    /// Email addresses for a name, from the Mac's Contacts: (name, address).
+    fn lookup_email(
+        &self,
+        name: String,
+    ) -> BoxFuture<'static, Result<Vec<(String, String)>, String>>;
 }
 
 pub const BRIEF: &str = "You are the voice assistant built into Harness, a coding app on the person's Mac. The person just spoke to you. Their words come from speech recognition and may contain small errors, so read them generously.
@@ -66,7 +77,23 @@ Requests about code, the project, bugs, features, tests or programming are for t
 
 Some actions (merging, discarding or undoing a change, approving or declining a delegation, stopping work, running or dropping a plan, raising autonomy) wait for the person's yes. When a tool says it asked, stop there and tell them it is waiting for their yes.
 
+Opening a website or searching is open_website or search_web. Anything more on the web (reading a page, comparing, finding something on a site, clicking through, filling something in, anything in Gmail or another signed-in site) is for the browser assistant: call browse once with the whole task, every detail they gave, in their words. It works in its own Chrome window in the background and reports back itself, so just say you've started on it.
+
+To write an email, call draft_email with the finished email, written as the person would write it (see what they told you about themselves, if anything). If you only have a name, call find_email_address first; if it finds nothing, leave the address empty. It opens as a draft in Gmail; they send it.
+
 If something cannot be done with your tools, say so plainly. End with one short sentence saying what you did; it is read aloud, so use no markdown and no lists.";
+
+/// The person's own words about themselves and how they write, added to a brief.
+pub fn with_about(brief: &str, about: &str) -> String {
+    let about = about.trim();
+    if about.is_empty() {
+        brief.to_string()
+    } else {
+        format!(
+            "{brief}\n\nWhat the person has told you about themselves and how they write:\n{about}"
+        )
+    }
+}
 
 // ---------------------------------------------------------------- tool parameters
 
@@ -216,6 +243,28 @@ pub struct AutonomyParams {
 pub struct ChatParams {
     /// The request for the coding agent, in the person's words, tidied up.
     pub text: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct BrowseParams {
+    /// The whole task, with every detail the person gave, in their words.
+    pub task: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct EmailParams {
+    /// Email addresses, comma-separated. Empty if not known.
+    #[serde(default)]
+    pub to: String,
+    pub subject: String,
+    /// The finished email, greeting to sign-off, as the person would write it.
+    pub body: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NameParams {
+    /// A person's name, e.g. "Sam" or "Sam Patel".
+    pub name: String,
 }
 
 // ---------------------------------------------------------------- the tools
@@ -663,6 +712,55 @@ impl VoiceTools {
     }
 
     #[tool(
+        name = "browse",
+        description = "Hand a task that needs web pages to the browser assistant, which works in its own Chrome window in the background: reading or comparing pages, finding something on a site, clicking through, filling in forms, anything in Gmail or another signed-in site. Give the whole task in the person's words."
+    )]
+    async fn browse(&self, Parameters(p): Parameters<BrowseParams>) -> String {
+        self.hands.step(format!("Browsing: {}", p.task));
+        match self.hands.browse(p.task).await {
+            Ok(message) => message,
+            Err(error) => format!("Could not start browsing: {error}"),
+        }
+    }
+
+    #[tool(
+        name = "stop_browsing",
+        description = "Stop the browser assistant's current task."
+    )]
+    async fn stop_browsing(&self) -> String {
+        self.run(VoiceAction::StopBrowsing).await
+    }
+
+    #[tool(
+        name = "draft_email",
+        description = "Open a finished email as a draft in Gmail, for the person to check and send. Never sends."
+    )]
+    async fn draft_email(&self, Parameters(p): Parameters<EmailParams>) -> String {
+        self.run(VoiceAction::DraftEmail {
+            to: p.to,
+            subject: p.subject,
+            body: p.body,
+        })
+        .await
+    }
+
+    #[tool(
+        name = "find_email_address",
+        description = "Look up a person's email address in the Mac's Contacts by name."
+    )]
+    async fn find_email_address(&self, Parameters(p): Parameters<NameParams>) -> String {
+        match self.hands.lookup_email(p.name.clone()).await {
+            Ok(found) if found.is_empty() => format!("No contact matches “{}”.", p.name),
+            Ok(found) => found
+                .iter()
+                .map(|(name, address)| format!("{name}: {address}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Err(error) => format!("Could not look it up: {error}"),
+        }
+    }
+
+    #[tool(
         name = "put_in_chat_box",
         description = "For anything about code, the project or programming: type the request into the coding agent's chat box for the person to review and send. Never sent automatically."
     )]
@@ -696,6 +794,10 @@ pub fn tool_names() -> Vec<String> {
         "night_shift",
         "set_autonomy",
         "stop_coding_agent",
+        "browse",
+        "stop_browsing",
+        "draft_email",
+        "find_email_address",
         "put_in_chat_box",
     ]
     .iter()
@@ -770,35 +872,78 @@ pub struct VoiceAgent {
 }
 
 impl VoiceAgent {
-    /// Start the tool server and the agent. `cwd` should be an empty folder of its own, so
-    /// no project's instructions are read into it.
-    pub async fn start(hands: Arc<dyn Hands>, model: &str, cwd: &Path) -> Result<Self> {
-        let mcp = serve_tools(
-            SERVER_NAME,
+    /// Start the voice agent: the safe list as its tools. `cwd` should be an empty folder
+    /// of its own, so no project's instructions are read into it. `about` is what the
+    /// person wrote about themselves in Settings.
+    pub async fn start(
+        hands: Arc<dyn Hands>,
+        model: &str,
+        cwd: &Path,
+        about: &str,
+    ) -> Result<Self> {
+        Self::launch(
             move || VoiceTools::new(Arc::clone(&hands)),
-            "127.0.0.1:0".parse()?,
+            tool_names(),
+            &with_about(BRIEF, about),
+            model,
+            20,
+            cwd,
         )
-        .await?;
+        .await
+    }
+
+    /// Start the browser agent: the voice browser as its only tools.
+    pub async fn start_browser(
+        hands: Arc<dyn Hands>,
+        browser: Arc<BrowserClient>,
+        model: &str,
+        cwd: &Path,
+        about: &str,
+    ) -> Result<Self> {
+        Self::launch(
+            move || BrowserTools::new(Arc::clone(&browser), Arc::clone(&hands)),
+            super::browser::tool_names(SERVER_NAME),
+            &with_about(BROWSE_BRIEF, about),
+            model,
+            80,
+            cwd,
+        )
+        .await
+    }
+
+    async fn launch<S, F>(
+        make: F,
+        tools: Vec<String>,
+        brief: &str,
+        model: &str,
+        max_turns: u32,
+        cwd: &Path,
+    ) -> Result<Self>
+    where
+        S: rmcp::ServerHandler + Send + 'static,
+        F: Fn() -> S + Send + Sync + 'static,
+    {
+        let mcp = serve_tools(SERVER_NAME, make, "127.0.0.1:0".parse()?).await?;
         let role = Role {
             provider: Provider::Claude,
             model: Some(model.to_string()),
             isolation: Isolation::None,
-            tools: tool_names(),
+            tools,
             brief: None,
             permission_mode: None,
             base_url: None,
             provider_opts: Default::default(),
             fallback_role: None,
-            max_turns: Some(20),
+            max_turns: Some(max_turns),
         };
         std::fs::create_dir_all(cwd).with_context(|| format!("creating {}", cwd.display()))?;
         let extra = [
-            // No built-in tools at all — no files, no shell — only the voice tools.
+            // No built-in tools at all — no files, no shell — only its own.
             "--tools".to_string(),
             String::new(),
             "--strict-mcp-config".into(),
             "--system-prompt".into(),
-            BRIEF.into(),
+            brief.into(),
             "--no-session-persistence".into(),
         ];
         let (session, events) = ClaudeSession::start(
@@ -818,6 +963,12 @@ impl VoiceAgent {
         })
     }
 
+    /// Hand the browser agent a task, and wait for it to finish.
+    pub async fn run_task(&mut self, task: &str, timeout: Duration) -> Result<AgentReply> {
+        self.exchange(&format!("The person asked: \"{task}\""), timeout)
+            .await
+    }
+
     /// Hand it what was said, and wait for it to finish.
     pub async fn ask(
         &mut self,
@@ -825,16 +976,20 @@ impl VoiceAgent {
         snapshot: &Snapshot,
         timeout: Duration,
     ) -> Result<AgentReply> {
-        let started = Instant::now();
-        // Anything left over from an earlier turn is not this answer.
-        while self.events.try_recv().is_ok() {}
         let context = context_line(snapshot);
         let message = if context.is_empty() {
             format!("The person said: \"{said}\"")
         } else {
             format!("The person said: \"{said}\"\n\n(Right now: {context}.)")
         };
-        self.session.send(&message).await?;
+        self.exchange(&message, timeout).await
+    }
+
+    async fn exchange(&mut self, message: &str, timeout: Duration) -> Result<AgentReply> {
+        let started = Instant::now();
+        // Anything left over from an earlier turn is not this answer.
+        while self.events.try_recv().is_ok() {}
+        self.session.send(message).await?;
         let mut steps = 0;
         let mut last_text = String::new();
         let deadline = tokio::time::Instant::now() + timeout;
@@ -912,6 +1067,22 @@ mod tests {
             Box::pin(async {})
         }
         fn step(&self, _: String) {}
+        fn browse(&self, task: String) -> BoxFuture<'static, Result<String, String>> {
+            self.chat.lock().unwrap().push(format!("browse: {task}"));
+            Box::pin(async { Ok("Started.".into()) })
+        }
+        fn lookup_email(
+            &self,
+            name: String,
+        ) -> BoxFuture<'static, Result<Vec<(String, String)>, String>> {
+            Box::pin(async move {
+                Ok(if name.to_lowercase().contains("sam") {
+                    vec![("Sam Patel".into(), "sam@example.com".into())]
+                } else {
+                    vec![]
+                })
+            })
+        }
     }
 
     fn tools() -> (Arc<Recorder>, VoiceTools) {
@@ -1029,6 +1200,40 @@ mod tests {
         assert!(reply.contains("No installed app"), "{reply}");
     }
 
+    #[tokio::test]
+    async fn emails_are_drafts_and_the_web_is_handed_on() {
+        let (rec, tools) = tools();
+        let found = tools
+            .find_email_address(Parameters(NameParams { name: "Sam".into() }))
+            .await;
+        assert_eq!(found, "Sam Patel: sam@example.com");
+        let reply = tools
+            .draft_email(Parameters(EmailParams {
+                to: "sam@example.com".into(),
+                subject: "Running late".into(),
+                body: "Hi Sam,\n\nTen minutes late.\n\nZ".into(),
+            }))
+            .await;
+        assert!(reply.starts_with("Done"), "{reply}");
+        assert!(matches!(
+            &rec.done.lock().unwrap()[0],
+            (VoiceAction::DraftEmail { to, .. }, false) if to == "sam@example.com"
+        ));
+        let reply = tools
+            .browse(Parameters(BrowseParams {
+                task: "find the cheapest trail runners on amazon.de".into(),
+            }))
+            .await;
+        assert_eq!(reply, "Started.");
+        assert_eq!(
+            rec.chat.lock().unwrap().as_slice(),
+            ["browse: find the cheapest trail runners on amazon.de"]
+        );
+        assert!(with_about(BRIEF, "I write short, casual emails.")
+            .ends_with("I write short, casual emails."));
+        assert_eq!(with_about(BRIEF, "  "), BRIEF);
+    }
+
     #[test]
     fn clock_times_are_read_either_way() {
         assert_eq!(parse_clock("18:00"), Some((18, 0)));
@@ -1044,6 +1249,6 @@ mod tests {
         assert!(line.contains("project shop (also open: blog)"), "{line}");
         assert!(line.contains("#1 builder (change waiting)"), "{line}");
         assert!(line.contains("#3 reviewer (waiting to start)"), "{line}");
-        assert_eq!(tool_names().len(), 21);
+        assert_eq!(tool_names().len(), 25);
     }
 }

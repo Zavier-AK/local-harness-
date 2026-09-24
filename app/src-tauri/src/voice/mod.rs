@@ -17,6 +17,7 @@ pub mod stt;
 #[cfg(feature = "voice")]
 pub mod audio;
 
+use harness_core::voice::browser::{BrowserClient, BrowserConfig};
 use harness_core::voice::laya::{LayaClient, LayaConfig, LayaState};
 use harness_core::voice::{self, computer, Interpretation, Outcome, Snapshot, VoiceAction};
 use serde::{Deserialize, Serialize};
@@ -53,6 +54,13 @@ pub struct VoiceSettings {
     pub agent: bool,
     /// The voice agent's model, a Claude CLI alias or id.
     pub agent_model: String,
+    /// Let the voice agent hand web tasks to the browser agent, in its own Chrome window.
+    pub browser: bool,
+    /// The browser agent's model. Browsing takes many steps; Haiku gets lost.
+    pub browser_model: String,
+    /// The person, in their own words: how they write, who people are. Both agents read
+    /// it, so emails come out in their voice.
+    pub about_me: String,
 }
 
 impl Default for VoiceSettings {
@@ -67,6 +75,9 @@ impl Default for VoiceSettings {
             pause_ms: 700,
             agent: true,
             agent_model: "haiku".into(),
+            browser: true,
+            browser_model: "sonnet".into(),
+            about_me: String::new(),
         }
     }
 }
@@ -97,18 +108,21 @@ impl VoiceSettings {
             return Err("the pause must be between 0.3 and 2 seconds".into());
         }
         self.agent_model = self.agent_model.trim().to_string();
-        let model_ok = !self.agent_model.is_empty()
-            && self.agent_model.len() <= 100
-            && !self.agent_model.starts_with('-')
-            && self
-                .agent_model
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "-_.[]/".contains(c));
-        if !model_ok {
-            return Err(format!(
-                "`{}` does not look like a model name",
-                self.agent_model
-            ));
+        self.browser_model = self.browser_model.trim().to_string();
+        for model in [&self.agent_model, &self.browser_model] {
+            let model_ok = !model.is_empty()
+                && model.len() <= 100
+                && !model.starts_with('-')
+                && model
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.[]/".contains(c));
+            if !model_ok {
+                return Err(format!("`{model}` does not look like a model name"));
+            }
+        }
+        self.about_me = self.about_me.trim().to_string();
+        if self.about_me.chars().count() > 4000 {
+            return Err("keep “About you” under 4,000 characters".into());
         }
         Ok(self)
     }
@@ -139,8 +153,15 @@ pub struct Voice {
     pending: std::sync::Mutex<Option<Pending>>,
     /// Installed apps, and when they were last looked up.
     apps: std::sync::Mutex<Option<(Instant, Vec<String>)>>,
-    /// The voice agent, started on first use and kept for follow-ups.
+    /// The voice agent, started on first use and kept for follow-ups, with what it was
+    /// started with.
     agent: tokio::sync::Mutex<Option<(String, voice::agent::VoiceAgent)>>,
+    /// The voice browser: its own Chrome window.
+    pub browser: Arc<BrowserClient>,
+    /// The browser agent, kept between tasks so "now the second one" makes sense.
+    browse_agent: Arc<tokio::sync::Mutex<Option<(String, voice::agent::VoiceAgent)>>>,
+    /// The browser task running in the background, and what it is.
+    browse_job: std::sync::Mutex<Option<(String, tauri::async_runtime::JoinHandle<()>)>>,
 }
 
 impl Voice {
@@ -157,7 +178,27 @@ impl Voice {
             pending: std::sync::Mutex::new(None),
             apps: std::sync::Mutex::new(None),
             agent: tokio::sync::Mutex::new(None),
+            browser: BrowserClient::new(BrowserConfig::new(
+                BrowserConfig::bundled_script(),
+                harness_core::extensions::app_data_dir()
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join("voice-browser"),
+            )),
+            browse_agent: Arc::new(tokio::sync::Mutex::new(None)),
+            browse_job: std::sync::Mutex::new(None),
         }
+    }
+
+    /// The browser task running now, if any.
+    fn browsing(&self) -> Option<String> {
+        let mut job = self.browse_job.lock().expect("not poisoned");
+        if job
+            .as_ref()
+            .is_some_and(|(_, handle)| handle.inner().is_finished())
+        {
+            *job = None;
+        }
+        job.as_ref().map(|(task, _)| task.clone())
     }
 
     /// The apps "open …" can mean, looked up again every few minutes so a new install is
@@ -400,7 +441,7 @@ pub fn create_hud(app: &AppHandle) -> tauri::Result<()> {
     }
     tauri::WebviewWindowBuilder::new(app, HUD_LABEL, tauri::WebviewUrl::App("index.html".into()))
         .title("Harness voice")
-        .inner_size(460.0, 220.0)
+        .inner_size(460.0, 280.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
@@ -428,6 +469,25 @@ fn show_hud(app: &AppHandle) {
         let _ = window.set_position(tauri::PhysicalPosition { x, y });
     }
     let _ = window.show();
+}
+
+/// The Stop button while the browser is working.
+#[tauri::command]
+pub async fn voice_stop_browsing(app: AppHandle) -> bool {
+    stop_browsing(&app).await
+}
+
+/// Show the voice browser's window, for the person to sign in to the sites it should use.
+#[tauri::command]
+pub async fn voice_open_browser(app: AppHandle) -> Result<(), String> {
+    let voice = app.state::<Voice>();
+    voice.browser.check_installed()?;
+    voice
+        .browser
+        .open("https://accounts.google.com")
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -512,7 +572,7 @@ fn warm(app: &AppHandle) {
     if settings.agent {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            if let Err(error) = ensure_agent(&app, &settings.agent_model).await {
+            if let Err(error) = ensure_agent(&app, &settings).await {
                 tracing::warn!("voice agent did not start: {error}");
             }
         });
@@ -713,6 +773,152 @@ impl voice::agent::Hands for AppHands {
     fn step(&self, line: String) {
         let _ = self.app.emit("voice://step", line);
     }
+
+    fn browse(
+        &self,
+        task: String,
+    ) -> futures_util::future::BoxFuture<'static, Result<String, String>> {
+        let app = self.app.clone();
+        Box::pin(async move { start_browsing(&app, task) })
+    }
+
+    fn lookup_email(
+        &self,
+        name: String,
+    ) -> futures_util::future::BoxFuture<'static, Result<Vec<(String, String)>, String>> {
+        Box::pin(async move {
+            computer::lookup_emails(&name)
+                .await
+                .map_err(|e| format!("{e:#}"))
+        })
+    }
+}
+
+#[derive(Clone, Serialize)]
+struct Browsing {
+    /// The task running now; `None` when it has finished or stopped.
+    task: Option<String>,
+}
+
+/// Start a browser task in the background. It reports on the voice bar as it goes and
+/// says what it found when done. One at a time.
+fn start_browsing(app: &AppHandle, task: String) -> Result<String, String> {
+    let settings = settings::load().voice;
+    if !settings.browser {
+        return Err("browsing is turned off in Settings › Voice".into());
+    }
+    let voice = app.state::<Voice>();
+    voice.browser.check_installed()?;
+    if let Some(running) = voice.browsing() {
+        return Err(format!(
+            "the browser is still working on “{running}”. Say “stop browsing” first, or wait for it."
+        ));
+    }
+    let job_app = app.clone();
+    let job_task = task.clone();
+    let handle = tauri::async_runtime::spawn(async move {
+        let app = job_app;
+        let _ = app.emit(
+            "voice://browsing",
+            Browsing {
+                task: Some(job_task.clone()),
+            },
+        );
+        let outcome = run_browse_task(&app, &job_task, &settings).await;
+        let (text, error) = match outcome {
+            Ok(text) => (text, None),
+            Err(error) => {
+                tracing::warn!("browser task failed: {error}");
+                (
+                    String::new(),
+                    Some(format!("The browser task failed: {error}")),
+                )
+            }
+        };
+        let voice = app.state::<Voice>();
+        let heard = Heard {
+            interpretation: Interpretation {
+                transcript: job_task,
+                outcome: Outcome::Reply {
+                    text: if text.is_empty() {
+                        "Stopped.".into()
+                    } else {
+                        text
+                    },
+                },
+                source: voice::Source::Agent,
+                confidence: None,
+                laya_ms: None,
+                reply: None,
+            },
+            pending: voice.pending(),
+            done: None,
+            error,
+            speak: settings.speak_replies,
+        };
+        // Finished first, so the bar may hide once the answer has been read.
+        let _ = app.emit("voice://browsing", Browsing { task: None });
+        show_hud(&app);
+        let _ = app.emit("voice://heard", heard);
+    });
+    *voice.browse_job.lock().expect("not poisoned") = Some((task, handle));
+    Ok("Started: the browser assistant is working on it in its own Chrome window and will report back. Say you've started on it.".into())
+}
+
+async fn run_browse_task(
+    app: &AppHandle,
+    task: &str,
+    settings: &VoiceSettings,
+) -> Result<String, String> {
+    let voice = app.state::<Voice>();
+    let slot_lock = Arc::clone(&voice.browse_agent);
+    let mut slot = slot_lock.lock().await;
+    let key = format!("{}\n{}", settings.browser_model, settings.about_me);
+    if slot.as_ref().is_some_and(|(k, _)| k != &key) {
+        if let Some((_, old)) = slot.take() {
+            old.shutdown().await;
+        }
+    }
+    if slot.is_none() {
+        let hands: Arc<dyn voice::agent::Hands> = Arc::new(AppHands { app: app.clone() });
+        let agent = voice::agent::VoiceAgent::start_browser(
+            hands,
+            Arc::clone(&voice.browser),
+            &settings.browser_model,
+            &agent_dir().join("browser"),
+            &settings.about_me,
+        )
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+        *slot = Some((key, agent));
+    }
+    let (_, agent) = slot.as_mut().expect("just set");
+    match agent.run_task(task, Duration::from_secs(15 * 60)).await {
+        Ok(reply) => Ok(reply.text),
+        Err(error) => {
+            // A stuck or dead agent is replaced next time.
+            if let Some((_, agent)) = slot.take() {
+                agent.shutdown().await;
+            }
+            Err(format!("{error:#}"))
+        }
+    }
+}
+
+/// Stop the browser task: its agent is shut down (the next task starts a fresh one);
+/// the window stays open.
+async fn stop_browsing(app: &AppHandle) -> bool {
+    let voice = app.state::<Voice>();
+    let job = voice.browse_job.lock().expect("not poisoned").take();
+    let Some((_, handle)) = job else {
+        return false;
+    };
+    handle.abort();
+    if let Some((_, agent)) = voice.browse_agent.lock().await.take() {
+        agent.shutdown().await;
+    }
+    let _ = app.emit("voice://browsing", Browsing { task: None });
+    true
 }
 
 /// The folder the voice agent runs in: its own, so no project's instructions reach it.
@@ -723,20 +929,26 @@ fn agent_dir() -> PathBuf {
 }
 
 /// Start the voice agent if it is not running, or is running another model.
-async fn ensure_agent(app: &AppHandle, model: &str) -> Result<(), String> {
+async fn ensure_agent(app: &AppHandle, settings: &VoiceSettings) -> Result<(), String> {
     let voice = app.state::<Voice>();
     let mut slot = voice.agent.lock().await;
-    if slot.as_ref().is_some_and(|(m, _)| m == model) {
+    let key = format!("{}\n{}", settings.agent_model, settings.about_me);
+    if slot.as_ref().is_some_and(|(k, _)| k == &key) {
         return Ok(());
     }
     if let Some((_, old)) = slot.take() {
         old.shutdown().await;
     }
     let hands: Arc<dyn voice::agent::Hands> = Arc::new(AppHands { app: app.clone() });
-    let agent = voice::agent::VoiceAgent::start(hands, model, &agent_dir())
-        .await
-        .map_err(|e| format!("{e:#}"))?;
-    *slot = Some((model.to_string(), agent));
+    let agent = voice::agent::VoiceAgent::start(
+        hands,
+        &settings.agent_model,
+        &agent_dir(),
+        &settings.about_me,
+    )
+    .await
+    .map_err(|e| format!("{e:#}"))?;
+    *slot = Some((key, agent));
     Ok(())
 }
 
@@ -746,9 +958,9 @@ async fn ask_agent(
     app: &AppHandle,
     text: &str,
     snapshot: &voice::Snapshot,
-    model: &str,
+    settings: &VoiceSettings,
 ) -> Option<Interpretation> {
-    if let Err(error) = ensure_agent(app, model).await {
+    if let Err(error) = ensure_agent(app, settings).await {
         tracing::warn!("voice agent unavailable: {error}");
         return None;
     }
@@ -797,7 +1009,7 @@ async fn hear_one(app: &AppHandle, text: &str) -> Heard {
         && voice::matcher::match_command(text, &snapshot, false).is_none()
         && !voice::matcher::normalize(text).is_empty();
     let from_agent = if for_agent {
-        ask_agent(app, text, &snapshot, &settings.agent_model).await
+        ask_agent(app, text, &snapshot, &settings).await
     } else {
         None
     };
@@ -901,6 +1113,29 @@ async fn execute(
                 .map_err(|e| format!("{e:#}"))?;
             Ok(computer::done_message(&opening))
         }
+        DraftEmail { .. } => {
+            let opening = computer::validate(action, project).map_err(|e| format!("{e:#}"))?;
+            computer::open(&opening)
+                .await
+                .map_err(|e| format!("{e:#}"))?;
+            Ok(Some(
+                "The draft is open in Gmail — check it and press Send.".into(),
+            ))
+        }
+        BrowserDo { step, describe } => {
+            let voice = app.state::<Voice>();
+            let result = voice
+                .browser
+                .run_step(step)
+                .await
+                .map_err(|e| format!("{e:#} — the page may have changed; ask again"))?;
+            Ok(Some(format!("{describe}: done, {result}.")))
+        }
+        StopBrowsing => Ok(Some(if stop_browsing(app).await {
+            "Stopped browsing.".into()
+        } else {
+            "Nothing was being browsed.".into()
+        })),
         // Answered in words; nothing to run.
         Status { .. } => Ok(None),
         // "Tell Claude to …" is put in the chat box too, never sent unseen.

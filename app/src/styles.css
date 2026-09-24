@@ -933,3 +933,4 @@ body.hud::before { display: none; }
 .voice-tried { margin: 0; font-size: 12px; }
 .hud-steps { list-style: none; margin: 4px 0 0; padding: 0; font-size: 12px; color: var(--muted); }
 .hud-steps li { overflow-wrap: anywhere; }
+.hud-browsing .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

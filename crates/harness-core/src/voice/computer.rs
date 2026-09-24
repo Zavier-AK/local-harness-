@@ -279,8 +279,84 @@ pub fn validate(action: &VoiceAction, project: Option<&Path>) -> Result<Opening>
                 args: vec!["set".into(), (*percent).min(100).to_string()],
             },
         }),
+        VoiceAction::DraftEmail { to, subject, body } => {
+            let to = to.trim();
+            if !to.is_empty() && !to.split(',').all(|a| looks_like_address(a.trim())) {
+                bail!("“{to}” is not an email address");
+            }
+            Ok(Opening::Url(gmail_draft(to, subject, body)))
+        }
         other => bail!("{other:?} is not a computer action"),
     }
+}
+
+fn looks_like_address(address: &str) -> bool {
+    let Some((user, domain)) = address.split_once('@') else {
+        return false;
+    };
+    !user.is_empty()
+        && domain.contains('.')
+        && !address.contains(char::is_whitespace)
+        && !address.contains(['<', '>', '"', '&', '?', '#'])
+}
+
+/// Gmail's compose window with everything filled in. It opens in the person's own
+/// browser, where they are signed in; they press Send.
+pub fn gmail_draft(to: &str, subject: &str, body: &str) -> String {
+    let mut url = "https://mail.google.com/mail/?view=cm&fs=1".to_string();
+    if !to.is_empty() {
+        url.push_str(&format!("&to={}", encode(to, false)));
+    }
+    url.push_str(&format!(
+        "&su={}&body={}",
+        encode(subject, false),
+        encode(body, false)
+    ));
+    url
+}
+
+/// Email addresses in the Mac's Contacts for a name, as (name, address).
+const CONTACT_EMAILS: &str = r#"on run argv
+    set q to item 1 of argv
+    set out to ""
+    tell application "Contacts"
+        set found to (every person whose name contains q)
+        repeat with p in found
+            repeat with e in (emails of p)
+                set out to out & (name of p) & tab & (value of e) & linefeed
+            end repeat
+        end repeat
+    end tell
+    return out
+end run"#;
+
+/// Look a name up in Contacts. macOS asks once for permission.
+pub async fn lookup_emails(name: &str) -> Result<Vec<(String, String)>> {
+    if !cfg!(target_os = "macos") {
+        bail!("looking up contacts works on macOS only");
+    }
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::process::Command::new("osascript")
+            .args(["-e", CONTACT_EMAILS, &arg(name)])
+            .output(),
+    )
+    .await
+    .context("Contacts took too long")??;
+    if !output.status.success() {
+        bail!(
+            "Contacts: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (name, address) = line.split_once('\t')?;
+            Some((name.trim().to_string(), address.trim().to_string()))
+        })
+        .take(8)
+        .collect())
 }
 
 /// What to say after it ran, when the action alone would not say it.
@@ -520,5 +596,38 @@ mod tests {
                 "apps by name are macOS-only"
             );
         }
+    }
+
+    #[test]
+    fn email_drafts_open_gmail_compose() {
+        let draft = VoiceAction::DraftEmail {
+            to: "sam@example.com".into(),
+            subject: "Running late".into(),
+            body: "Hi Sam,\n\nRunning ten minutes late.\n\nZ".into(),
+        };
+        let Opening::Url(url) = validate(&draft, None).unwrap() else {
+            panic!("not a url")
+        };
+        assert!(url.starts_with("https://mail.google.com/mail/?view=cm&fs=1&to=sam%40example.com&su=Running%20late&body=Hi%20Sam%2C%0A%0A"), "{url}");
+        let unknown = VoiceAction::DraftEmail {
+            to: String::new(),
+            subject: "Hi".into(),
+            body: "x".into(),
+        };
+        assert!(
+            !matches!(validate(&unknown, None).unwrap(), Opening::Url(ref u) if u.contains("&to="))
+        );
+        let name_only = VoiceAction::DraftEmail {
+            to: "Sam".into(),
+            subject: "Hi".into(),
+            body: "x".into(),
+        };
+        assert!(validate(&name_only, None).is_err());
+        let sneaky = VoiceAction::DraftEmail {
+            to: "a@b.com&bcc=c@d.com".into(),
+            subject: "Hi".into(),
+            body: "x".into(),
+        };
+        assert!(validate(&sneaky, None).is_err());
     }
 }

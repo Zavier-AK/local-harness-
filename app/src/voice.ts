@@ -72,8 +72,11 @@ export function dispatch(action: VoiceAction, on: VoiceHandlers): void {
 export function replyLine(heard: Heard): string | null {
   const { interpretation, pending, done, error } = heard;
   if (error) return error;
-  if (pending) return `${pending.describe}? Say yes to go ahead.`;
   const outcome = interpretation.outcome;
+  // The agent's own answer says what it found and that a yes is waiting; the buttons
+  // name the step.
+  if (pending && interpretation.source === "agent" && outcome.outcome === "reply") return outcome.text;
+  if (pending) return `${pending.describe}? Say yes to go ahead.`;
   switch (outcome.outcome) {
     case "clarify":
       return outcome.question;
