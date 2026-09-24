@@ -25,11 +25,17 @@ pub struct Availability {
 
 impl Availability {
     fn yes() -> Self {
-        Self { available: true, reason: None }
+        Self {
+            available: true,
+            reason: None,
+        }
     }
 
     fn no(reason: impl Into<String>) -> Self {
-        Self { available: false, reason: Some(reason.into()) }
+        Self {
+            available: false,
+            reason: Some(reason.into()),
+        }
     }
 }
 
@@ -83,7 +89,9 @@ pub async fn probe_in_path(role: &Role, path_value: &OsStr) -> Availability {
             if binary_in_path("claude", path_value) {
                 Availability::yes()
             } else {
-                Availability::no("the `claude` CLI is not on PATH — install Claude Code and run `claude /login`")
+                Availability::no(
+                    "the `claude` CLI is not on PATH — install Claude Code and run `claude /login`",
+                )
             }
         }
 
@@ -292,7 +300,9 @@ mod tests {
         write_executable(dir.path(), "codex");
 
         let mut remote = role(Provider::Codex);
-        remote.provider_opts.insert("model_provider".into(), "bionic".into());
+        remote
+            .provider_opts
+            .insert("model_provider".into(), "bionic".into());
         remote.base_url = Some("http://127.0.0.1:1/v1".into());
 
         let result = probe_in_path(&remote, &path_of(dir.path())).await;
@@ -308,7 +318,9 @@ mod tests {
         let mut custom = role(Provider::Codex);
         // Its endpoint lives in the user's Codex config, which we cannot read. Assuming
         // localhost here would mark a working remote model server as broken.
-        custom.provider_opts.insert("model_provider".into(), "bionic".into());
+        custom
+            .provider_opts
+            .insert("model_provider".into(), "bionic".into());
 
         assert!(probe_in_path(&custom, &path_of(dir.path())).await.available);
     }
@@ -350,7 +362,11 @@ mod tests {
     #[tokio::test]
     async fn a_running_server_with_the_model_is_available() {
         let url = model_server(Some(&["qwen/qwen2.5-coder-14b", "llama3:latest"])).await;
-        assert!(probe(&local_role(url.clone(), "qwen/qwen2.5-coder-14b")).await.available);
+        assert!(
+            probe(&local_role(url.clone(), "qwen/qwen2.5-coder-14b"))
+                .await
+                .available
+        );
         // Ollama lists the implicit tag.
         assert!(probe(&local_role(url, "llama3")).await.available);
     }
@@ -362,7 +378,10 @@ mod tests {
         let result = probe(&local_role(url, "gemma4:12b")).await;
         assert!(!result.available);
         let reason = result.reason.unwrap();
-        assert!(reason.contains("gemma4:12b") && reason.contains("Change fleet"), "{reason}");
+        assert!(
+            reason.contains("gemma4:12b") && reason.contains("Change fleet"),
+            "{reason}"
+        );
     }
 
     #[tokio::test]

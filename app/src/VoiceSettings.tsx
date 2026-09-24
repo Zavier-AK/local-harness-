@@ -177,6 +177,24 @@ export default function VoiceSettingsPanel({ value, onChange }: Props) {
         download, and about 2 GB of memory while loaded.
       </p>
 
+      <label className="toggle-row">
+        <input type="checkbox" checked={value.agent} onChange={(e) => set({ agent: e.target.checked })} />
+        <span>Voice agent for anything that isn't an exact command</span>
+      </label>
+      <p className="muted hint">
+        A small Claude that works out the steps and does them: "open Notes and jot down milk, eggs and bread, then
+        remind me at six to go shopping". It can only use the same safe actions as voice, asks before anything
+        risky, and puts requests about code in the chat box. It runs on your Claude subscription (a few seconds and
+        a little usage per request); plain commands like "pause" never use it.
+      </p>
+      {value.agent && (
+        <label className="field">
+          <span>Agent model</span>
+          <input value={value.agent_model} onChange={(e) => set({ agent_model: e.target.value })} spellCheck={false} />
+          <span className="muted">haiku is fast and cheap</span>
+        </label>
+      )}
+
       <label className="field">
         <span>Confidence</span>
         <input

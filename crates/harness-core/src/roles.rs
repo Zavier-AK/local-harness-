@@ -126,7 +126,10 @@ impl Role {
     /// enables tools by default can't sneak one in.
     pub fn denied_tools(&self) -> Vec<String> {
         if self.isolation == Isolation::Readonly {
-            READONLY_DENIED_TOOLS.iter().map(|s| s.to_string()).collect()
+            READONLY_DENIED_TOOLS
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
         } else {
             Vec::new()
         }
@@ -167,7 +170,11 @@ fn default_setup_timeout() -> u64 {
 
 impl Default for WorktreeSetup {
     fn default() -> Self {
-        Self { copy: Vec::new(), setup: Vec::new(), timeout_secs: default_setup_timeout() }
+        Self {
+            copy: Vec::new(),
+            setup: Vec::new(),
+            timeout_secs: default_setup_timeout(),
+        }
     }
 }
 
@@ -183,7 +190,10 @@ impl WorktreeSetup {
                 bail!("worktree.copy entry `{entry}` must be relative to the project root");
             }
             // A `..` entry would pull files from outside the project into every worktree.
-            if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            if path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
                 bail!("worktree.copy entry `{entry}` may not escape the project root with `..`");
             }
         }
@@ -266,9 +276,12 @@ impl RoleRegistry {
     }
 
     pub fn get(&self, name: &str) -> Result<&Role> {
-        self.roles
-            .get(name)
-            .with_context(|| format!("no role named `{name}`; known roles: {}", self.role_names().join(", ")))
+        self.roles.get(name).with_context(|| {
+            format!(
+                "no role named `{name}`; known roles: {}",
+                self.role_names().join(", ")
+            )
+        })
     }
 
     pub fn role_names(&self) -> Vec<String> {
@@ -453,7 +466,10 @@ isolation = "none"
             "#,
         )
         .unwrap_err();
-        assert!(looped.to_string().contains("falls back to itself"), "{looped}");
+        assert!(
+            looped.to_string().contains("falls back to itself"),
+            "{looped}"
+        );
     }
 
     #[test]
@@ -475,7 +491,10 @@ isolation = "worktree"
 
         assert_eq!(registry.worktree.copy, [".env", ".env.local"]);
         assert_eq!(registry.worktree.setup, ["npm ci"]);
-        assert_eq!(registry.worktree.timeout_secs, 600, "should fall back to the default");
+        assert_eq!(
+            registry.worktree.timeout_secs, 600,
+            "should fall back to the default"
+        );
     }
 
     #[test]
@@ -521,9 +540,8 @@ isolation = "worktree"
         let bare = RoleRegistry::from_toml(SAMPLE).unwrap();
         assert_eq!(bare.verify, VerifyConfig::default());
 
-        let with = format!(
-            "{SAMPLE}\n[verify]\ncommands = [\"cargo test\"]\nreviewer = \"tester\"\n"
-        );
+        let with =
+            format!("{SAMPLE}\n[verify]\ncommands = [\"cargo test\"]\nreviewer = \"tester\"\n");
         let registry = RoleRegistry::from_toml(&with).unwrap();
         assert_eq!(registry.verify.commands, ["cargo test"]);
         assert_eq!(registry.verify.reviewer.as_deref(), Some("tester"));
@@ -533,7 +551,10 @@ isolation = "worktree"
     #[test]
     fn a_reviewer_that_could_write_is_refused() {
         let unknown = format!("{SAMPLE}\n[verify]\nreviewer = \"nobody\"\n");
-        assert!(RoleRegistry::from_toml(&unknown).unwrap_err().to_string().contains("not defined"));
+        assert!(RoleRegistry::from_toml(&unknown)
+            .unwrap_err()
+            .to_string()
+            .contains("not defined"));
 
         let writer = format!("{SAMPLE}\n[verify]\nescalate_to = \"builder\"\n");
         let err = RoleRegistry::from_toml(&writer).unwrap_err().to_string();

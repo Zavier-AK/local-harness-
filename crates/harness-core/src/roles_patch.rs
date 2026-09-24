@@ -51,12 +51,16 @@ pub fn apply_role_patches(source: &str, patches: &[RoleModelPatch]) -> Result<St
             let rendered = patch
                 .provider_opts
                 .iter()
-                .map(|(key, value)| {
-                    format!("{key} = {}", toml::Value::String(value.clone()))
-                })
+                .map(|(key, value)| format!("{key} = {}", toml::Value::String(value.clone())))
                 .collect::<Vec<_>>()
                 .join(", ");
-            set_raw_field(&mut lines, start, end, "provider_opts", &format!("{{ {rendered} }}"))?;
+            set_raw_field(
+                &mut lines,
+                start,
+                end,
+                "provider_opts",
+                &format!("{{ {rendered} }}"),
+            )?;
         }
     }
 
@@ -108,7 +112,10 @@ pub fn apply_tools_patch(source: &str, role_name: &str, tools: &[String]) -> Res
 
     let end = table_end(&lines, start);
     let encoded = toml::Value::Array(
-        tools.iter().map(|tool| toml::Value::String(tool.clone())).collect(),
+        tools
+            .iter()
+            .map(|tool| toml::Value::String(tool.clone()))
+            .collect(),
     )
     .to_string();
     set_raw_field(&mut lines, start, end, "tools", &encoded)?;
@@ -124,14 +131,18 @@ pub fn apply_tools_patch(source: &str, role_name: &str, tools: &[String]) -> Res
 fn check_tool_rule(tool: &str) -> Result<()> {
     let name = tool.split('(').next().unwrap_or_default();
     let valid_name = !name.is_empty()
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
     let valid_scope = match tool.find('(') {
         None => true,
         Some(open) => tool.ends_with(')') && open + 1 < tool.len() - 1,
     };
     let dangerous = tool.chars().any(|c| c == ',' || c == '"' || c.is_control());
     if !valid_name || !valid_scope || dangerous {
-        bail!("`{tool}` is not a tool rule — use a name like `Read`, `Bash(git *)` or `mcp__server`");
+        bail!(
+            "`{tool}` is not a tool rule — use a name like `Read`, `Bash(git *)` or `mcp__server`"
+        );
     }
     Ok(())
 }
@@ -383,13 +394,23 @@ provider_opts = { model_provider = "lmstudio" }
     #[test]
     fn a_tools_edit_rewrites_the_list_and_keeps_the_comments() {
         let source = "# fleet\n[roles.builder]\nprovider = \"claude\"\ntools = [\"Read\"] # keep me\nmax_turns = 5\n\n[roles.other]\nprovider = \"mock\"\n";
-        let tools = vec!["Read".to_string(), "Bash(git *)".to_string(), "mcp__github".to_string()];
+        let tools = vec![
+            "Read".to_string(),
+            "Bash(git *)".to_string(),
+            "mcp__github".to_string(),
+        ];
         let patched = apply_tools_patch(source, "builder", &tools).unwrap();
-        assert!(patched.contains("tools = [\"Read\", \"Bash(git *)\", \"mcp__github\"] # keep me"), "{patched}");
+        assert!(
+            patched.contains("tools = [\"Read\", \"Bash(git *)\", \"mcp__github\"] # keep me"),
+            "{patched}"
+        );
         assert!(patched.starts_with("# fleet\n"));
         let registry = RoleRegistry::from_toml(&patched).unwrap();
         assert_eq!(registry.roles["builder"].tools, tools);
-        assert!(registry.roles["other"].tools.is_empty(), "other roles untouched");
+        assert!(
+            registry.roles["other"].tools.is_empty(),
+            "other roles untouched"
+        );
     }
 
     #[test]
@@ -406,14 +427,28 @@ provider_opts = { model_provider = "lmstudio" }
     fn tools_are_added_to_a_role_that_had_none() {
         let source = "[roles.builder]\nprovider = \"claude\"\n";
         let patched = apply_tools_patch(source, "builder", &["Read".to_string()]).unwrap();
-        assert_eq!(RoleRegistry::from_toml(&patched).unwrap().roles["builder"].tools, ["Read"]);
+        assert_eq!(
+            RoleRegistry::from_toml(&patched).unwrap().roles["builder"].tools,
+            ["Read"]
+        );
     }
 
     #[test]
     fn a_tool_rule_that_could_escape_is_refused() {
         let source = "[roles.builder]\nprovider = \"claude\"\n";
-        for bad in ["", "Read,Write", "Bash(", "Bash()", "a\"b", "Read\nWrite", "has space"] {
-            assert!(apply_tools_patch(source, "builder", &[bad.to_string()]).is_err(), "{bad:?}");
+        for bad in [
+            "",
+            "Read,Write",
+            "Bash(",
+            "Bash()",
+            "a\"b",
+            "Read\nWrite",
+            "has space",
+        ] {
+            assert!(
+                apply_tools_patch(source, "builder", &[bad.to_string()]).is_err(),
+                "{bad:?}"
+            );
         }
     }
 }

@@ -71,7 +71,11 @@ async fn lock_worktree_admin(repo: &Path) -> Result<std::fs::File> {
     let common = git(repo, &["rev-parse", "--git-common-dir"]).await?;
     let common = {
         let path = PathBuf::from(&common);
-        if path.is_absolute() { path } else { repo.join(path) }
+        if path.is_absolute() {
+            path
+        } else {
+            repo.join(path)
+        }
     };
     let path = common.join("harness-worktree.lock");
     tokio::task::spawn_blocking(move || -> Result<std::fs::File> {
@@ -159,7 +163,10 @@ impl Workspace {
         }
 
         git(&self.cwd, &["add", "-A"]).await?;
-        if git(&self.cwd, &["diff", "--cached", "--name-only"]).await?.is_empty() {
+        if git(&self.cwd, &["diff", "--cached", "--name-only"])
+            .await?
+            .is_empty()
+        {
             return Ok(false);
         }
 
@@ -220,7 +227,10 @@ impl Workspaces {
 
     /// Same, with the project's worktree bootstrap attached.
     pub fn with_setup(project_root: impl Into<PathBuf>, setup: WorktreeSetup) -> Self {
-        Self { setup, ..Self::new(project_root) }
+        Self {
+            setup,
+            ..Self::new(project_root)
+        }
     }
 
     pub fn project_root(&self) -> &Path {
@@ -258,7 +268,11 @@ impl Workspaces {
         let git_dir = git(&self.project_root, &["rev-parse", "--git-common-dir"]).await?;
         let git_dir = {
             let path = PathBuf::from(&git_dir);
-            if path.is_absolute() { path } else { self.project_root.join(path) }
+            if path.is_absolute() {
+                path
+            } else {
+                self.project_root.join(path)
+            }
         };
 
         let exclude = git_dir.join("info").join("exclude");
@@ -266,7 +280,9 @@ impl Workspaces {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let current = tokio::fs::read_to_string(&exclude).await.unwrap_or_default();
+        let current = tokio::fs::read_to_string(&exclude)
+            .await
+            .unwrap_or_default();
         if current.lines().any(|line| line.trim() == HARNESS_EXCLUDE) {
             return Ok(());
         }
@@ -308,18 +324,16 @@ impl Workspaces {
                 .current_dir(cwd)
                 .output();
 
-            let output = tokio::time::timeout(
-                std::time::Duration::from_secs(self.setup.timeout_secs),
-                run,
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "worktree setup `{command}` exceeded {}s",
-                    self.setup.timeout_secs
-                )
-            })?
-            .with_context(|| format!("running worktree setup `{command}`"))?;
+            let output =
+                tokio::time::timeout(std::time::Duration::from_secs(self.setup.timeout_secs), run)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "worktree setup `{command}` exceeded {}s",
+                            self.setup.timeout_secs
+                        )
+                    })?
+                    .with_context(|| format!("running worktree setup `{command}`"))?;
 
             if !output.status.success() {
                 bail!(
@@ -390,7 +404,14 @@ impl Workspaces {
                     let _file_lock = lock_worktree_admin(&self.project_root).await?;
                     git(
                         &self.project_root,
-                        &["worktree", "add", "-b", &branch, &path.to_string_lossy(), base],
+                        &[
+                            "worktree",
+                            "add",
+                            "-b",
+                            &branch,
+                            &path.to_string_lossy(),
+                            base,
+                        ],
                     )
                     .await
                     .context("creating the worker's worktree")?;
@@ -451,7 +472,13 @@ impl Workspaces {
             }
             git(
                 &self.project_root,
-                &["worktree", "add", "--detach", &path.to_string_lossy(), branch],
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    &path.to_string_lossy(),
+                    branch,
+                ],
             )
             .await
             .with_context(|| format!("checking out {branch} to verify it"))?;
@@ -509,7 +536,11 @@ impl Workspaces {
             });
         }
 
-        Ok(Patch { text, truncated: false, total_lines: total })
+        Ok(Patch {
+            text,
+            truncated: false,
+            total_lines: total,
+        })
     }
 
     /// Land a reviewed branch on the current checkout.
@@ -523,7 +554,13 @@ impl Workspaces {
 
         if let Err(err) = git(
             &self.project_root,
-            &["merge", "--no-ff", "-m", &format!("harness: merge {branch}"), branch],
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                &format!("harness: merge {branch}"),
+                branch,
+            ],
         )
         .await
         {
@@ -542,12 +579,18 @@ impl Workspaces {
         if !commit.chars().all(|c| c.is_ascii_hexdigit()) || commit.len() < 7 {
             bail!("refusing to revert `{commit}`: not a commit id");
         }
-        git(&self.project_root, &["merge-base", "--is-ancestor", commit, "HEAD"])
-            .await
-            .with_context(|| format!("{commit} is not in the current branch's history"))?;
-        git(&self.project_root, &["revert", "-m", "1", "--no-edit", commit])
-            .await
-            .context("reverting the merge")?;
+        git(
+            &self.project_root,
+            &["merge-base", "--is-ancestor", commit, "HEAD"],
+        )
+        .await
+        .with_context(|| format!("{commit} is not in the current branch's history"))?;
+        git(
+            &self.project_root,
+            &["revert", "-m", "1", "--no-edit", commit],
+        )
+        .await
+        .context("reverting the merge")?;
         Ok(())
     }
 
@@ -563,9 +606,12 @@ impl Workspaces {
     pub async fn advance_branch(&self, branch: &str, to: &str) -> Result<()> {
         harness_branch(branch)?;
         harness_branch(to)?;
-        git(&self.project_root, &["merge-base", "--is-ancestor", branch, to])
-            .await
-            .with_context(|| format!("{to} does not build on {branch}"))?;
+        git(
+            &self.project_root,
+            &["merge-base", "--is-ancestor", branch, to],
+        )
+        .await
+        .with_context(|| format!("{to} does not build on {branch}"))?;
         git(&self.project_root, &["branch", "-f", branch, to]).await?;
         Ok(())
     }
@@ -579,8 +625,11 @@ impl Workspaces {
     /// What a branch changes relative to where it left the current checkout.
     pub async fn branch_diffstat(&self, branch: &str) -> Result<DiffStat> {
         harness_branch(branch)?;
-        let numstat =
-            git(&self.project_root, &["diff", "--numstat", &format!("HEAD...{branch}")]).await?;
+        let numstat = git(
+            &self.project_root,
+            &["diff", "--numstat", &format!("HEAD...{branch}")],
+        )
+        .await?;
         let mut stat = DiffStat::default();
         for line in numstat.lines().filter(|l| !l.trim().is_empty()) {
             let mut fields = line.split('\t');
@@ -614,9 +663,15 @@ mod tests {
         let root = dir.path().to_path_buf();
 
         git(&root, &["init", "-q", "-b", "main"]).await.unwrap();
-        git(&root, &["config", "user.email", "harness@test"]).await.unwrap();
-        git(&root, &["config", "user.name", "Harness Test"]).await.unwrap();
-        tokio::fs::write(root.join("README.md"), "base\n").await.unwrap();
+        git(&root, &["config", "user.email", "harness@test"])
+            .await
+            .unwrap();
+        git(&root, &["config", "user.name", "Harness Test"])
+            .await
+            .unwrap();
+        tokio::fs::write(root.join("README.md"), "base\n")
+            .await
+            .unwrap();
         git(&root, &["add", "-A"]).await.unwrap();
         git(&root, &["commit", "-q", "-m", "init"]).await.unwrap();
 
@@ -641,12 +696,22 @@ mod tests {
         let (dir, workspaces) = scratch_repo_with(setup).await;
 
         // Gitignored, so `git worktree add` will not carry it across on its own.
-        tokio::fs::write(dir.path().join(".env"), "SECRET=1\n").await.unwrap();
+        tokio::fs::write(dir.path().join(".env"), "SECRET=1\n")
+            .await
+            .unwrap();
 
-        let workspace = workspaces.prepare("w-boot", Isolation::Worktree).await.unwrap();
+        let workspace = workspaces
+            .prepare("w-boot", Isolation::Worktree)
+            .await
+            .unwrap();
 
-        let env = tokio::fs::read_to_string(workspace.cwd.join(".env")).await.unwrap();
-        assert_eq!(env, "SECRET=1\n", "declared file should be copied into the worktree");
+        let env = tokio::fs::read_to_string(workspace.cwd.join(".env"))
+            .await
+            .unwrap();
+        assert_eq!(
+            env, "SECRET=1\n",
+            "declared file should be copied into the worktree"
+        );
         assert!(
             workspace.cwd.join("deps.txt").exists(),
             "setup commands should run inside the worktree"
@@ -655,9 +720,16 @@ mod tests {
         assert!(!workspace.cwd.join("missing.txt").exists());
 
         // Copied, not symlinked: editing it in the worktree must not touch the original.
-        tokio::fs::write(workspace.cwd.join(".env"), "SECRET=2\n").await.unwrap();
-        let original = tokio::fs::read_to_string(dir.path().join(".env")).await.unwrap();
-        assert_eq!(original, "SECRET=1\n", "the project's own .env must be untouched");
+        tokio::fs::write(workspace.cwd.join(".env"), "SECRET=2\n")
+            .await
+            .unwrap();
+        let original = tokio::fs::read_to_string(dir.path().join(".env"))
+            .await
+            .unwrap();
+        assert_eq!(
+            original, "SECRET=1\n",
+            "the project's own .env must be untouched"
+        );
     }
 
     #[tokio::test]
@@ -681,7 +753,10 @@ mod tests {
             "the worktree should have been torn down"
         );
         let listed = git(dir.path(), &["worktree", "list"]).await.unwrap();
-        assert!(!listed.contains("w-fail"), "git should not still track it: {listed}");
+        assert!(
+            !listed.contains("w-fail"),
+            "git should not still track it: {listed}"
+        );
     }
 
     #[tokio::test]
@@ -690,7 +765,10 @@ mod tests {
         assert!(WorktreeSetup::default().is_empty());
 
         // The default path must stay exactly as it was before bootstrapping existed.
-        let workspace = workspaces.prepare("w-plain", Isolation::Worktree).await.unwrap();
+        let workspace = workspaces
+            .prepare("w-plain", Isolation::Worktree)
+            .await
+            .unwrap();
         assert!(workspace.cwd.join("README.md").exists());
     }
 
@@ -711,20 +789,31 @@ mod tests {
         );
 
         // The point of the rule: a worker's worktree must not show up as untracked.
-        workspaces.prepare("w-hidden", Isolation::Worktree).await.unwrap();
+        workspaces
+            .prepare("w-hidden", Isolation::Worktree)
+            .await
+            .unwrap();
         let status = git(dir.path(), &["status", "--porcelain"]).await.unwrap();
-        assert!(status.is_empty(), "project should still look clean, got: {status}");
+        assert!(
+            status.is_empty(),
+            "project should still look clean, got: {status}"
+        );
     }
 
     #[tokio::test]
     async fn nothing_but_the_workers_own_changes_reaches_its_branch() {
         let (_dir, workspaces) = scratch_repo().await;
-        let workspace = workspaces.prepare("w-clean", Isolation::Worktree).await.unwrap();
+        let workspace = workspaces
+            .prepare("w-clean", Isolation::Worktree)
+            .await
+            .unwrap();
 
         // Skills reach workers as a plugin now, so a fresh worktree is exactly the
         // checkout and the diff is exactly the work.
         assert!(!workspace.cwd.join(".claude").exists());
-        tokio::fs::write(workspace.cwd.join("feature.txt"), "real work\n").await.unwrap();
+        tokio::fs::write(workspace.cwd.join("feature.txt"), "real work\n")
+            .await
+            .unwrap();
         let stat = workspace.diff().await.unwrap();
         assert_eq!(stat.files, ["feature.txt"]);
     }
@@ -732,8 +821,13 @@ mod tests {
     #[tokio::test]
     async fn a_branch_can_be_checked_out_to_verify_and_left_as_it_was() {
         let (dir, workspaces) = scratch_repo().await;
-        let worker = workspaces.prepare("w-v", Isolation::Worktree).await.unwrap();
-        tokio::fs::write(worker.cwd.join("feature.txt"), "work\n").await.unwrap();
+        let worker = workspaces
+            .prepare("w-v", Isolation::Worktree)
+            .await
+            .unwrap();
+        tokio::fs::write(worker.cwd.join("feature.txt"), "work\n")
+            .await
+            .unwrap();
         worker.commit("work").await.unwrap();
         let branch = worker.branch.clone().unwrap();
         worker.release().await.unwrap();
@@ -743,7 +837,9 @@ mod tests {
             let checkout = workspaces.checkout_branch("w-v", &branch).await.unwrap();
             assert!(checkout.cwd.starts_with(dir.path().join(VERIFY_DIR)));
             assert_eq!(
-                tokio::fs::read_to_string(checkout.cwd.join("feature.txt")).await.unwrap(),
+                tokio::fs::read_to_string(checkout.cwd.join("feature.txt"))
+                    .await
+                    .unwrap(),
                 "work\n",
                 "the checkout must hold exactly what would be merged"
             );
@@ -754,9 +850,14 @@ mod tests {
         }
 
         // The branch is untouched, and still mergeable.
-        let log = git(dir.path(), &["log", "--oneline", &branch]).await.unwrap();
+        let log = git(dir.path(), &["log", "--oneline", &branch])
+            .await
+            .unwrap();
         assert!(log.contains("work"));
-        assert!(workspaces.checkout_branch("w-x", "main").await.is_err(), "harness branches only");
+        assert!(
+            workspaces.checkout_branch("w-x", "main").await.is_err(),
+            "harness branches only"
+        );
     }
 
     /// Two engines — or an engine and a hook process — share nothing in memory, so only
@@ -778,23 +879,37 @@ mod tests {
 
         let mut old = Vec::new();
         for i in 0..12 {
-            old.push(second.prepare(&format!("w-old{i}"), Isolation::Worktree).await.unwrap());
+            old.push(
+                second
+                    .prepare(&format!("w-old{i}"), Isolation::Worktree)
+                    .await
+                    .unwrap(),
+            );
         }
 
         let mut tasks = Vec::new();
         for (i, workspace) in old.into_iter().enumerate() {
             let first = first.clone();
             tasks.push(tokio::spawn(async move {
-                first.prepare(&format!("w-new{i}"), Isolation::Worktree).await.map(|_| ())
+                first
+                    .prepare(&format!("w-new{i}"), Isolation::Worktree)
+                    .await
+                    .map(|_| ())
             }));
             tasks.push(tokio::spawn(async move { workspace.release().await }));
         }
         for task in tasks {
-            task.await.unwrap().expect("no worktree operation should corrupt another");
+            task.await
+                .unwrap()
+                .expect("no worktree operation should corrupt another");
         }
 
         let listed = git(dir.path(), &["worktree", "list"]).await.unwrap();
-        assert_eq!(listed.lines().count(), 13, "12 new worktrees plus the main checkout");
+        assert_eq!(
+            listed.lines().count(),
+            13,
+            "12 new worktrees plus the main checkout"
+        );
     }
 
     #[tokio::test]
@@ -803,13 +918,24 @@ mod tests {
         // As the hook would: same place, same branch naming.
         git(
             dir.path(),
-            &["worktree", "add", "-q", "-b", "harness/agent-x1", ".harness/worktrees/agent-x1", "HEAD"],
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "harness/agent-x1",
+                ".harness/worktrees/agent-x1",
+                "HEAD",
+            ],
         )
         .await
         .unwrap();
-        tokio::fs::write(dir.path().join(".harness/worktrees/agent-x1/made.txt"), "native\n")
-            .await
-            .unwrap();
+        tokio::fs::write(
+            dir.path().join(".harness/worktrees/agent-x1/made.txt"),
+            "native\n",
+        )
+        .await
+        .unwrap();
 
         let adopted = workspaces
             .adopt("agent-x1", Isolation::Worktree)
@@ -821,10 +947,14 @@ mod tests {
 
         // Worktree gone, branch and its commit kept for review.
         assert!(!dir.path().join(".harness/worktrees/agent-x1").exists());
-        let shown = git(dir.path(), &["show", "harness/agent-x1:made.txt"]).await.unwrap();
+        let shown = git(dir.path(), &["show", "harness/agent-x1:made.txt"])
+            .await
+            .unwrap();
         assert_eq!(shown, "native");
 
-        assert!(workspaces.adopt("agent-missing", Isolation::Worktree).is_none());
+        assert!(workspaces
+            .adopt("agent-missing", Isolation::Worktree)
+            .is_none());
     }
 
     #[tokio::test]
@@ -835,7 +965,9 @@ mod tests {
         assert_ne!(workspace.cwd, *ws.project_root());
         assert_eq!(workspace.branch.as_deref(), Some("harness/w1"));
 
-        tokio::fs::write(workspace.cwd.join("new.txt"), "from worker").await.unwrap();
+        tokio::fs::write(workspace.cwd.join("new.txt"), "from worker")
+            .await
+            .unwrap();
 
         // The project root is untouched while the worker runs.
         assert!(!dir.path().join("new.txt").exists());
@@ -854,11 +986,25 @@ mod tests {
         let b = ws.prepare("wb", Isolation::Worktree).await.unwrap();
 
         // Both write the same path; in shared mode this is the corruption case.
-        tokio::fs::write(a.cwd.join("same.txt"), "from a").await.unwrap();
-        tokio::fs::write(b.cwd.join("same.txt"), "from b").await.unwrap();
+        tokio::fs::write(a.cwd.join("same.txt"), "from a")
+            .await
+            .unwrap();
+        tokio::fs::write(b.cwd.join("same.txt"), "from b")
+            .await
+            .unwrap();
 
-        assert_eq!(tokio::fs::read_to_string(a.cwd.join("same.txt")).await.unwrap(), "from a");
-        assert_eq!(tokio::fs::read_to_string(b.cwd.join("same.txt")).await.unwrap(), "from b");
+        assert_eq!(
+            tokio::fs::read_to_string(a.cwd.join("same.txt"))
+                .await
+                .unwrap(),
+            "from a"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(b.cwd.join("same.txt"))
+                .await
+                .unwrap(),
+            "from b"
+        );
         assert_ne!(a.branch, b.branch);
     }
 
@@ -885,7 +1031,12 @@ mod tests {
 
         let mut branches = Vec::new();
         for handle in handles {
-            branches.push(handle.await.unwrap().expect("worktree lifecycle must not race"));
+            branches.push(
+                handle
+                    .await
+                    .unwrap()
+                    .expect("worktree lifecycle must not race"),
+            );
         }
 
         branches.sort();
@@ -905,7 +1056,10 @@ mod tests {
         let pending = tokio::spawn(async move { ws2.prepare("s2", Isolation::Shared).await });
 
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(!pending.is_finished(), "second shared worker should be blocked");
+        assert!(
+            !pending.is_finished(),
+            "second shared worker should be blocked"
+        );
 
         first.release().await.unwrap(); // drops the guard
         let second = tokio::time::timeout(Duration::from_secs(5), pending)
@@ -939,7 +1093,9 @@ mod tests {
         let workspace = ws.prepare("r1", Isolation::Readonly).await.unwrap();
 
         // A model that writes despite the tool denial hits the sandbox, not the repo.
-        tokio::fs::write(workspace.cwd.join("sneaky.txt"), "x").await.unwrap();
+        tokio::fs::write(workspace.cwd.join("sneaky.txt"), "x")
+            .await
+            .unwrap();
         assert!(!dir.path().join("sneaky.txt").exists());
 
         // ...and its branch is never offered for merge.
@@ -962,7 +1118,9 @@ mod tests {
         let (dir, ws) = scratch_repo().await;
         let workspace = ws.prepare("w1", Isolation::Worktree).await.unwrap();
 
-        tokio::fs::write(workspace.cwd.join("feature.txt"), "shipped\n").await.unwrap();
+        tokio::fs::write(workspace.cwd.join("feature.txt"), "shipped\n")
+            .await
+            .unwrap();
         assert!(workspace.commit("harness: worker w1").await.unwrap());
 
         let branch = workspace.mergeable_branch().unwrap().to_string();
@@ -973,7 +1131,9 @@ mod tests {
 
         ws.merge(&branch).await.unwrap();
         assert_eq!(
-            tokio::fs::read_to_string(dir.path().join("feature.txt")).await.unwrap(),
+            tokio::fs::read_to_string(dir.path().join("feature.txt"))
+                .await
+                .unwrap(),
             "shipped\n"
         );
     }
@@ -1000,7 +1160,9 @@ mod tests {
     async fn discard_drops_a_rejected_branch() {
         let (_dir, ws) = scratch_repo().await;
         let workspace = ws.prepare("w1", Isolation::Worktree).await.unwrap();
-        tokio::fs::write(workspace.cwd.join("bad.txt"), "no").await.unwrap();
+        tokio::fs::write(workspace.cwd.join("bad.txt"), "no")
+            .await
+            .unwrap();
         workspace.commit("harness: worker w1").await.unwrap();
 
         let branch = workspace.branch.clone().unwrap();
@@ -1016,7 +1178,9 @@ mod tests {
         let (_dir, ws) = scratch_repo().await;
         let workspace = ws.prepare("w1", Isolation::Worktree).await.unwrap();
 
-        tokio::fs::write(workspace.cwd.join("feature.txt"), "line one\nline two\n").await.unwrap();
+        tokio::fs::write(workspace.cwd.join("feature.txt"), "line one\nline two\n")
+            .await
+            .unwrap();
         workspace.commit("harness: worker w1").await.unwrap();
         let branch = workspace.branch.clone().unwrap();
         workspace.release().await.unwrap();
@@ -1033,15 +1197,21 @@ mod tests {
     async fn patch_ignores_commits_made_after_the_worker_started() {
         let (dir, ws) = scratch_repo().await;
         let workspace = ws.prepare("w1", Isolation::Worktree).await.unwrap();
-        tokio::fs::write(workspace.cwd.join("worker.txt"), "from worker\n").await.unwrap();
+        tokio::fs::write(workspace.cwd.join("worker.txt"), "from worker\n")
+            .await
+            .unwrap();
         workspace.commit("harness: worker w1").await.unwrap();
         let branch = workspace.branch.clone().unwrap();
         workspace.release().await.unwrap();
 
         // Meanwhile the user commits something unrelated on their own branch.
-        tokio::fs::write(dir.path().join("unrelated.txt"), "from user\n").await.unwrap();
+        tokio::fs::write(dir.path().join("unrelated.txt"), "from user\n")
+            .await
+            .unwrap();
         git(ws.project_root(), &["add", "-A"]).await.unwrap();
-        git(ws.project_root(), &["commit", "-q", "-m", "user work"]).await.unwrap();
+        git(ws.project_root(), &["commit", "-q", "-m", "user work"])
+            .await
+            .unwrap();
 
         // The review must show only the worker's change, not the user's.
         let patch = ws.patch(&branch, 500).await.unwrap();
@@ -1055,7 +1225,9 @@ mod tests {
         let workspace = ws.prepare("w1", Isolation::Worktree).await.unwrap();
 
         let big: String = (0..500).map(|n| format!("line {n}\n")).collect();
-        tokio::fs::write(workspace.cwd.join("big.txt"), big).await.unwrap();
+        tokio::fs::write(workspace.cwd.join("big.txt"), big)
+            .await
+            .unwrap();
         workspace.commit("harness: worker w1").await.unwrap();
         let branch = workspace.branch.clone().unwrap();
         workspace.release().await.unwrap();

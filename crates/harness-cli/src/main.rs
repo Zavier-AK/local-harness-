@@ -161,6 +161,14 @@ enum Command {
         /// The Laya helper script. Defaults to the one in this source tree.
         #[arg(long)]
         sidecar: Option<PathBuf>,
+
+        /// Hand the words to the voice agent (a real Claude, Haiku by default), which
+        /// plans the steps. Each step is printed, not done.
+        #[arg(long)]
+        agent: bool,
+
+        #[arg(long, default_value = "haiku")]
+        agent_model: String,
     },
 
     /// Token totals for the rolling window that governs a subscription.
@@ -473,6 +481,64 @@ async fn build_harness(cli: &Cli, events: harness_core::agents::EventSink) -> Re
     Ok(harness)
 }
 
+/// The voice agent against the example harness, with hands that only say what they would do.
+async fn voice_agent(words: Option<&str>, model: &str) -> Result<()> {
+    use futures::future::BoxFuture;
+    use harness_core::voice::{agent, eval as ev, Snapshot, VoiceAction};
+
+    struct DryRun;
+    impl agent::Hands for DryRun {
+        fn snapshot(&self) -> BoxFuture<'static, Snapshot> {
+            Box::pin(async { ev::fixture() })
+        }
+        fn perform(
+            &self,
+            action: VoiceAction,
+            confirm: bool,
+            describe: String,
+        ) -> BoxFuture<'static, Result<String, String>> {
+            let json = serde_json::to_string(&action).unwrap_or_default();
+            println!(
+                "  → {describe}{}   {json}",
+                if confirm {
+                    "  (asks for a yes first)"
+                } else {
+                    ""
+                }
+            );
+            Box::pin(async { Ok(String::new()) })
+        }
+        fn chat_box(&self, text: String) -> BoxFuture<'static, ()> {
+            println!("  → chat box: {text}");
+            Box::pin(async {})
+        }
+        fn step(&self, _: String) {}
+    }
+
+    let words = words.context("say something: `harness-cli voice --agent \"…\"`")?;
+    let cwd = std::env::temp_dir().join("harness-voice-agent");
+    let started = std::time::Instant::now();
+    let mut voice_agent =
+        agent::VoiceAgent::start(std::sync::Arc::new(DryRun), model, &cwd).await?;
+    eprintln!("  (agent up in {:.1}s)", started.elapsed().as_secs_f64());
+    let snapshot = ev::fixture();
+    for said in words.split(" || ") {
+        println!("\n“{said}”");
+        let reply = voice_agent
+            .ask(said, &snapshot, std::time::Duration::from_secs(90))
+            .await?;
+        println!(
+            "  says: {}\n  ({} steps, {:.1}s)",
+            reply.text,
+            reply.steps,
+            reply.ms as f64 / 1000.0
+        );
+    }
+    voice_agent.shutdown().await;
+    println!("\n(against the example harness in voice/phrases.toml; nothing was done)");
+    Ok(())
+}
+
 async fn voice(
     words: Option<&str>,
     eval: bool,
@@ -603,7 +669,19 @@ async fn main() -> Result<()> {
     }
 
     // Voice needs no project: it reads words against a fixed example harness.
-    if let Command::Voice { words, eval, laya, threshold, sidecar } = &cli.command {
+    if let Command::Voice {
+        words,
+        eval,
+        laya,
+        threshold,
+        sidecar,
+        agent,
+        agent_model,
+    } = &cli.command
+    {
+        if *agent {
+            return voice_agent(words.as_deref(), agent_model).await;
+        }
         return voice(words.as_deref(), *eval, *laya, *threshold, sidecar.clone()).await;
     }
 

@@ -124,7 +124,10 @@ mod tests {
 
     #[test]
     fn prompt_orders_brief_then_files_then_task() {
-        let prompt = compose_prompt(&spec_with(Some("You are a builder."), &["src/a.rs", "src/b.rs"]));
+        let prompt = compose_prompt(&spec_with(
+            Some("You are a builder."),
+            &["src/a.rs", "src/b.rs"],
+        ));
         assert_eq!(
             prompt,
             "You are a builder.\n\nRelevant files:\n- src/a.rs\n- src/b.rs\n\nDo the thing."

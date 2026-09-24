@@ -29,11 +29,14 @@ pub async fn run(spec: &WorkerSpec, sink: &EventSink) -> Result<RunOutcome> {
 
     let mut is_error = false;
 
-    let text = if let Some(command) = spec
-        .task
-        .find("MOCK-SH:")
-        .map(|at| spec.task[at + "MOCK-SH:".len()..].lines().next().unwrap_or_default().trim().to_string())
-    {
+    let text = if let Some(command) = spec.task.find("MOCK-SH:").map(|at| {
+        spec.task[at + "MOCK-SH:".len()..]
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }) {
         let output = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(&command)

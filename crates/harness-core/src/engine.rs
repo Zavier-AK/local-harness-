@@ -110,8 +110,12 @@ struct Landed {
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum VerificationState {
-    Running { checks: Vec<crate::verify::Check> },
-    Done { report: crate::verify::VerificationReport },
+    Running {
+        checks: Vec<crate::verify::Check>,
+    },
+    Done {
+        report: crate::verify::VerificationReport,
+    },
 }
 
 impl Harness {
@@ -204,7 +208,10 @@ impl Harness {
     pub async fn cancel_worker(&self, worker_id: &str) -> bool {
         // Stopping one that never started is declining it.
         if self.approvals.read().await.contains_key(worker_id) {
-            return self.decline_delegation(worker_id, "stopped by the person").await.is_ok();
+            return self
+                .decline_delegation(worker_id, "stopped by the person")
+                .await
+                .is_ok();
         }
         match self.cancels.read().await.get(worker_id) {
             Some(stop) => stop.send(true).is_ok(),
@@ -236,7 +243,11 @@ impl Harness {
         let worker_id = format!("w-{}", Uuid::new_v4().simple());
         self.approvals.write().await.insert(
             worker_id.clone(),
-            PendingDelegation { role: role_name.clone(), task: task.to_string(), context_files },
+            PendingDelegation {
+                role: role_name.clone(),
+                task: task.to_string(),
+                context_files,
+            },
         );
         self.upsert(WorkerRecord {
             id: worker_id.clone(),
@@ -277,17 +288,26 @@ impl Harness {
             .filter(|task| !task.is_empty())
             .unwrap_or(pending.task);
         self.approved.write().await.insert(worker_id.to_string());
-        self.record(HarnessEvent::DelegationApproved { worker_id: worker_id.to_string() })
-            .await;
+        self.record(HarnessEvent::DelegationApproved {
+            worker_id: worker_id.to_string(),
+        })
+        .await;
 
         let harness = Arc::clone(self);
         let worker_id = worker_id.to_string();
         tokio::spawn(async move {
             if let Err(err) = harness
-                .run_delegation(worker_id.clone(), &pending.role, &task, pending.context_files)
+                .run_delegation(
+                    worker_id.clone(),
+                    &pending.role,
+                    &task,
+                    pending.context_files,
+                )
                 .await
             {
-                harness.fail_before_start(&worker_id, &format!("{err:#}")).await;
+                harness
+                    .fail_before_start(&worker_id, &format!("{err:#}"))
+                    .await;
             }
         });
         Ok(())
@@ -299,7 +319,11 @@ impl Harness {
             .await
             .remove(worker_id)
             .with_context(|| format!("no delegation `{worker_id}` is waiting for approval"))?;
-        let reason = if reason.trim().is_empty() { "no reason given" } else { reason.trim() };
+        let reason = if reason.trim().is_empty() {
+            "no reason given"
+        } else {
+            reason.trim()
+        };
         if let Some(mut record) = self.worker(worker_id).await {
             record.status = WorkerStatus::Cancelled;
             record.summary = format!("Declined: {reason}");
@@ -376,7 +400,10 @@ impl Harness {
 
     /// Persist an event as well as broadcasting it, so a session can be replayed.
     async fn record(&self, mut event: HarnessEvent) {
-        if let HarnessEvent::WorkerSpawned { worker_id, number, .. } = &mut event {
+        if let HarnessEvent::WorkerSpawned {
+            worker_id, number, ..
+        } = &mut event
+        {
             let mut numbers = self.worker_numbers.write().await;
             let next = numbers.len() as u32 + 1;
             *number = *numbers.entry(worker_id.clone()).or_insert(next);
@@ -430,9 +457,9 @@ impl Harness {
             .map(|(name, role)| (name.clone(), role.clone()))
             .collect();
 
-        let probes = snapshot
-            .iter()
-            .map(|(name, role)| async move { (name.clone(), crate::availability::probe(role).await) });
+        let probes = snapshot.iter().map(|(name, role)| async move {
+            (name.clone(), crate::availability::probe(role).await)
+        });
         let results: Vec<_> = futures::future::join_all(probes).await;
 
         let mut roles = self.list_roles().await;
@@ -517,7 +544,8 @@ impl Harness {
         context_files: Vec<String>,
     ) -> Result<WorkerRecord> {
         let worker_id = format!("w-{}", Uuid::new_v4().simple());
-        self.run_delegation(worker_id, requested_role, task, context_files).await
+        self.run_delegation(worker_id, requested_role, task, context_files)
+            .await
     }
 
     /// [`Harness::delegate`], under an id chosen beforehand — the one an approved
@@ -529,7 +557,8 @@ impl Harness {
         task: &str,
         context_files: Vec<String>,
     ) -> Result<WorkerRecord> {
-        self.run_delegation_on(worker_id, requested_role, task, context_files, None).await
+        self.run_delegation_on(worker_id, requested_role, task, context_files, None)
+            .await
     }
 
     /// [`Harness::run_delegation`], with the worker's worktree branched from `base`
@@ -916,7 +945,10 @@ impl Harness {
     /// Put the night's kept work in front of the person as an ordinary merge proposal.
     pub async fn propose_night(self: &Arc<Self>) -> Result<String> {
         use crate::night::NightStatus;
-        let mut report = self.night_report().await.context("there is no night shift to propose")?;
+        let mut report = self
+            .night_report()
+            .await
+            .context("there is no night shift to propose")?;
         if report.status == NightStatus::Running {
             bail!("the night shift is still running");
         }
@@ -995,7 +1027,9 @@ impl Harness {
 
     async fn run_night(self: Arc<Self>, mut stop: tokio::sync::watch::Receiver<bool>) {
         use crate::night::{experiment_task, Experiment, NightStatus};
-        let Some(mut report) = self.night_report().await else { return };
+        let Some(mut report) = self.night_report().await else {
+            return;
+        };
         let config = report.config.clone();
         let started = std::time::Instant::now();
         let budget = std::time::Duration::from_secs_f64(config.max_hours * 3600.0);
@@ -1017,14 +1051,25 @@ impl Harness {
 
         // Where the night starts from. If that does not pass or cannot be scored, no
         // experiment could be judged fairly, so stop before spending anything.
-        match self.score_branch(&format!("night-{}-base", report.id), &report.branch, &config).await {
+        match self
+            .score_branch(
+                &format!("night-{}-base", report.id),
+                &report.branch,
+                &config,
+            )
+            .await
+        {
             Ok(score) => {
                 report.baseline = Some(score);
                 report.best = Some(score);
                 self.publish_night(report.clone()).await;
             }
             Err(why) => {
-                let report = finish(report, NightStatus::Stopped, format!("the starting point could not be scored: {why}"));
+                let report = finish(
+                    report,
+                    NightStatus::Stopped,
+                    format!("the starting point could not be scored: {why}"),
+                );
                 self.publish_night(report).await;
                 return;
             }
@@ -1039,19 +1084,33 @@ impl Harness {
                 return;
             }
             if started.elapsed() >= budget {
-                let report = finish(report, NightStatus::Finished, "the time budget is spent".into());
+                let report = finish(
+                    report,
+                    NightStatus::Finished,
+                    "the time budget is spent".into(),
+                );
                 self.publish_night(report).await;
                 return;
             }
             if self.is_rate_limited(&provider).await {
-                let report = finish(report, NightStatus::Stopped, format!("{provider} hit its usage limit"));
+                let report = finish(
+                    report,
+                    NightStatus::Stopped,
+                    format!("{provider} hit its usage limit"),
+                );
                 self.publish_night(report).await;
                 return;
             }
 
             let worker_id = format!("w-night-{}-{n}", report.id);
             let task = experiment_task(&config, report.best, &report.experiments);
-            let run = self.run_delegation_on(worker_id.clone(), &config.role, &task, Vec::new(), Some(&night_branch));
+            let run = self.run_delegation_on(
+                worker_id.clone(),
+                &config.role,
+                &task,
+                Vec::new(),
+                Some(&night_branch),
+            );
             tokio::pin!(run);
             let outcome = tokio::select! {
                 outcome = &mut run => outcome,
@@ -1065,13 +1124,29 @@ impl Harness {
             let (summary, verdict) = match outcome {
                 Err(err) => (String::new(), Err(format!("{err:#}"))),
                 Ok(record) => {
-                    let summary = record.summary.lines().last().unwrap_or_default().trim().to_string();
+                    let summary = record
+                        .summary
+                        .lines()
+                        .last()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
                     let changed = record.diff.as_ref().is_some_and(|d| d.files_changed > 0);
-                    let verdict = match (&record.branch, changed, record.is_error || record.status != WorkerStatus::Done) {
-                        (_, _, true) => Err(format!("the worker did not finish: {}", record.summary.lines().next().unwrap_or_default())),
+                    let verdict = match (
+                        &record.branch,
+                        changed,
+                        record.is_error || record.status != WorkerStatus::Done,
+                    ) {
+                        (_, _, true) => Err(format!(
+                            "the worker did not finish: {}",
+                            record.summary.lines().next().unwrap_or_default()
+                        )),
                         (None, _, _) | (_, false, _) => Err("it made no change".into()),
                         (Some(branch), true, false) => {
-                            match self.score_branch(&format!("night-{}-{n}", report.id), branch, &config).await {
+                            match self
+                                .score_branch(&format!("night-{}-{n}", report.id), branch, &config)
+                                .await
+                            {
                                 Err(why) => Err(why),
                                 Ok(score) => Ok(score),
                             }
@@ -1082,14 +1157,25 @@ impl Harness {
             };
 
             let worker_branch = format!("{}/{worker_id}", crate::isolation::BRANCH_PREFIX);
-            let mut experiment = Experiment { n, worker_id: worker_id.clone(), summary, score: None, kept: false, reason: String::new() };
+            let mut experiment = Experiment {
+                n,
+                worker_id: worker_id.clone(),
+                summary,
+                score: None,
+                kept: false,
+                reason: String::new(),
+            };
             match verdict {
                 Ok(score) => {
                     failures_in_a_row = 0;
                     experiment.score = Some(score);
                     let best = report.best.unwrap_or(score);
                     if config.improves(score, best) {
-                        match self.workspaces.advance_branch(&night_branch, &worker_branch).await {
+                        match self
+                            .workspaces
+                            .advance_branch(&night_branch, &worker_branch)
+                            .await
+                        {
                             Ok(()) => {
                                 experiment.kept = true;
                                 experiment.reason = format!("{score} beats {best}");
@@ -1116,12 +1202,20 @@ impl Harness {
             self.publish_night(report.clone()).await;
 
             if failures_in_a_row >= 3 {
-                let report = finish(report, NightStatus::Stopped, "three experiments in a row failed to produce a score".into());
+                let report = finish(
+                    report,
+                    NightStatus::Stopped,
+                    "three experiments in a row failed to produce a score".into(),
+                );
                 self.publish_night(report).await;
                 return;
             }
         }
-        let report = finish(report, NightStatus::Finished, "every experiment in the budget ran".into());
+        let report = finish(
+            report,
+            NightStatus::Finished,
+            "every experiment in the budget ran".into(),
+        );
         self.publish_night(report).await;
     }
 
@@ -1177,7 +1271,8 @@ impl Harness {
         for old in replaced {
             self.record(HarnessEvent::PlanUpdated { plan: old }).await;
         }
-        self.record(HarnessEvent::PlanUpdated { plan: plan.clone() }).await;
+        self.record(HarnessEvent::PlanUpdated { plan: plan.clone() })
+            .await;
         Ok(plan)
     }
 
@@ -1191,17 +1286,32 @@ impl Harness {
         crate::plan::validate(&steps, &*self.registry.read().await)?;
         let plan = {
             let mut plans = self.plans.write().await;
-            let plan = plans.get_mut(plan_id).with_context(|| format!("no plan `{plan_id}`"))?;
+            let plan = plans
+                .get_mut(plan_id)
+                .with_context(|| format!("no plan `{plan_id}`"))?;
             if plan.status != PlanStatus::Draft {
-                bail!("the plan is already {}", if plan.status == PlanStatus::Running { "running" } else { "over" });
+                bail!(
+                    "the plan is already {}",
+                    if plan.status == PlanStatus::Running {
+                        "running"
+                    } else {
+                        "over"
+                    }
+                );
             }
             plan.steps = steps
                 .into_iter()
-                .map(|input| PlanStep { input, state: StepState::Planned, worker_id: None, note: None })
+                .map(|input| PlanStep {
+                    input,
+                    state: StepState::Planned,
+                    worker_id: None,
+                    note: None,
+                })
                 .collect();
             plan.clone()
         };
-        self.record(HarnessEvent::PlanUpdated { plan: plan.clone() }).await;
+        self.record(HarnessEvent::PlanUpdated { plan: plan.clone() })
+            .await;
         Ok(plan)
     }
 
@@ -1211,7 +1321,9 @@ impl Harness {
         use crate::plan::{PlanStatus, StepState};
         let plan = {
             let mut plans = self.plans.write().await;
-            let plan = plans.get_mut(plan_id).with_context(|| format!("no plan `{plan_id}`"))?;
+            let plan = plans
+                .get_mut(plan_id)
+                .with_context(|| format!("no plan `{plan_id}`"))?;
             if plan.status == PlanStatus::Running {
                 for step in plan.steps.iter_mut().filter(|s| s.worker_id.is_none()) {
                     step.state = StepState::Skipped;
@@ -1239,7 +1351,9 @@ impl Harness {
         }
         let plan = {
             let mut plans = self.plans.write().await;
-            let plan = plans.get_mut(plan_id).with_context(|| format!("no plan `{plan_id}`"))?;
+            let plan = plans
+                .get_mut(plan_id)
+                .with_context(|| format!("no plan `{plan_id}`"))?;
             if plan.status != PlanStatus::Draft {
                 bail!("the plan has already been run or dropped");
             }
@@ -1260,7 +1374,9 @@ impl Harness {
     async fn drive_plan(self: Arc<Self>, plan_id: String) {
         use crate::plan::{readiness, PlanStatus, Readiness, StepState};
         loop {
-            let Some(mut plan) = self.plans.read().await.get(&plan_id).cloned() else { return };
+            let Some(mut plan) = self.plans.read().await.get(&plan_id).cloned() else {
+                return;
+            };
             if plan.status != PlanStatus::Running {
                 return;
             }
@@ -1314,7 +1430,8 @@ impl Harness {
                 if !still_running {
                     return;
                 }
-                self.record(HarnessEvent::PlanUpdated { plan: plan.clone() }).await;
+                self.record(HarnessEvent::PlanUpdated { plan: plan.clone() })
+                    .await;
             }
             if finished {
                 self.record(HarnessEvent::PlanFinished {
@@ -1333,7 +1450,12 @@ impl Harness {
         let harness = Arc::clone(self);
         tokio::spawn(async move {
             match harness
-                .run_delegation(worker_id.clone(), &step.role, &step.task, step.context_files)
+                .run_delegation(
+                    worker_id.clone(),
+                    &step.role,
+                    &step.task,
+                    step.context_files,
+                )
                 .await
             {
                 Ok(record) => {
@@ -1344,7 +1466,11 @@ impl Harness {
                         }
                     }
                 }
-                Err(err) => harness.fail_before_start(&worker_id, &format!("{err:#}")).await,
+                Err(err) => {
+                    harness
+                        .fail_before_start(&worker_id, &format!("{err:#}"))
+                        .await
+                }
             }
         });
     }
@@ -1363,12 +1489,26 @@ impl Harness {
                 self.verification(worker_id).await,
                 Some(VerificationState::Running { .. }) | None
             );
-            return (if checking { StepState::Checking } else { StepState::Review }, None);
+            return (
+                if checking {
+                    StepState::Checking
+                } else {
+                    StepState::Review
+                },
+                None,
+            );
         }
         let Some(record) = self.worker(worker_id).await else {
             return (StepState::Running, None);
         };
-        let first_line = || record.summary.lines().next().unwrap_or_default().to_string();
+        let first_line = || {
+            record
+                .summary
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        };
         match record.status {
             WorkerStatus::Done => {
                 let changed = record.diff.as_ref().is_some_and(|d| d.files_changed > 0);
@@ -1381,7 +1521,9 @@ impl Harness {
                     (StepState::Landed, Some(first_line()))
                 }
             }
-            WorkerStatus::Failed | WorkerStatus::Cancelled => (StepState::Failed, Some(first_line())),
+            WorkerStatus::Failed | WorkerStatus::Cancelled => {
+                (StepState::Failed, Some(first_line()))
+            }
             _ => (StepState::Running, None),
         }
     }
@@ -1390,7 +1532,8 @@ impl Harness {
     /// Workers whose merge landed and can still be undone, most recent last.
     pub async fn landed_workers(&self) -> Vec<String> {
         let landed = self.landed.read().await;
-        let mut ids: Vec<(&String, std::time::Instant)> = landed.iter().map(|(id, l)| (id, l.at)).collect();
+        let mut ids: Vec<(&String, std::time::Instant)> =
+            landed.iter().map(|(id, l)| (id, l.at)).collect();
         ids.sort_by_key(|(_, at)| *at);
         ids.into_iter().map(|(id, _)| id.clone()).collect()
     }
@@ -1403,7 +1546,11 @@ impl Harness {
     /// fix) without reading the whole report.
     pub async fn verification_line(&self, worker_id: &str) -> Option<String> {
         if let Some(landed) = self.landed.read().await.get(worker_id) {
-            let how = if landed.automatic { "landed automatically" } else { "merged by the person" };
+            let how = if landed.automatic {
+                "landed automatically"
+            } else {
+                "merged by the person"
+            };
             return Some(match landed.risk {
                 Some(risk) => format!("{how} ({} risk)", risk.as_str()),
                 None => how.to_string(),
@@ -1433,8 +1580,11 @@ impl Harness {
         {
             checks.push(check.clone());
         }
-        self.record(HarnessEvent::VerificationCheck { worker_id: worker_id.to_string(), check })
-            .await;
+        self.record(HarnessEvent::VerificationCheck {
+            worker_id: worker_id.to_string(),
+            check,
+        })
+        .await;
     }
 
     /// Check a proposed merge: signals from the diff, the project's own commands in a
@@ -1442,21 +1592,33 @@ impl Harness {
     async fn verify(self: Arc<Self>, worker_id: String, branch: String) {
         use crate::verify::{self as v, Check, CheckKind, CheckStatus};
 
-        self.record(HarnessEvent::VerificationStarted { worker_id: worker_id.clone() })
-            .await;
+        self.record(HarnessEvent::VerificationStarted {
+            worker_id: worker_id.clone(),
+        })
+        .await;
         let _slot = self.verify_slots.acquire().await;
 
         let config = self.registry.read().await.verify.clone();
         let record = self.worker(&worker_id).await;
-        let diff = record.as_ref().and_then(|r| r.diff.clone()).unwrap_or_default();
+        let diff = record
+            .as_ref()
+            .and_then(|r| r.diff.clone())
+            .unwrap_or_default();
         let patch = self
             .workspaces
             .patch(&branch, v::REVIEW_PATCH_LINES)
             .await
-            .unwrap_or(crate::isolation::Patch { text: String::new(), truncated: false, total_lines: 0 });
+            .unwrap_or(crate::isolation::Patch {
+                text: String::new(),
+                truncated: false,
+                total_lines: 0,
+            });
 
-        self.push_check(&worker_id, v::signals_check(&v::signals(&diff, &patch.text)))
-            .await;
+        self.push_check(
+            &worker_id,
+            v::signals_check(&v::signals(&diff, &patch.text)),
+        )
+        .await;
 
         // Only pay for a checkout (and its setup, e.g. `npm ci`) when something will use it.
         let checkout = if config.commands.is_empty() && config.reviewer.is_none() {
@@ -1498,13 +1660,21 @@ impl Harness {
 
         let request = v::ReviewRequest {
             task: record.as_ref().map(|r| r.task.as_str()).unwrap_or_default(),
-            summary: record.as_ref().map(|r| r.summary.as_str()).unwrap_or_default(),
+            summary: record
+                .as_ref()
+                .map(|r| r.summary.as_str())
+                .unwrap_or_default(),
             patch: &patch.text,
             patch_truncated: patch.truncated,
             has_checkout: checkout.is_some(),
         };
         let mut previous: Option<v::Risk> = None;
-        for (index, name) in config.reviewer.iter().chain(config.escalate_to.iter()).enumerate() {
+        for (index, name) in config
+            .reviewer
+            .iter()
+            .chain(config.escalate_to.iter())
+            .enumerate()
+        {
             // The second reviewer is the escalation: only when the first found something,
             // and never the same role twice.
             if index > 0
@@ -1527,16 +1697,18 @@ impl Harness {
                 },
                 // A CLI reviewer runs in the checkout; without one, only a reviewer that
                 // needs no files can be trusted to read the right code.
-                Some(role) if checkout.is_none() && role.provider != Provider::OpenaiCompat => Check {
-                    kind: CheckKind::Review,
-                    name: format!("Review by {name}"),
-                    status: CheckStatus::Skipped,
-                    summary: "skipped: there is no checkout of the branch to review in".into(),
-                    output: None,
-                    risk: None,
-                    findings: Vec::new(),
-                    reviewer: Some(v::reviewer_label(name, &role)),
-                },
+                Some(role) if checkout.is_none() && role.provider != Provider::OpenaiCompat => {
+                    Check {
+                        kind: CheckKind::Review,
+                        name: format!("Review by {name}"),
+                        status: CheckStatus::Skipped,
+                        summary: "skipped: there is no checkout of the branch to review in".into(),
+                        output: None,
+                        risk: None,
+                        findings: Vec::new(),
+                        reviewer: Some(v::reviewer_label(name, &role)),
+                    }
+                }
                 Some(role) => {
                     let cwd = checkout
                         .as_ref()
@@ -1568,7 +1740,9 @@ impl Harness {
 
         if let Some(workspace) = checkout {
             if let Err(err) = workspace.release().await {
-                tracing::warn!("failed to release the verification checkout for {worker_id}: {err:#}");
+                tracing::warn!(
+                    "failed to release the verification checkout for {worker_id}: {err:#}"
+                );
             }
         }
 
@@ -1579,11 +1753,16 @@ impl Harness {
         let report = v::assess(checks);
         self.verifications.write().await.insert(
             worker_id.clone(),
-            VerificationState::Done { report: report.clone() },
+            VerificationState::Done {
+                report: report.clone(),
+            },
         );
         let lands = self.autonomy().await.lands(&report);
-        self.record(HarnessEvent::VerificationFinished { worker_id: worker_id.clone(), report })
-            .await;
+        self.record(HarnessEvent::VerificationFinished {
+            worker_id: worker_id.clone(),
+            report,
+        })
+        .await;
 
         // The person chose a level that lets verified, safe-enough changes land on their
         // own. Still only a proposal that is pending — one they already merged or
@@ -1633,7 +1812,12 @@ impl Harness {
         };
         self.landed.write().await.insert(
             worker_id.to_string(),
-            Landed { commit: commit.clone(), automatic, risk, at: std::time::Instant::now() },
+            Landed {
+                commit: commit.clone(),
+                automatic,
+                risk,
+                at: std::time::Instant::now(),
+            },
         );
         self.record(HarnessEvent::MergeLanded {
             worker_id: worker_id.to_string(),
@@ -1728,7 +1912,12 @@ impl Harness {
             _ => false,
         };
         if persist {
-            if let Err(err) = self.store.lock().await.append_event(&self.session_id, event) {
+            if let Err(err) = self
+                .store
+                .lock()
+                .await
+                .append_event(&self.session_id, event)
+            {
                 tracing::warn!("failed to persist head-agent event: {err}");
             }
         }
@@ -1755,7 +1944,8 @@ impl Harness {
                 description,
                 ..
             } => {
-                self.native_started(task_id, subagent_type, description).await;
+                self.native_started(task_id, subagent_type, description)
+                    .await;
             }
 
             HarnessEvent::SubagentProgress {
@@ -1783,7 +1973,8 @@ impl Harness {
                 total_tokens,
                 ..
             } => {
-                self.native_finished(task_id, status, summary, *total_tokens).await;
+                self.native_finished(task_id, status, summary, *total_tokens)
+                    .await;
             }
 
             HarnessEvent::QuotaReport {
@@ -1852,7 +2043,10 @@ impl Harness {
         let role = self.registry.read().await.roles.get(subagent_type).cloned();
         let native = role.as_ref().is_some_and(|role| {
             role.provider == Provider::Claude
-                && matches!(role.isolation, crate::roles::Isolation::Worktree | crate::roles::Isolation::Readonly)
+                && matches!(
+                    role.isolation,
+                    crate::roles::Isolation::Worktree | crate::roles::Isolation::Readonly
+                )
         });
         let isolation = if native {
             role.as_ref().map(|r| r.isolation).unwrap_or_default()
@@ -1913,7 +2107,13 @@ impl Harness {
     /// branch, then remove the worktree. The merge is proposed automatically, because the
     /// head agent cannot see the work in the checkout (by design) and would otherwise have
     /// to be told a worker id it never chose. Proposing lands nothing; only the person can.
-    async fn native_finished(self: &Arc<Self>, task_id: &str, status: &str, summary: &str, total_tokens: u64) {
+    async fn native_finished(
+        self: &Arc<Self>,
+        task_id: &str,
+        status: &str,
+        summary: &str,
+        total_tokens: u64,
+    ) {
         let worker_id = crate::native::worker_id(task_id);
         let Some(record) = self.worker(&worker_id).await else {
             return;
@@ -1963,7 +2163,11 @@ impl Harness {
         }
 
         let finished = WorkerRecord {
-            status: if is_error { WorkerStatus::Failed } else { WorkerStatus::Done },
+            status: if is_error {
+                WorkerStatus::Failed
+            } else {
+                WorkerStatus::Done
+            },
             summary: summary.to_string(),
             usage,
             diff: diff.clone(),

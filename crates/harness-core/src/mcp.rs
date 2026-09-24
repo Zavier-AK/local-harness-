@@ -363,6 +363,8 @@ impl HarnessTools {
 pub struct McpServer {
     pub addr: SocketAddr,
     pub token: String,
+    /// The name its tools appear under: `mcp__<name>__<tool>`.
+    pub name: &'static str,
     shutdown: tokio::sync::oneshot::Sender<()>,
     handle: tokio::task::JoinHandle<()>,
 }
@@ -386,7 +388,7 @@ impl McpServer {
         let mut servers: serde_json::Map<String, serde_json::Value> =
             others.iter().map(|(name, config)| (name.clone(), config.clone())).collect();
         servers.insert(
-            SERVER_NAME.to_string(),
+            self.name.to_string(),
             serde_json::json!({
                 "type": "http",
                 "url": self.url(),
@@ -422,10 +424,24 @@ pub async fn serve(harness: Arc<Harness>) -> Result<McpServer> {
 }
 
 pub async fn serve_on(harness: Arc<Harness>, bind: SocketAddr) -> Result<McpServer> {
+    serve_tools(
+        SERVER_NAME,
+        move || HarnessTools::new(Arc::clone(&harness)),
+        bind,
+    )
+    .await
+}
+
+/// Serve any tool set the same way: loopback, a fresh bearer token, JSON responses.
+pub async fn serve_tools<S, F>(name: &'static str, make: F, bind: SocketAddr) -> Result<McpServer>
+where
+    S: rmcp::ServerHandler + Send + 'static,
+    F: Fn() -> S + Send + Sync + 'static,
+{
     let token = random_token();
 
     let service = StreamableHttpService::new(
-        move || Ok(HarnessTools::new(Arc::clone(&harness))),
+        move || Ok(make()),
         Arc::new(LocalSessionManager::default()),
         {
             // Request/response tools; no long-lived SSE stream needed.
@@ -474,6 +490,12 @@ pub async fn serve_on(harness: Arc<Harness>, bind: SocketAddr) -> Result<McpServ
         }
     });
 
-    tracing::info!("MCP server listening on http://{addr}/mcp");
-    Ok(McpServer { addr, token, shutdown, handle })
+    tracing::info!("MCP server `{name}` listening on http://{addr}/mcp");
+    Ok(McpServer {
+        addr,
+        token,
+        name,
+        shutdown,
+        handle,
+    })
 }

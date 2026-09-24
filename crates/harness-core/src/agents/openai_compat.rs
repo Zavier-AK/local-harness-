@@ -69,7 +69,10 @@ pub async fn run(spec: &WorkerSpec, sink: &EventSink) -> Result<RunOutcome> {
         .get("usage")
         .map(|u| Usage {
             input_tokens: u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
-            output_tokens: u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0),
+            output_tokens: u
+                .get("completion_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
             ..Default::default()
         })
         .unwrap_or_default();

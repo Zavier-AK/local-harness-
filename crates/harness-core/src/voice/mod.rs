@@ -16,6 +16,7 @@
 //! Whatever decides, [`finalize`] checks the action against the harness as it is (is there
 //! a plan to run? a merge to approve?) and marks what must be confirmed before it runs.
 
+pub mod agent;
 pub mod computer;
 pub mod eval;
 pub mod everyday;
@@ -320,6 +321,8 @@ pub enum Source {
     Laya,
     /// Neither: the words go to the head agent as they are.
     Fallback,
+    /// The voice agent worked it out and did it, step by step.
+    Agent,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

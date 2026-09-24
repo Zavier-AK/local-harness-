@@ -342,4 +342,3 @@ mod tests {
         assert!(pre_tool_use("not json").is_none());
     }
 }
-

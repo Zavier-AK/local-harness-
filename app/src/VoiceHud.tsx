@@ -19,6 +19,8 @@ export default function VoiceHud() {
   const [heard, setHeard] = useState<Heard | null>(null);
   const [line, setLine] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** What the voice agent has done so far for this request. */
+  const [steps, setSteps] = useState<string[]>([]);
   const phaseRef = useRef<VoicePhase>("idle");
   const heardThisTurn = useRef(false);
   const hideTimer = useRef<number | null>(null);
@@ -43,6 +45,7 @@ export default function VoiceHud() {
           heardThisTurn.current = false;
           setHeard(null);
           setLine(null);
+          setSteps([]);
           setLevels(Array(BARS).fill(0));
         } else if (payload.phase === "error") {
           setLine(payload.message);
@@ -58,6 +61,10 @@ export default function VoiceHud() {
         setLevels((prev) => [...prev.slice(1), Math.min(1, payload * 6)]);
       }),
       listen<boolean>("voice://busy", ({ payload }) => setBusy(payload)),
+      listen<string>("voice://step", ({ payload }) => {
+        keep();
+        setSteps((prev) => [...prev, payload].slice(-5));
+      }),
       listen<Heard>("voice://heard", async ({ payload }) => {
         heardThisTurn.current = true;
         setHeard(payload);
@@ -84,7 +91,9 @@ export default function VoiceHud() {
 
   const interpretation = heard?.interpretation;
   const source =
-    interpretation?.source === "laya"
+    interpretation?.source === "agent"
+      ? `agent${interpretation.laya_ms !== null ? ` · ${(interpretation.laya_ms / 1000).toFixed(1)}s` : ""}`
+      : interpretation?.source === "laya"
       ? `Laya ${interpretation.confidence !== null ? interpretation.confidence.toFixed(2) : ""}${interpretation.laya_ms !== null ? ` · ${interpretation.laya_ms} ms` : ""}`
       : interpretation?.source === "matcher"
         ? "command"
@@ -115,7 +124,7 @@ export default function VoiceHud() {
         </div>
       )}
 
-      {(heard || status || (!listening && line)) && (
+      {(heard || status || steps.length > 0 || (!listening && line)) && (
         <div className="hud-row">
           {!listening && (
             <span className={`hud-mic ${phase}`} aria-hidden>
@@ -125,6 +134,13 @@ export default function VoiceHud() {
           <div className="hud-text">
             {interpretation?.transcript && <p className="hud-transcript">“{interpretation.transcript}”</p>}
             {status && !heard && <p className="hud-status muted">{status}</p>}
+            {steps.length > 0 && (
+              <ul className="hud-steps">
+                {steps.map((step, i) => (
+                  <li key={i}>✓ {step}</li>
+                ))}
+              </ul>
+            )}
             {line && <p className="hud-line">{line}</p>}
           </div>
           {source && !listening && <span className="hud-source">{source}</span>}

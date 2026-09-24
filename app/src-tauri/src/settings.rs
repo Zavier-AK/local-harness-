@@ -48,9 +48,9 @@ impl Settings {
             // be mistaken for a flag of its own.
             let valid = model.len() <= 100
                 && !model.starts_with('-')
-                && model
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '[' | ']' | '/'));
+                && model.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '[' | ']' | '/')
+                });
             if !valid {
                 return Err(format!("`{model}` does not look like a model name"));
             }
@@ -106,7 +106,10 @@ mod tests {
     #[test]
     fn a_missing_or_broken_file_means_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(load_from(&dir.path().join("none.json")), Settings::default());
+        assert_eq!(
+            load_from(&dir.path().join("none.json")),
+            Settings::default()
+        );
         std::fs::write(dir.path().join("bad.json"), "{ not json").unwrap();
         assert_eq!(load_from(&dir.path().join("bad.json")), Settings::default());
     }
@@ -120,7 +123,11 @@ mod tests {
             max_turns: 80,
             notifications: false,
             accent: Some("#e0567a".into()),
-            voice: crate::voice::VoiceSettings { enabled: true, confidence: 0.8, ..Default::default() },
+            voice: crate::voice::VoiceSettings {
+                enabled: true,
+                confidence: 0.8,
+                ..Default::default()
+            },
         };
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path), settings);
@@ -135,16 +142,34 @@ mod tests {
     #[test]
     fn values_that_would_break_a_session_are_refused() {
         let bad = [
-            Settings { max_turns: 0, ..Default::default() },
-            Settings { max_turns: 5000, ..Default::default() },
-            Settings { accent: Some("red".into()), ..Default::default() },
-            Settings { default_model: Some("--dangerously-skip".into()), ..Default::default() },
-            Settings { default_model: Some("has space".into()), ..Default::default() },
+            Settings {
+                max_turns: 0,
+                ..Default::default()
+            },
+            Settings {
+                max_turns: 5000,
+                ..Default::default()
+            },
+            Settings {
+                accent: Some("red".into()),
+                ..Default::default()
+            },
+            Settings {
+                default_model: Some("--dangerously-skip".into()),
+                ..Default::default()
+            },
+            Settings {
+                default_model: Some("has space".into()),
+                ..Default::default()
+            },
         ];
         for settings in bad {
             assert!(settings.clone().validated().is_err(), "{settings:?}");
         }
-        let blank = Settings { default_model: Some("  ".into()), ..Default::default() };
+        let blank = Settings {
+            default_model: Some("  ".into()),
+            ..Default::default()
+        };
         assert_eq!(blank.validated().unwrap().default_model, None);
     }
 }

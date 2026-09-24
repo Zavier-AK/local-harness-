@@ -53,9 +53,15 @@ const RESERVED_SERVER: &str = "harness";
 
 /// Skills every install has, compiled in so they exist wherever the app is installed.
 const BUNDLED: &[(&str, &str)] = &[
-    ("worktree", include_str!("../../../skills/worktree/SKILL.md")),
+    (
+        "worktree",
+        include_str!("../../../skills/worktree/SKILL.md"),
+    ),
     ("review", include_str!("../../../skills/review/SKILL.md")),
-    ("risky-changes", include_str!("../../../skills/risky-changes/SKILL.md")),
+    (
+        "risky-changes",
+        include_str!("../../../skills/risky-changes/SKILL.md"),
+    ),
 ];
 
 /// How deep an import looks for skill folders. Deep enough for a repository that groups
@@ -167,7 +173,9 @@ impl Extensions {
     fn save(&self, state: &State) -> Result<()> {
         std::fs::create_dir_all(&self.dir)
             .with_context(|| format!("creating {}", self.dir.display()))?;
-        let tmp = self.dir.join(format!("extensions.json.{}.tmp", std::process::id()));
+        let tmp = self
+            .dir
+            .join(format!("extensions.json.{}.tmp", std::process::id()));
         std::fs::write(&tmp, serde_json::to_string_pretty(state)?)?;
         std::fs::rename(&tmp, self.state_path())?;
         Ok(())
@@ -268,7 +276,10 @@ impl Extensions {
         let mut folders = Vec::new();
         find_skill_folders(&source, IMPORT_DEPTH, &mut folders);
         if folders.is_empty() {
-            bail!("no SKILL.md found in {} or the folders beneath it", source.display());
+            bail!(
+                "no SKILL.md found in {} or the folders beneath it",
+                source.display()
+            );
         }
 
         let mut report = ImportReport::default();
@@ -326,7 +337,9 @@ impl Extensions {
             bail!("give an https:// or git@ URL to a git repository");
         }
         std::fs::create_dir_all(&self.dir)?;
-        let checkout = self.dir.join(format!(".clone-{}", uuid::Uuid::new_v4().simple()));
+        let checkout = self
+            .dir
+            .join(format!(".clone-{}", uuid::Uuid::new_v4().simple()));
         let output = tokio::process::Command::new("git")
             .args(["clone", "--depth", "1", "--quiet", "--", url])
             .arg(&checkout)
@@ -374,16 +387,25 @@ impl Extensions {
     /// and `headers`) for a remote one.
     pub fn set_mcp_server(&self, name: &str, config: serde_json::Value) -> Result<()> {
         check_server_name(name)?;
-        let object = config.as_object().context("a server's config must be an object")?;
-        let has_command = object.get("command").and_then(|v| v.as_str()).is_some_and(|c| !c.trim().is_empty());
-        let has_url = object.get("url").and_then(|v| v.as_str()).is_some_and(|u| {
-            u.starts_with("https://") || u.starts_with("http://")
-        });
+        let object = config
+            .as_object()
+            .context("a server's config must be an object")?;
+        let has_command = object
+            .get("command")
+            .and_then(|v| v.as_str())
+            .is_some_and(|c| !c.trim().is_empty());
+        let has_url = object
+            .get("url")
+            .and_then(|v| v.as_str())
+            .is_some_and(|u| u.starts_with("https://") || u.starts_with("http://"));
         if has_command == has_url {
             bail!("a server needs either a command to run or an http(s) URL, not both");
         }
         if let Some(args) = object.get("args") {
-            if !args.as_array().is_some_and(|a| a.iter().all(|v| v.is_string())) {
+            if !args
+                .as_array()
+                .is_some_and(|a| a.iter().all(|v| v.is_string()))
+            {
                 bail!("`args` must be a list of strings");
             }
         }
@@ -416,7 +438,11 @@ impl Extensions {
         let mut files: Vec<(String, PathBuf, Vec<u8>)> = Vec::new();
         for (name, body) in BUNDLED {
             if !state.disabled_skills.contains(*name) {
-                files.push((name.to_string(), PathBuf::from("SKILL.md"), body.as_bytes().to_vec()));
+                files.push((
+                    name.to_string(),
+                    PathBuf::from("SKILL.md"),
+                    body.as_bytes().to_vec(),
+                ));
             }
         }
         for (name, dir) in self.library_skills()? {
@@ -488,7 +514,9 @@ fn check_skill_name(name: &str) -> Result<()> {
     let valid = !name.is_empty()
         && name.len() <= 64
         && !name.starts_with('-')
-        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
     if !valid {
         bail!("`{name}` is not a valid skill name — use lowercase letters, digits and hyphens");
     }
@@ -498,7 +526,9 @@ fn check_skill_name(name: &str) -> Result<()> {
 fn check_server_name(name: &str) -> Result<()> {
     let valid = !name.is_empty()
         && name.len() <= 64
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     if !valid {
         bail!("`{name}` is not a valid server name — use letters, digits, `-` and `_`");
     }
@@ -520,8 +550,14 @@ fn frontmatter(body: &str) -> (Option<String>, Option<String>) {
         if line.trim() == "---" {
             break;
         }
-        let Some((key, value)) = line.split_once(':') else { continue };
-        let value = value.trim().trim_matches(|c| c == '"' || c == '\'').trim().to_string();
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .trim()
+            .to_string();
         if value.is_empty() {
             continue;
         }
@@ -548,7 +584,9 @@ fn find_skill_folders(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
     if depth == 0 {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut children: Vec<PathBuf> = entries
         .flatten()
         .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
@@ -630,8 +668,13 @@ mod tests {
         let skills = Extensions::new(dir.path()).skills().unwrap();
         let names: Vec<_> = skills.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["worktree", "review", "risky-changes"]);
-        assert!(skills.iter().all(|s| s.enabled && s.source == SkillSource::Bundled));
-        assert!(skills.iter().all(|s| !s.description.is_empty()), "descriptions come from frontmatter");
+        assert!(skills
+            .iter()
+            .all(|s| s.enabled && s.source == SkillSource::Bundled));
+        assert!(
+            skills.iter().all(|s| !s.description.is_empty()),
+            "descriptions come from frontmatter"
+        );
     }
 
     #[test]
@@ -647,7 +690,10 @@ mod tests {
         .unwrap();
         assert_eq!(manifest["name"], PLUGIN_NAME);
         assert!(plugin.join("skills/worktree/SKILL.md").is_file());
-        assert!(!plugin.join("skills/review").exists(), "a disabled skill stays out");
+        assert!(
+            !plugin.join("skills/review").exists(),
+            "a disabled skill stays out"
+        );
     }
 
     #[test]
@@ -655,12 +701,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let extensions = Extensions::new(dir.path());
         let before = extensions.worker_extras().unwrap().plugin_dir.unwrap();
-        assert_eq!(extensions.worker_extras().unwrap().plugin_dir.unwrap(), before, "unchanged means reused");
+        assert_eq!(
+            extensions.worker_extras().unwrap().plugin_dir.unwrap(),
+            before,
+            "unchanged means reused"
+        );
 
-        extensions.create_skill("deploy-notes", "How we deploy.").unwrap();
+        extensions
+            .create_skill("deploy-notes", "How we deploy.")
+            .unwrap();
         let after = extensions.worker_extras().unwrap().plugin_dir.unwrap();
         assert_ne!(before, after);
-        assert!(before.join("skills/worktree/SKILL.md").is_file(), "the old plugin is intact");
+        assert!(
+            before.join("skills/worktree/SKILL.md").is_file(),
+            "the old plugin is intact"
+        );
         assert!(after.join("skills/deploy-notes/SKILL.md").is_file());
 
         extensions.prune_plugins(Some(&after));
@@ -682,32 +737,61 @@ mod tests {
     fn importing_a_repository_takes_every_skill_folder_in_it() {
         let dir = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
-        write_skill(&repo.path().join("orchestration/git-worktree"), "git-worktree", "Worktrees.");
+        write_skill(
+            &repo.path().join("orchestration/git-worktree"),
+            "git-worktree",
+            "Worktrees.",
+        );
         write_skill(&repo.path().join("ops/risky"), "risky", "Risky changes.");
         std::fs::write(repo.path().join("ops/risky/check.sh"), "echo ok\n").unwrap();
         // One that would shadow a built-in, and one no agent would ever pick.
         write_skill(&repo.path().join("review"), "review", "Mine.");
         std::fs::create_dir_all(repo.path().join("vague")).unwrap();
-        std::fs::write(repo.path().join("vague/SKILL.md"), "---\nname: vague\n---\n").unwrap();
+        std::fs::write(
+            repo.path().join("vague/SKILL.md"),
+            "---\nname: vague\n---\n",
+        )
+        .unwrap();
 
         let extensions = Extensions::new(dir.path().join("ext"));
         let report = extensions
             .import_skills(repo.path(), Some("https://github.com/someone/skills"))
             .unwrap();
-        assert_eq!(report.imported, ["risky", "git-worktree"], "walked in sorted folder order");
-        let skipped: Vec<_> = report.skipped.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            report.imported,
+            ["risky", "git-worktree"],
+            "walked in sorted folder order"
+        );
+        let skipped: Vec<_> = report
+            .skipped
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
         assert_eq!(skipped, ["review", "vague"]);
 
-        let risky = extensions.skills().unwrap().into_iter().find(|s| s.name == "risky").unwrap();
-        assert_eq!(risky.origin.as_deref(), Some("https://github.com/someone/skills"));
-        assert!(risky.path.unwrap().join("check.sh").is_file(), "the whole folder comes along");
+        let risky = extensions
+            .skills()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "risky")
+            .unwrap();
+        assert_eq!(
+            risky.origin.as_deref(),
+            Some("https://github.com/someone/skills")
+        );
+        assert!(
+            risky.path.unwrap().join("check.sh").is_file(),
+            "the whole folder comes along"
+        );
     }
 
     #[test]
     fn a_folder_without_skills_is_an_error_not_an_empty_success() {
         let dir = tempfile::tempdir().unwrap();
         let empty = tempfile::tempdir().unwrap();
-        assert!(Extensions::new(dir.path()).import_skills(empty.path(), None).is_err());
+        assert!(Extensions::new(dir.path())
+            .import_skills(empty.path(), None)
+            .is_err());
     }
 
     #[cfg(unix)]
@@ -732,17 +816,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let extensions = Extensions::new(dir.path());
         for bad in ["", "Caps", "../escape", "-dash", "has space", "worktree"] {
-            assert!(extensions.create_skill(bad, "x").is_err(), "{bad:?} should be refused");
+            assert!(
+                extensions.create_skill(bad, "x").is_err(),
+                "{bad:?} should be refused"
+            );
         }
-        assert!(extensions.create_skill("fine-name-2", "").is_err(), "description required");
-        assert!(extensions.create_skill("fine-name-2", "Does a thing.").is_ok());
+        assert!(
+            extensions.create_skill("fine-name-2", "").is_err(),
+            "description required"
+        );
+        assert!(extensions
+            .create_skill("fine-name-2", "Does a thing.")
+            .is_ok());
     }
 
     #[test]
     fn a_created_skill_has_loadable_frontmatter() {
         let dir = tempfile::tempdir().unwrap();
         let extensions = Extensions::new(dir.path());
-        let path = extensions.create_skill("notes", "Use when: taking notes.").unwrap();
+        let path = extensions
+            .create_skill("notes", "Use when: taking notes.")
+            .unwrap();
         let body = std::fs::read_to_string(path.join("SKILL.md")).unwrap();
         assert_eq!(
             frontmatter(&body),
@@ -759,7 +853,11 @@ mod tests {
         extensions.create_skill("mine", "Mine.").unwrap();
         extensions.set_skill_enabled("mine", false).unwrap();
         extensions.remove_skill("mine").unwrap();
-        assert!(extensions.skills().unwrap().iter().all(|s| s.name != "mine"));
+        assert!(extensions
+            .skills()
+            .unwrap()
+            .iter()
+            .all(|s| s.name != "mine"));
         assert!(extensions.set_skill_enabled("mine", true).is_err());
     }
 
@@ -768,16 +866,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let extensions = Extensions::new(dir.path());
         extensions
-            .set_mcp_server("github", serde_json::json!({ "command": "npx", "args": ["-y", "gh-mcp"] }))
+            .set_mcp_server(
+                "github",
+                serde_json::json!({ "command": "npx", "args": ["-y", "gh-mcp"] }),
+            )
             .unwrap();
         extensions
-            .set_mcp_server("docs", serde_json::json!({ "type": "http", "url": "https://example.com/mcp" }))
+            .set_mcp_server(
+                "docs",
+                serde_json::json!({ "type": "http", "url": "https://example.com/mcp" }),
+            )
             .unwrap();
 
         let extras = extensions.worker_extras().unwrap();
-        let config: serde_json::Value = serde_json::from_str(&extras.mcp_config().unwrap()).unwrap();
+        let config: serde_json::Value =
+            serde_json::from_str(&extras.mcp_config().unwrap()).unwrap();
         assert_eq!(config["mcpServers"]["github"]["command"], "npx");
-        assert_eq!(config["mcpServers"]["docs"]["url"], "https://example.com/mcp");
+        assert_eq!(
+            config["mcpServers"]["docs"]["url"],
+            "https://example.com/mcp"
+        );
         let args = extras.claude_args();
         assert!(args.contains(&"--mcp-config".to_string()));
         assert!(args.contains(&"--plugin-dir".to_string()));
@@ -794,12 +902,21 @@ mod tests {
             ("harness", serde_json::json!({ "command": "x" })),
             ("has space", serde_json::json!({ "command": "x" })),
             ("neither", serde_json::json!({ "args": ["x"] })),
-            ("both", serde_json::json!({ "command": "x", "url": "https://x" })),
+            (
+                "both",
+                serde_json::json!({ "command": "x", "url": "https://x" }),
+            ),
             ("file", serde_json::json!({ "url": "file:///etc/passwd" })),
-            ("args", serde_json::json!({ "command": "x", "args": "not a list" })),
+            (
+                "args",
+                serde_json::json!({ "command": "x", "args": "not a list" }),
+            ),
         ];
         for (name, config) in refused {
-            assert!(extensions.set_mcp_server(name, config).is_err(), "{name} should be refused");
+            assert!(
+                extensions.set_mcp_server(name, config).is_err(),
+                "{name} should be refused"
+            );
         }
         assert!(extensions.mcp_servers().unwrap().is_empty());
     }
@@ -808,8 +925,16 @@ mod tests {
     async fn git_import_refuses_what_is_not_a_remote_url() {
         let dir = tempfile::tempdir().unwrap();
         let extensions = Extensions::new(dir.path());
-        for bad in ["--upload-pack=touch /tmp/x", "/etc", "file:///etc", "ext::sh -c x"] {
-            assert!(extensions.import_skills_from_git(bad).await.is_err(), "{bad} should be refused");
+        for bad in [
+            "--upload-pack=touch /tmp/x",
+            "/etc",
+            "file:///etc",
+            "ext::sh -c x",
+        ] {
+            assert!(
+                extensions.import_skills_from_git(bad).await.is_err(),
+                "{bad} should be refused"
+            );
         }
     }
 }

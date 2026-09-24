@@ -64,10 +64,7 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<Vec<HarnessEvent>, String>
 
     // Codex nests the payload under `msg` in some versions and flattens it in others.
     let body = value.get("msg").unwrap_or(&value);
-    let kind = body
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let kind = body.get("type").and_then(Value::as_str).unwrap_or_default();
 
     let mut events = Vec::new();
 
@@ -81,7 +78,10 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<Vec<HarnessEvent>, String>
                     .and_then(Value::as_str)
                     .map(str::to_string),
                 provider: Some("codex".into()),
-                model: body.get("model").and_then(Value::as_str).map(str::to_string),
+                model: body
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 tools: Vec::new(),
                 mcp_servers: Vec::new(),
                 mcp_failed: Vec::new(),
@@ -174,8 +174,14 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<Vec<HarnessEvent>, String>
                 run_id: run_id.to_string(),
                 text: String::new(),
                 usage: Usage {
-                    input_tokens: body.get("input_tokens").and_then(Value::as_u64).unwrap_or(0),
-                    output_tokens: body.get("output_tokens").and_then(Value::as_u64).unwrap_or(0),
+                    input_tokens: body
+                        .get("input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    output_tokens: body
+                        .get("output_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
                     cache_read_input_tokens: body
                         .get("cached_input_tokens")
                         .and_then(Value::as_u64)
@@ -244,10 +250,16 @@ pub async fn run(spec: &WorkerSpec, sink: &EventSink) -> Result<RunOutcome> {
             Ok(events) => {
                 for event in events {
                     match &event {
-                        HarnessEvent::AssistantText { text, partial: false, .. } => {
+                        HarnessEvent::AssistantText {
+                            text,
+                            partial: false,
+                            ..
+                        } => {
                             last_message = text.clone();
                         }
-                        HarnessEvent::SessionStarted { backend_session_id, .. } => {
+                        HarnessEvent::SessionStarted {
+                            backend_session_id, ..
+                        } => {
                             outcome.backend_session_id = backend_session_id.clone();
                         }
                         HarnessEvent::RunFinished { usage, .. } => outcome.usage.add(usage),
@@ -339,9 +351,15 @@ mod tests {
 
     #[test]
     fn command_events_become_tool_calls_and_results() {
-        let begin = r#"{"msg":{"type":"exec_command_begin","call_id":"c1","command":["cargo","test"]}}"#;
+        let begin =
+            r#"{"msg":{"type":"exec_command_begin","call_id":"c1","command":["cargo","test"]}}"#;
         match &parse_line("r1", begin).unwrap()[0] {
-            HarnessEvent::ToolCall { name, input, tool_use_id, .. } => {
+            HarnessEvent::ToolCall {
+                name,
+                input,
+                tool_use_id,
+                ..
+            } => {
                 assert_eq!(name, "Bash");
                 assert_eq!(tool_use_id, "c1");
                 assert_eq!(input["command"], "cargo test");
@@ -349,7 +367,8 @@ mod tests {
             other => panic!("expected ToolCall, got {other:?}"),
         }
 
-        let end = r#"{"msg":{"type":"exec_command_end","call_id":"c1","exit_code":1,"stdout":"boom"}}"#;
+        let end =
+            r#"{"msg":{"type":"exec_command_end","call_id":"c1","exit_code":1,"stdout":"boom"}}"#;
         assert!(matches!(&parse_line("r1", end).unwrap()[0],
             HarnessEvent::ToolResult { content, is_error: true, .. } if content == "boom"));
     }
@@ -358,7 +377,9 @@ mod tests {
     fn token_counts_carry_no_dollar_figure() {
         let line = r#"{"msg":{"type":"token_count","input_tokens":100,"output_tokens":50,"cached_input_tokens":20}}"#;
         match &parse_line("r1", line).unwrap()[0] {
-            HarnessEvent::RunFinished { usage, cost_usd, .. } => {
+            HarnessEvent::RunFinished {
+                usage, cost_usd, ..
+            } => {
                 assert_eq!(usage.input_tokens, 100);
                 assert_eq!(usage.cache_read_input_tokens, 20);
                 // Subscription-covered: a dollar figure here would be fiction.
@@ -370,7 +391,9 @@ mod tests {
 
     #[test]
     fn unknown_lines_are_ignored() {
-        assert!(parse_line("r1", r#"{"msg":{"type":"future_event"}}"#).unwrap().is_empty());
+        assert!(parse_line("r1", r#"{"msg":{"type":"future_event"}}"#)
+            .unwrap()
+            .is_empty());
         assert!(parse_line("r1", "").unwrap().is_empty());
         assert!(parse_line("r1", "{oops").is_err());
     }

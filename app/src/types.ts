@@ -408,6 +408,8 @@ export type VoiceSettings = {
   laya_idle_minutes: number;
   speak_replies: boolean;
   pause_ms: number;
+  agent: boolean;
+  agent_model: string;
 };
 
 export type Pane = "chat" | "plan" | "night" | "preview" | "tools" | "settings";
@@ -459,7 +461,7 @@ export type VoiceOutcome =
 export type Interpretation = {
   transcript: string;
   outcome: VoiceOutcome;
-  source: "matcher" | "laya" | "fallback";
+  source: "matcher" | "laya" | "fallback" | "agent";
   confidence: number | null;
   laya_ms: number | null;
   reply: string | null;
