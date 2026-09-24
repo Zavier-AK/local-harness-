@@ -1,13 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Only the bundled main webview may listen for events, choose a project folder, and post a notification when work finishes.",
+  "description": "Only the bundled main webview may listen for events, choose a project folder, post a notification when work finishes, and answer the voice bar.",
   "webviews": [
     "main"
   ],
   "permissions": [
     "core:event:allow-listen",
     "core:event:allow-unlisten",
+    "core:event:allow-emit",
     "dialog:allow-open",
     "notification:allow-is-permission-granted",
     "notification:allow-request-permission",

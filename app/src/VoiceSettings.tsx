@@ -1,0 +1,232 @@
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import type { Interpretation, VoiceProgress, VoiceSettings, VoiceStatus, WhisperSize } from "./types";
+
+type Props = {
+  value: VoiceSettings;
+  onChange: (voice: VoiceSettings) => void;
+};
+
+const SIZES: { size: WhisperSize; label: string }[] = [
+  { size: "tiny.en", label: "Tiny — fastest, 75 MB" },
+  { size: "base.en", label: "Base — the default, 142 MB" },
+  { size: "small.en", label: "Small — most accurate, 466 MB" },
+];
+
+function megabytes(bytes: number): string {
+  return `${Math.round(bytes / 1_000_000)} MB`;
+}
+
+/** What an interpretation comes to, in a few words, for "Try a phrase". */
+function summarize(heard: Interpretation): string {
+  const o = heard.outcome;
+  const how =
+    heard.source === "laya"
+      ? ` (Laya ${heard.confidence?.toFixed(2) ?? ""}${heard.laya_ms !== null ? `, ${heard.laya_ms} ms` : ""})`
+      : heard.source === "matcher"
+        ? " (exact command)"
+        : "";
+  switch (o.outcome) {
+    case "act":
+      return `${o.describe}${o.confirm ? " — asks you first" : ""}${how}`;
+    case "clarify":
+      return `Would ask: ${o.question}${how}`;
+    case "reply":
+      return `Would say: ${o.text}${how}`;
+    case "to_head":
+      return `Would send to Claude: “${o.text}”`;
+    case "nothing":
+      return "Nothing to do.";
+  }
+}
+
+/**
+ * Settings › Voice: turn push-to-talk on, get the two models it needs, and try phrases
+ * against the harness as it is, without doing anything.
+ */
+export default function VoiceSettingsPanel({ value, onChange }: Props) {
+  const [status, setStatus] = useState<VoiceStatus | null>(null);
+  const [progress, setProgress] = useState<Record<string, VoiceProgress>>({});
+  const [busy, setBusy] = useState<"whisper" | "laya" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [phrase, setPhrase] = useState("");
+  const [tried, setTried] = useState<string | null>(null);
+
+  const refresh = () =>
+    invoke<VoiceStatus>("voice_status")
+      .then(setStatus)
+      .catch((err) => setError(String(err)));
+
+  useEffect(() => {
+    void refresh();
+    const off = listen<VoiceProgress>("voice://progress", ({ payload }) =>
+      setProgress((prev) => ({ ...prev, [payload.what]: payload })),
+    );
+    return () => void off.then((f) => f());
+  }, []);
+
+  async function prepare(what: "whisper" | "laya") {
+    setBusy(what);
+    setError(null);
+    try {
+      setStatus(await invoke<VoiceStatus>("voice_prepare", { what }));
+    } catch (err) {
+      setError(String(err));
+      void refresh();
+    } finally {
+      setBusy(null);
+      setProgress((prev) => ({ ...prev, [what]: undefined as unknown as VoiceProgress }));
+    }
+  }
+
+  async function tryPhrase() {
+    if (!phrase.trim()) return;
+    try {
+      setTried(summarize(await invoke<Interpretation>("voice_try", { text: phrase })));
+    } catch (err) {
+      setTried(String(err));
+    }
+  }
+
+  const set = (patch: Partial<VoiceSettings>) => onChange({ ...value, ...patch });
+  const laya = status?.laya;
+  const bar = (what: "whisper" | "laya") => {
+    const p = progress[what];
+    if (!p || !p.total) return null;
+    return (
+      <span className="voice-progress" role="progressbar" aria-valuenow={Math.round((p.received / p.total) * 100)}>
+        <span style={{ width: `${(p.received / p.total) * 100}%` }} />
+        <em>
+          {p.file ? `${p.file} · ` : ""}
+          {megabytes(p.received)} of {megabytes(p.total)}
+        </em>
+      </span>
+    );
+  };
+
+  return (
+    <div className="settings-section voice-settings">
+      <h3>Voice</h3>
+      <p className="muted">
+        Hold <kbd>{value.hotkey.replace("Alt", "⌥").replace("Cmd", "⌘").replace("Shift", "⇧").replace(/\+/g, "")}</kbd>{" "}
+        anywhere and speak; let go to send. Everything runs on this Mac: Whisper writes down what
+        you said, exact commands are matched instantly, and Laya works out the rest. What it
+        cannot place goes to Claude as a message. Merges, plans and stopping things always ask
+        you first.
+      </p>
+      {status && !status.built && (
+        <p className="error">This build has no voice support. Build with the default features (needs cmake).</p>
+      )}
+      {error && <p className="error">{error}</p>}
+
+      <label className="toggle-row">
+        <input type="checkbox" checked={value.enabled} onChange={(e) => set({ enabled: e.target.checked })} />
+        <span>Push-to-talk (asks for the microphone the first time)</span>
+      </label>
+
+      <label className="field">
+        <span>Hotkey</span>
+        <input value={value.hotkey} onChange={(e) => set({ hotkey: e.target.value })} spellCheck={false} />
+      </label>
+
+      <div className="voice-model">
+        <label className="field">
+          <span>Speech model</span>
+          <select value={value.stt_model} onChange={(e) => set({ stt_model: e.target.value as WhisperSize })}>
+            {SIZES.map((s) => (
+              <option key={s.size} value={s.size}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="voice-model-state">
+          {status?.whisper_downloaded && status.settings.stt_model === value.stt_model ? (
+            <span className="badge risk-low">downloaded</span>
+          ) : (
+            <button onClick={() => void prepare("whisper")} disabled={busy !== null || status?.settings.stt_model !== value.stt_model} title={status?.settings.stt_model !== value.stt_model ? "Save first, then download" : undefined}>
+              {busy === "whisper" ? "Downloading…" : `Download (${status?.whisper_megabytes ?? "…"} MB)`}
+            </button>
+          )}
+          {bar("whisper")}
+        </div>
+      </div>
+
+      <div className="voice-model">
+        <div className="field">
+          <span>Laya</span>
+        </div>
+        <div className="voice-model-state">
+          {laya?.state === "not_installed" && <span className="error">{laya.hint}</span>}
+          {laya?.state === "ready" && <span className="badge risk-low">loaded</span>}
+          {laya?.state === "failed" && <span className="error">{laya.error}</span>}
+          {laya && laya.state !== "not_installed" && laya.state !== "ready" && (
+            <button onClick={() => void prepare("laya")} disabled={busy !== null}>
+              {busy === "laya"
+                ? "Loading…"
+                : laya.state === "stopped" && laya.downloaded
+                  ? "Load"
+                  : "Download and load"}
+            </button>
+          )}
+          {bar("laya")}
+        </div>
+      </div>
+      <p className="muted hint">
+        An open decision model that reads the phrasing exact commands miss. About 1.7 GB to
+        download, and about 2 GB of memory while loaded.
+      </p>
+
+      <label className="field">
+        <span>Confidence</span>
+        <input
+          type="range"
+          min={0.5}
+          max={0.95}
+          step={0.05}
+          value={value.confidence}
+          onChange={(e) => set({ confidence: Number(e.target.value) })}
+          aria-valuetext={value.confidence.toFixed(2)}
+        />
+        <span className="mono">{value.confidence.toFixed(2)}</span>
+      </label>
+      <p className="muted hint">
+        How sure Laya must be before it acts. Lower acts on more; higher sends more to Claude.{" "}
+        <code>harness-cli voice --eval --laya</code> measures it on real phrases.
+      </p>
+
+      <label className="field">
+        <span>Unload Laya after</span>
+        <input
+          type="number"
+          min={1}
+          max={240}
+          value={value.laya_idle_minutes}
+          onChange={(e) => set({ laya_idle_minutes: Number(e.target.value) })}
+        />
+        <span className="muted">minutes idle</span>
+      </label>
+
+      <label className="toggle-row">
+        <input type="checkbox" checked={value.speak_replies} onChange={(e) => set({ speak_replies: e.target.checked })} />
+        <span>Say answers aloud</span>
+      </label>
+
+      <div className="voice-try">
+        <input
+          value={phrase}
+          onChange={(e) => setPhrase(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void tryPhrase();
+          }}
+          placeholder="Try a phrase: approve the builder's merge"
+        />
+        <button onClick={() => void tryPhrase()} disabled={!phrase.trim()}>
+          Try
+        </button>
+      </div>
+      {tried && <p className="muted voice-tried">{tried}</p>}
+    </div>
+  );
+}

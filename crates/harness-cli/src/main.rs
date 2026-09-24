@@ -139,6 +139,30 @@ enum Command {
         propose: bool,
     },
 
+    /// What spoken words would make the harness do, without doing it — against the fixed
+    /// example harness in `voice/phrases.toml`. `--eval` runs the whole labelled set.
+    Voice {
+        /// The words, as Whisper would write them.
+        words: Option<String>,
+
+        /// Run the labelled phrase set and report how often each step is right, wrong, or
+        /// unsure, and how fast Laya is.
+        #[arg(long)]
+        eval: bool,
+
+        /// Also ask Laya. Loads it first — the first time, that downloads about 1.7 GB.
+        #[arg(long)]
+        laya: bool,
+
+        /// The confidence Laya must reach before anything is done on its word.
+        #[arg(long, default_value = "0.75")]
+        threshold: f64,
+
+        /// The Laya helper script. Defaults to the one in this source tree.
+        #[arg(long)]
+        sidecar: Option<PathBuf>,
+    },
+
     /// Token totals for the rolling window that governs a subscription.
     Usage {
         #[arg(long, default_value = "5")]
@@ -449,6 +473,90 @@ async fn build_harness(cli: &Cli, events: harness_core::agents::EventSink) -> Re
     Ok(harness)
 }
 
+async fn voice(
+    words: Option<&str>,
+    eval: bool,
+    use_laya: bool,
+    threshold: f64,
+    sidecar: Option<PathBuf>,
+) -> Result<()> {
+    use harness_core::voice::{self, eval as ev, laya};
+
+    let client = if use_laya {
+        let config = laya::LayaConfig::new(sidecar.unwrap_or_else(laya::LayaConfig::bundled_script));
+        let client = laya::LayaClient::new(config);
+        let mut progress = client.subscribe();
+        let watcher = tokio::spawn(async move {
+            while progress.changed().await.is_ok() {
+                if let laya::LayaState::Loading { file: Some(file), received, total: Some(total) } =
+                    progress.borrow().clone()
+                {
+                    eprint!("\r  loading Laya: {file} {:.0}%   ", received as f64 / total.max(1) as f64 * 100.0);
+                }
+            }
+        });
+        let started = std::time::Instant::now();
+        client.load().await.context("loading Laya")?;
+        watcher.abort();
+        eprintln!("\r  Laya ready in {:.1}s                          ", started.elapsed().as_secs_f64());
+        Some(client)
+    } else {
+        None
+    };
+
+    if eval {
+        let report = ev::run(client.as_ref(), threshold).await;
+        println!("{} phrases\n", report.phrases);
+        let line = |name: &str, t: &ev::Tally| {
+            println!("{name:<28} right {:>3}   wrong {:>3}   unsure {:>3}", t.right, t.wrong, t.unsure)
+        };
+        line("matcher", &report.matcher);
+        if client.is_some() {
+            if let Some(error) = &report.laya_error {
+                println!("Laya failed: {error}");
+            }
+            for (t, tally) in &report.laya {
+                line(&format!("Laya alone at {t:.2}"), tally);
+            }
+            if let Some((p50, p95)) = report.latency() {
+                println!("\nLaya per decision: {p50} ms median, {p95} ms p95");
+            }
+            match report.suggested_threshold {
+                Some(t) => println!("never wrong on this set from a threshold of {t:.2}"),
+                None => println!("wrong at every threshold tried; keep the matcher and the head agent"),
+            }
+        }
+        println!();
+        line(&format!("all together at {threshold:.2}"), &report.combined);
+        let misses: Vec<&ev::Row> = report.rows.iter().filter(|r| r.verdict != ev::Verdict::Right).collect();
+        if !misses.is_empty() {
+            println!("\nnot right:");
+            for row in misses {
+                let laya = row
+                    .laya
+                    .as_ref()
+                    .map(|(got, c)| format!("  (Laya: {got}{})", c.map(|c| format!(" {c:.2}")).unwrap_or_default()))
+                    .unwrap_or_default();
+                println!(
+                    "  {:<6} {:?} → {} (expected {}){laya}",
+                    if row.verdict == ev::Verdict::Wrong { "WRONG" } else { "unsure" },
+                    row.said,
+                    row.combined,
+                    row.expect
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    let words = words.context("say something: `harness-cli voice \"what's waiting for me\"`, or --eval")?;
+    let snapshot = ev::fixture();
+    let heard = voice::interpret(words, &snapshot, client.as_ref(), threshold, None).await;
+    println!("{}", serde_json::to_string_pretty(&heard)?);
+    println!("\n(against the example harness in voice/phrases.toml; nothing was done)");
+    Ok(())
+}
+
 fn parse_autonomy(text: &str) -> Result<harness_core::autonomy::Autonomy, String> {
     harness_core::autonomy::Autonomy::parse(text)
         .ok_or_else(|| format!("`{text}` is not one of ask, review, land-safe, land-most"))
@@ -490,11 +598,18 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Voice needs no project: it reads words against a fixed example harness.
+    if let Command::Voice { words, eval, laya, threshold, sidecar } = &cli.command {
+        return voice(words.as_deref(), *eval, *laya, *threshold, sidecar.clone()).await;
+    }
+
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let harness = build_harness(&cli, tx).await?;
 
     match &cli.command {
-        Command::Hook { .. } => unreachable!("handled before the harness is built"),
+        Command::Hook { .. } | Command::Voice { .. } => {
+            unreachable!("handled before the harness is built")
+        }
 
         Command::Roles => {
             drop(rx);

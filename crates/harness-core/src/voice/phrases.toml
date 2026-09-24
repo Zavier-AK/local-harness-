@@ -1,0 +1,207 @@
+# Labelled phrases for the voice commander, against `eval::fixture()`:
+#   #1 builder   — done, a merge waiting (low risk)
+#   #2 tester    — running
+#   #3 reviewer  — a delegation waiting for approval
+#   a draft plan, a running night shift, projects "shop" (open) and "blog", autonomy Review,
+#   and an earlier landing (w-old) that can be undone.
+#
+# `expect` is the action and its key argument, as `eval::label` writes it; `to_head` means
+# the words should go to the head agent. The unit tests require that the phrase matcher is
+# never wrong on these — it may only be right or pass. `harness-cli voice --eval` runs them
+# through Laya too and reports how often it is right, wrong, or unsure, and how fast.
+
+# ---------------------------------------------------------------- status
+[[phrase]]
+said = "What's waiting for me?"
+expect = "status waiting"
+[[phrase]]
+said = "anything I need to look at"
+expect = "status waiting"
+[[phrase]]
+said = "status"
+expect = "status overview"
+[[phrase]]
+said = "how are things going"
+expect = "status overview"
+[[phrase]]
+said = "what's running right now"
+expect = "status workers"
+[[phrase]]
+said = "who's busy at the moment"
+expect = "status workers"
+[[phrase]]
+said = "How's the night shift going?"
+expect = "status night"
+[[phrase]]
+said = "did the overnight run find anything"
+expect = "status night"
+[[phrase]]
+said = "how far along is the plan"
+expect = "status plan"
+[[phrase]]
+said = "how much of my usage is left"
+expect = "status limits"
+
+# ---------------------------------------------------------------- navigation
+[[phrase]]
+said = "show me the plan"
+expect = "navigate plan"
+[[phrase]]
+said = "open settings"
+expect = "navigate settings"
+[[phrase]]
+said = "take me to the night shift page"
+expect = "navigate night"
+[[phrase]]
+said = "let me see the preview"
+expect = "navigate preview"
+[[phrase]]
+said = "back to the chat"
+expect = "navigate chat"
+[[phrase]]
+said = "switch to blog"
+expect = "switch_project blog"
+[[phrase]]
+said = "let's work on the blog project"
+expect = "switch_project blog"
+[[phrase]]
+said = "open worker two"
+expect = "open_worker #2"
+[[phrase]]
+said = "show me what the tester is doing"
+expect = "open_worker #2"
+
+# ---------------------------------------------------------------- merges, delegations, workers
+[[phrase]]
+said = "Approve the builder's merge."
+expect = "approve_merge #1"
+[[phrase]]
+said = "merge it"
+expect = "approve_merge #1"
+[[phrase]]
+said = "looks good, ship the builder's change"
+expect = "approve_merge #1"
+[[phrase]]
+said = "reject the builder's change because it drops the cache"
+expect = "reject_merge #1"
+[[phrase]]
+said = "throw that change away, it's wrong"
+expect = "reject_merge #1"
+[[phrase]]
+said = "approve the delegation"
+expect = "approve_delegation #3"
+[[phrase]]
+said = "let the reviewer start"
+expect = "approve_delegation #3"
+[[phrase]]
+said = "yeah the reviewer can go ahead"
+expect = "approve_delegation #3"
+[[phrase]]
+said = "decline the reviewer"
+expect = "decline_delegation #3"
+[[phrase]]
+said = "no, don't let the reviewer run that"
+expect = "decline_delegation #3"
+[[phrase]]
+said = "stop the tester"
+expect = "stop_worker #2"
+[[phrase]]
+said = "kill worker 2"
+expect = "stop_worker #2"
+[[phrase]]
+said = "undo that"
+expect = "undo_merge w-old"
+[[phrase]]
+said = "roll back the last change that landed"
+expect = "undo_merge w-old"
+
+# ---------------------------------------------------------------- the head agent
+[[phrase]]
+said = "stop"
+expect = "stop_turn"
+[[phrase]]
+said = "okay that's enough, stop talking"
+expect = "stop_turn"
+[[phrase]]
+said = "Tell Claude to add retries to the fetcher."
+expect = "ask_head"
+[[phrase]]
+said = "the fetcher keeps timing out, can we fix it"
+expect = "to_head"
+[[phrase]]
+said = "why is the login test flaky"
+expect = "to_head"
+[[phrase]]
+said = "refactor the payment module to use the new client"
+expect = "to_head"
+
+# ---------------------------------------------------------------- autonomy
+[[phrase]]
+said = "set autonomy to land safe"
+expect = "set_autonomy land_safe"
+[[phrase]]
+said = "switch to land most"
+expect = "set_autonomy land_most"
+[[phrase]]
+said = "ask mode"
+expect = "set_autonomy ask"
+[[phrase]]
+said = "from now on ask me before anything runs"
+expect = "set_autonomy ask"
+[[phrase]]
+said = "let the safe changes land by themselves"
+expect = "set_autonomy land_safe"
+
+# ---------------------------------------------------------------- the plan
+[[phrase]]
+said = "run the plan"
+expect = "run_plan"
+[[phrase]]
+said = "the plan looks good, go"
+expect = "run_plan"
+[[phrase]]
+said = "scrap the plan"
+expect = "discard_plan"
+[[phrase]]
+said = "forget that plan"
+expect = "discard_plan"
+
+# ---------------------------------------------------------------- the night shift
+[[phrase]]
+said = "stop the night shift"
+expect = "stop_night"
+[[phrase]]
+said = "call off the overnight run"
+expect = "stop_night"
+[[phrase]]
+said = "start a night shift to make the tests faster"
+expect = "night_setup"
+
+# ---------------------------------------------------------------- the computer
+[[phrase]]
+said = "open Safari"
+expect = "open_app safari"
+[[phrase]]
+said = "launch vs code"
+expect = "open_app visual studio code"
+[[phrase]]
+said = "could you fire up slack"
+expect = "open_app slack"
+[[phrase]]
+said = "open github.com"
+expect = "open_url github.com"
+[[phrase]]
+said = "go to docs dot rs"
+expect = "open_url docs.rs"
+[[phrase]]
+said = "open my downloads folder"
+expect = "open_folder ~/Downloads"
+[[phrase]]
+said = "show the project in finder"
+expect = "reveal_project"
+[[phrase]]
+said = "open the project in vs code"
+expect = "open_project_in_editor"
+[[phrase]]
+said = "open the fetcher test file"
+expect = "to_head"

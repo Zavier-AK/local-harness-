@@ -15,6 +15,8 @@ import AutonomyDial, { nextStop } from "./AutonomyDial";
 import PlanBoard from "./PlanBoard";
 import NightView from "./NightView";
 import SettingsView from "./SettingsView";
+import { SEND_DELAY_MS } from "./VoiceHud";
+import { dispatch, type VoiceHandlers } from "./voice";
 import { notifyIfAway } from "./notify";
 import { applySettings } from "./appSettings";
 import type {
@@ -23,6 +25,8 @@ import type {
   Plan,
   NightConfig,
   NightReport,
+  Heard,
+  VoicePhase,
   StepInput,
   ChatItem,
   HarnessEvent,
@@ -50,6 +54,11 @@ export default function App() {
   const [activePane, setActivePane] = useState<"chat" | "plan" | "night" | "preview">("chat");
   /** The project's night shift: running, or the last one's report. */
   const [night, setNight] = useState<NightReport | null>(null);
+  const [nightGoal, setNightGoal] = useState<{ goal: string | null; at: number } | null>(null);
+  const [voicePhase, setVoicePhase] = useState<VoicePhase>("idle");
+  const [voiceOn, setVoiceOn] = useState(false);
+  /** The latest handlers, for voice events that arrive between renders. */
+  const voiceHandlers = useRef<VoiceHandlers | null>(null);
   /** The plan on the board: the one under review or running, else the last one. */
   const [plan, setPlan] = useState<Plan | null>(null);
   const [fleetOpen, setFleetOpen] = useState(false);
@@ -81,6 +90,48 @@ export default function App() {
       .then(setNight)
       .catch(() => setNight(null));
   }, [session?.project_root]);
+
+  // Voice: what the shell hands over to run, and the running commentary for the chat.
+  useEffect(() => {
+    void invoke<{ settings: { enabled: boolean } }>("voice_status")
+      .then((status) => setVoiceOn(status.settings.enabled))
+      .catch(() => setVoiceOn(false));
+    let pendingSend: number | null = null;
+    const offs = [
+      listen<{ action: import("./types").VoiceAction }>("voice://run", ({ payload }) => {
+        if (voiceHandlers.current) dispatch(payload.action, voiceHandlers.current);
+      }),
+      listen<{ phase: VoicePhase }>("voice://state", ({ payload }) => setVoicePhase(payload.phase)),
+      listen<Heard>("voice://heard", ({ payload }) => {
+        setVoicePhase("idle");
+        const { interpretation, done, error, pending } = payload;
+        const outcome = interpretation.outcome;
+        const said = `🎙 “${interpretation.transcript}”`;
+        if (outcome.outcome === "to_head") {
+          // A moment to cancel from the voice bar before it reaches the head agent.
+          const text = outcome.text;
+          pendingSend = window.setTimeout(() => {
+            pendingSend = null;
+            voiceHandlers.current?.askHead(text);
+          }, SEND_DELAY_MS);
+          return;
+        }
+        if (outcome.outcome === "nothing" || (outcome.outcome === "act" && outcome.action.action === "status")) return;
+        const result = error ?? (pending ? `${pending.describe} — waiting for your yes` : done ?? (outcome.outcome === "act" ? outcome.describe : outcome.outcome === "clarify" ? outcome.question : outcome.text));
+        setChat((prev) => [...prev, { kind: "notice", tone: error ? "error" : "info", text: `${said} → ${result}` }]);
+      }),
+      listen("voice://cancel-send", () => {
+        if (pendingSend !== null) {
+          window.clearTimeout(pendingSend);
+          pendingSend = null;
+        }
+      }),
+    ];
+    return () => {
+      if (pendingSend !== null) window.clearTimeout(pendingSend);
+      offs.forEach((off) => void off.then((f) => f()));
+    };
+  }, []);
 
   async function startNight(config: NightConfig) {
     setNight(await invoke<NightReport>("start_night", { config }));
@@ -359,8 +410,9 @@ export default function App() {
     };
   }, [session, refreshUsage, refreshProjects]);
 
-  async function send(text: string) {
-    setChat((prev) => [...prev, { kind: "user", text }]);
+  /** `shown` is how it reads in the chat, when that differs — a 🎙 for what was said. */
+  async function send(text: string, shown: string = text) {
+    setChat((prev) => [...prev, { kind: "user", text: shown }]);
     setBusy(true);
     try {
       await invoke("send_turn", { text });
@@ -457,6 +509,40 @@ export default function App() {
     }
   }
 
+  voiceHandlers.current = {
+    navigate: (pane) => {
+      if (pane === "tools" || pane === "settings") {
+        setView(pane);
+      } else {
+        setView("session");
+        setActivePane(pane);
+      }
+    },
+    switchProject: (root) => void focusProject(root),
+    openWorker: (id) => setSelectedWorker(id),
+    askHead: (text) => void send(text, `🎙 ${text}`),
+    stopTurn: () => void stopTurn(),
+    stopWorker: (id) => void stopWorker(id),
+    resolveMerge: (id, approve) => void resolveMerge(id, approve),
+    undoMerge: (id) => void undoMerge(id),
+    decide: (id, approve, reason) => void decide(id, approve, reason),
+    setAutonomy: (level) => void changeAutonomy(level),
+    runPlan: () => {
+      if (plan) void runPlan(plan.steps.map(({ id, title, role, task, context_files, depends_on }) => ({ id, title, role, task, context_files, depends_on })));
+    },
+    discardPlan: () => void discardPlan(),
+    planFeedback: (note) => {
+      if (plan) void sendPlanFeedback(plan.steps, [], note);
+    },
+    stopNight: () => void stopNight(),
+    proposeNight: () => void proposeNight(),
+    nightSetup: (goal) => {
+      setView("session");
+      setActivePane("night");
+      setNightGoal({ goal, at: Date.now() });
+    },
+  };
+
   if (!session) {
     return (
       <StartGate
@@ -490,6 +576,26 @@ export default function App() {
         <span className="title">Harness</span>
         <span className="muted mono">{session.project_root}</span>
         <AutonomyDial level={autonomy} onChange={(level) => void changeAutonomy(level)} />
+        <button
+          className={`mic ${voicePhase} ${voiceOn ? "" : "off"}`}
+          title={voiceOn ? "Hold to talk (or hold ⌥Space anywhere)" : "Voice is off — turn it on in Settings"}
+          aria-label={voiceOn ? `Voice: ${voicePhase === "idle" ? "hold to talk" : voicePhase}` : "Voice is off"}
+          onPointerDown={() => {
+            if (voiceOn) void invoke("voice_start").catch(() => undefined);
+          }}
+          onPointerUp={() => {
+            if (voiceOn) void invoke("voice_stop").catch(() => undefined);
+            else setView("settings");
+          }}
+          onPointerLeave={() => {
+            if (voiceOn && voicePhase === "listening") void invoke("voice_stop").catch(() => undefined);
+          }}
+        >
+          <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden>
+            <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z" fill="currentColor" />
+            <path d="M6 11a6 6 0 0 0 12 0M12 17v4" stroke="currentColor" strokeWidth="1.8" fill="none" strokeLinecap="round" />
+          </svg>
+        </button>
         <BudgetMeter
           usage={usage}
           rateLimited={rateLimited}
@@ -518,7 +624,13 @@ export default function App() {
             />
           )}
           {view === "settings" && (
-            <SettingsView onSaved={applySettings} onClose={() => setView("session")} />
+            <SettingsView
+              onSaved={(saved) => {
+                applySettings(saved);
+                setVoiceOn(saved.voice.enabled);
+              }}
+              onClose={() => setView("session")}
+            />
           )}
           {/* The session stays mounted underneath, so a half-typed message survives. */}
           <div className={`session-pane ${view === "session" ? "" : "hidden"}`}>
@@ -611,6 +723,7 @@ export default function App() {
                 onStop={() => void stopNight()}
                 onPropose={() => void proposeNight()}
                 onSelectWorker={setSelectedWorker}
+                goalDraft={nightGoal}
               />
             </div>
             <div
@@ -844,6 +957,7 @@ function reduceWorkers(
         ...prev,
         [event.worker_id]: {
           id: event.worker_id,
+          number: event.number || undefined,
           role: event.role,
           provider: event.provider,
           isolation: event.isolation,

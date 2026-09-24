@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "voice",
+  "description": "The push-to-talk bar: it listens for voice events, and may tell the main window to cancel a message it is about to send.",
+  "windows": [
+    "voice-hud"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:event:allow-emit"
+  ]
+}

@@ -8,6 +8,8 @@ type Props = {
   onStop: () => void;
   onPropose: () => void;
   onSelectWorker: (id: string) => void;
+  /** A goal said aloud ("start a night shift to …"): open the form with it filled in. */
+  goalDraft?: { goal: string | null; at: number } | null;
 };
 
 const BLANK: NightConfig = {
@@ -99,7 +101,7 @@ function ScoreChart({ report }: { report: NightReport }) {
  * progress and Stop. Ended: the morning report, with the one action that matters —
  * put the kept work up for review.
  */
-export default function NightView({ report, roles, onStart, onStop, onPropose, onSelectWorker }: Props) {
+export default function NightView({ report, roles, onStart, onStop, onPropose, onSelectWorker, goalDraft }: Props) {
   const editors = roles.filter((role) => role.available && role.isolation === "worktree");
   const [config, setConfig] = useState<NightConfig>(() => ({ ...BLANK, role: editors[0]?.name ?? "" }));
   const [composing, setComposing] = useState(report === null);
@@ -117,6 +119,12 @@ export default function NightView({ report, roles, onStart, onStop, onPropose, o
       setComposing(true);
     }
   }, [report?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!goalDraft || report?.status === "running") return;
+    setComposing(true);
+    if (goalDraft.goal) setConfig((prev) => ({ ...prev, goal: goalDraft.goal ?? prev.goal }));
+  }, [goalDraft?.at]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Roles can arrive after the form; pick one as soon as there is one to pick.
   useEffect(() => {

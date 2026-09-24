@@ -112,6 +112,11 @@ pub enum HarnessEvent {
         model: Option<String>,
         isolation: String,
         cwd: String,
+        /// The worker's spoken number — "worker 3" — in the order this session started
+        /// them. Ids are UUIDs nobody can say; the engine fills this in when it records
+        /// the event, so every spawn path gets one.
+        #[serde(default)]
+        number: u32,
     },
     WorkerStatusChanged {
         worker_id: String,

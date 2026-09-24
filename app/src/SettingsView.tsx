@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { AppSettings } from "./types";
+import type { AppSettings, VoiceSettings } from "./types";
+import VoiceSettingsPanel from "./VoiceSettings";
 
 type Props = {
   onSaved: (settings: AppSettings) => void;
@@ -106,6 +107,11 @@ export default function SettingsView({ onSaved, onClose }: Props) {
           <span>Tell me when a worker finishes or a change waits for review, while I'm away</span>
         </label>
       </div>
+
+      <VoiceSettingsPanel
+        value={settings.voice}
+        onChange={(voice: VoiceSettings) => update({ voice })}
+      />
 
       <div className="settings-section">
         <h3>Accent</h3>

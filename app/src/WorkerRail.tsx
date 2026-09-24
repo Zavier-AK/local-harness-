@@ -137,7 +137,10 @@ export default function WorkerRail({
           onClick={() => onSelect(worker.id)}
         >
           <div className="worker-head">
-            <span className="role-name">{worker.role}</span>
+            <span className="role-name">
+              {worker.number !== undefined && <span className="worker-number" title={`Say "worker ${worker.number}"`}>#{worker.number}</span>}
+              {worker.role}
+            </span>
             <span className={`status ${worker.status}`}>{STATUS_LABEL[worker.status]}</span>
           </div>
 
@@ -203,7 +206,10 @@ function ApprovalCard({
   return (
     <div className="worker-card awaiting">
       <div className="worker-head">
-        <span className="role-name">{worker.role}</span>
+        <span className="role-name">
+          {worker.number !== undefined && <span className="worker-number">#{worker.number}</span>}
+          {worker.role}
+        </span>
         <span className="status awaiting_approval">waiting for you</span>
       </div>
       {mode === "view" && <p className="approval-task">{worker.task}</p>}

@@ -76,7 +76,7 @@ output can merge anything.
 
 ### Working and verified
 
-- **215 engine tests** (226 including the separate Tauri shell workspace), no network or
+- **242 engine tests** (259 including the separate Tauri shell workspace), no network or
   CLI login required.
 - **Orchestrator** — live end-to-end against the real `claude` CLI: it called `list_roles`,
   then `delegate`, a worker wrote into its worktree, and it correctly reported the work as
@@ -118,6 +118,20 @@ output can merge anything.
   Finding: on the first try, haiku left `depends_on` out, so both steps started together.
   The tool description now says what happens without it, and the board shows how many
   steps start at once so you catch it in review.
+- **Voice commander.** What was checked here:
+  - Without Laya, voice is right on 41 of the 60 labelled phrases and wrong on none. The
+    other 19 are paraphrases that are Laya's to read.
+  - The real `@receptron/laya` package runs in the helper. Its protocol and error paths
+    work, including a clean error when the weights can't be downloaded.
+  - whisper.cpp loads a model and transcribes 11 s of audio (a test model, CPU only).
+  - The voice bar, dispatch, the send countdown and its cancel, the confirmation buttons
+    and Settings were rendered headlessly against a stubbed bridge.
+
+  **Not verified here**, because Hugging Face is blocked on this build machine:
+  - real Laya decisions: run `harness-cli voice --eval --laya` on the Mac for accuracy
+    and speed;
+  - real Whisper accuracy;
+  - the microphone, the global hotkey, Metal, and spoken replies.
 - **Night shift** — live against the real CLI, with a haiku builder on a toy project
   (score: distinct lines in a file; guard: no line over 20 characters):
   - the starting point scored 2;
@@ -155,7 +169,7 @@ output can merge anything.
 
 ### Known gaps
 
-- **No CI.** The repository has no workflows, so the 215 tests run only by hand. This
+- **No CI.** The repository has no workflows, so the 242 tests run only by hand. This
   matters more than usual here: both CLIs' JSON output is parsed leniently against
   fixtures rather than a stable contract, so upstream schema drift would go unnoticed
   until a live run misbehaved. Deferred by choice.
@@ -205,12 +219,12 @@ In the order that unblocks the most.
    another, send feedback, then run the revision.
 8. **Try the autonomy slider** at Land safe on a project with `[verify]` set up, and see
    whether what lands by itself is what you would have merged.
-9. **Run a night shift on something real** with a score you trust: a benchmark, a
+9. **Measure voice on the Mac.** `brew install cmake`, then Settings › Voice: download
+   Whisper, and install and load Laya. Run `harness-cli voice --eval --laya` and set the
+   confidence to the suggested threshold. Add phrases you actually say to `phrases.toml`.
+10. **Run a night shift on something real** with a score you trust: a benchmark, a
    bundle size, a test count. Start with a few experiments and read the report before
    giving it a whole night.
-10. **Push-to-talk voice assistant**: a menu-bar popover and global hotkey,
-   on-device speech-to-text, fixed commands matched first, a *small* LM Studio model for
-   the rest (not `qwen3-coder-30b`), and "ask the fleet" sent to the head agent.
 11. **Add CI** when the schema-drift risk starts to bite.
 
 ## Risks worth tracking
