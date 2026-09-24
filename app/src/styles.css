@@ -884,8 +884,17 @@ body.hud::before { display: none; }
   flex-direction: column;
   gap: 8px;
   min-height: 56px;
+  position: relative;
+  padding-right: 40px;
 }
 .voice-hud.failed { border-color: var(--error); }
+.hud-close {
+  position: absolute; top: 8px; right: 10px;
+  width: 22px; height: 22px; padding: 0; border-radius: 999px;
+  border: none; background: transparent; color: var(--muted);
+  font-size: 16px; line-height: 22px; cursor: pointer;
+}
+.hud-close:hover, .hud-close:focus-visible { background: var(--border); color: var(--text); }
 .hud-row { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .hud-mic { font-size: 14px; color: var(--muted); flex: none; }
 .hud-mic.listening { color: var(--error); animation: hud-pulse 1s ease-in-out infinite; }

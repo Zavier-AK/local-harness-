@@ -398,7 +398,7 @@ pub fn create_hud(app: &AppHandle) -> tauri::Result<()> {
     if hud(app).is_some() {
         return Ok(());
     }
-    tauri::WebviewWindowBuilder::new(app, HUD_LABEL, tauri::WebviewUrl::App("index.html".into()))
+    let window = tauri::WebviewWindowBuilder::new(app, HUD_LABEL, tauri::WebviewUrl::App("index.html".into()))
         .title("Harness voice")
         .inner_size(460.0, 220.0)
         .resizable(false)
@@ -409,17 +409,27 @@ pub fn create_hud(app: &AppHandle) -> tauri::Result<()> {
         .visible_on_all_workspaces(true)
         .skip_taskbar(true)
         .focused(false)
+        .accept_first_mouse(true)
         .visible(false)
         .build()?;
+    #[cfg(target_os = "macos")]
+    bar_panel::make(&window)?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
     Ok(())
 }
 
+/// Show the bar at the top of the screen the pointer is on, which is the one being
+/// used, not necessarily the one Harness is on.
 fn show_hud(app: &AppHandle) {
     let Some(window) = hud(app) else { return };
-    if let Ok(Some(monitor)) = window
-        .current_monitor()
-        .or_else(|_| window.primary_monitor())
-    {
+    let monitor = app
+        .cursor_position()
+        .ok()
+        .and_then(|at| app.monitor_from_point(at.x, at.y).ok().flatten())
+        .or_else(|| window.current_monitor().ok().flatten())
+        .or_else(|| window.primary_monitor().ok().flatten());
+    if let Some(monitor) = monitor {
         let size = monitor.size();
         let scale = monitor.scale_factor();
         let width = (460.0 * scale) as i32;
@@ -427,13 +437,78 @@ fn show_hud(app: &AppHandle) {
         let y = monitor.position().y + (48.0 * scale) as i32;
         let _ = window.set_position(tauri::PhysicalPosition { x, y });
     }
+    #[cfg(target_os = "macos")]
+    bar_panel::show(app);
+    #[cfg(not(target_os = "macos"))]
     let _ = window.show();
 }
 
 #[tauri::command]
 pub fn voice_hide_hud(app: AppHandle) {
+    #[cfg(target_os = "macos")]
+    bar_panel::hide(&app);
+    #[cfg(not(target_os = "macos"))]
     if let Some(window) = hud(&app) {
         let _ = window.hide();
+    }
+}
+
+/// On macOS the bar is a non-activating panel, like Spotlight's. An ordinary window,
+/// even one on every desktop, is not drawn over another app's full-screen space, and
+/// showing it would switch to Harness. A panel floats over whatever is in front,
+/// on every desktop and full-screen app, and clicking it doesn't bring Harness forward.
+#[cfg(target_os = "macos")]
+mod bar_panel {
+    use super::HUD_LABEL;
+    use tauri::AppHandle;
+    use tauri_nspanel::{tauri_panel, CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt};
+
+    tauri_panel! {
+        panel!(VoiceBarPanel {
+            config: {
+                can_become_key_window: true,
+                is_floating_panel: true
+            }
+        })
+    }
+
+    /// Called from setup, on the main thread.
+    pub fn make(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+        let panel = window.to_panel::<VoiceBarPanel>()?;
+        panel.set_level(PanelLevel::PopUpMenu.value());
+        panel
+            .add_style_mask(StyleMask::empty().nonactivating_panel().into())
+            .map_err(|error| tauri::Error::Anyhow(error.into()))?;
+        panel.set_collection_behavior(
+            CollectionBehavior::new()
+                .can_join_all_spaces()
+                .full_screen_auxiliary()
+                .stationary()
+                .ignores_cycle()
+                .into(),
+        );
+        panel.set_hides_on_deactivate(false);
+        panel.set_floating_panel(true);
+        Ok(())
+    }
+
+    /// AppKit calls must happen on the main thread; voice runs on others.
+    pub fn show(app: &AppHandle) {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Ok(panel) = handle.get_webview_panel(HUD_LABEL) {
+                panel.show();
+            }
+        });
+    }
+
+    pub fn hide(app: &AppHandle) {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Ok(panel) = handle.get_webview_panel(HUD_LABEL) {
+                panel.hide();
+            }
+        });
     }
 }
 

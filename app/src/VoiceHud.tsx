@@ -110,6 +110,17 @@ export default function VoiceHud() {
 
   return (
     <div className={`voice-hud phase-${phase} ${heard?.error || phase === "error" ? "failed" : ""}`} role="status" aria-live="polite">
+      <button
+        className="hud-close"
+        aria-label="Hide the voice bar"
+        title="Hide"
+        onClick={() => {
+          keep();
+          void invoke("voice_hide_hud");
+        }}
+      >
+        ×
+      </button>
       {listening && (
         <div className="hud-row">
           <span className="hud-mic listening" aria-hidden>

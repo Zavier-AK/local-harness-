@@ -126,6 +126,12 @@ output can merge anything.
       the words. They are now matched against installed apps.
     - Commands had to wait for the key to be let go. Now each runs at the pause after it,
       while the key is held.
+  - The bar was missing over full-screen Chrome and on other desktops, because it was an
+    ordinary window. It is now a non-activating panel (`tauri-nspanel`) at pop-up-menu
+    level, on every Space and over full-screen apps. It opens on the screen with the
+    pointer, and has a close button. The macOS code type-checks and passes clippy
+    against `aarch64-apple-darwin`. **Not verified here:** how it looks and behaves on a
+    real Mac.
   - Text meant for Claude now goes into the chat box and is never sent automatically.
   - Inside apps, from the Mac tries ("open chrome and search for shoes", "open spotify and
     play my playlist called top 200" went to Claude): web search, music control, notes,

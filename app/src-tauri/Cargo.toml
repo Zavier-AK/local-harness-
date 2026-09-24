@@ -40,6 +40,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Metal for Whisper on Apple silicon.
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
+# The voice bar as a floating panel, so it shows over full-screen apps too.
+tauri-nspanel = "2.1"
 
 [dev-dependencies]
 tempfile = "3"
