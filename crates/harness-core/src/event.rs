@@ -165,6 +165,17 @@ pub enum HarnessEvent {
         worker_id: String,
         commit: String,
     },
+    /// A plan was proposed, edited, or moved on — the whole plan, so the board redraws
+    /// from one event.
+    PlanUpdated {
+        plan: crate::plan::Plan,
+    },
+    /// Every step of a running plan reached a final state.
+    PlanFinished {
+        plan_id: String,
+        title: String,
+        outcome: String,
+    },
     /// Checks began on a proposed merge's branch.
     VerificationStarted {
         worker_id: String,
@@ -286,6 +297,8 @@ impl HarnessEvent {
             | Self::VerificationStarted { worker_id }
             | Self::VerificationCheck { worker_id, .. }
             | Self::VerificationFinished { worker_id, .. } => worker_id,
+            Self::PlanUpdated { plan } => &plan.id,
+            Self::PlanFinished { plan_id, .. } => plan_id,
         }
     }
 }

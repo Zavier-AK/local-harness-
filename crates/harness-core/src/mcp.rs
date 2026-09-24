@@ -36,6 +36,17 @@ pub struct DelegateParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PlanParams {
+    /// A few words: what the plan achieves.
+    pub title: String,
+    /// Two or three sentences: the approach, and anything the person should weigh.
+    #[serde(default)]
+    pub summary: String,
+    /// The steps, each one worker's job.
+    pub steps: Vec<crate::plan::StepInput>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct WorkerIdParams {
     pub worker_id: String,
 }
@@ -292,6 +303,31 @@ impl HarnessTools {
     }
 
     #[tool(
+        name = "propose_plan",
+        description = "Show the person a plan for work with more than one step, instead of \
+                       delegating the steps yourself. Each step is one worker's job: an id, a \
+                       short title, a role, a self-contained task, and the ids of steps that \
+                       must land before it (depends_on). Set depends_on whenever a step needs \
+                       another's changes: steps without it run at the same time, each on its \
+                       own copy of the code. The person edits, comments on, or \
+                       runs it on a board; returns at once. When they run it, the harness \
+                       starts the steps itself and tells you how it ends. Proposing again \
+                       replaces a plan still under review."
+    )]
+    async fn propose_plan(&self, Parameters(params): Parameters<PlanParams>) -> Json<serde_json::Value> {
+        match self.harness.propose_plan(&params.title, &params.summary, params.steps).await {
+            Ok(plan) => Json(serde_json::json!({
+                "plan_id": plan.id,
+                "status": "shown to the person",
+                "note": "It runs only when they choose to run it, possibly after editing it. \
+                         Do not delegate its steps yourself. End your turn; you will be told \
+                         if they comment, and how it ends if they run it."
+            })),
+            Err(err) => Json(serde_json::json!({ "error": format!("{err:#}") })),
+        }
+    }
+
+    #[tool(
         name = "request_merge",
         description = "Propose landing a worker's changes. This does NOT merge: it queues \
                        the diff for the human to review and approve in the app. Say so \
@@ -362,7 +398,7 @@ impl McpServer {
 
     /// Tool names to pass to `--allowedTools` so delegation needs no approval prompt.
     pub fn allowed_tool_names() -> Vec<String> {
-        ["list_roles", "delegate", "delegate_async", "check_workers", "collect", "request_merge"]
+        ["list_roles", "delegate", "delegate_async", "check_workers", "collect", "request_merge", "propose_plan"]
             .iter()
             .map(|t| format!("mcp__{SERVER_NAME}__{t}"))
             .collect()

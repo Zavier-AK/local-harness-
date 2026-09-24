@@ -76,7 +76,7 @@ output can merge anything.
 
 ### Working and verified
 
-- **196 engine tests** (207 including the separate Tauri shell workspace), no network or
+- **205 engine tests** (216 including the separate Tauri shell workspace), no network or
   CLI login required.
 - **Orchestrator** — live end-to-end against the real `claude` CLI: it called `list_roles`,
   then `delegate`, a worker wrote into its worktree, and it correctly reported the work as
@@ -108,6 +108,16 @@ output can merge anything.
   - a real Claude reviewer returned a JSON verdict that parsed, giving low risk;
   - the checkout was removed afterwards.
   Failure, escalation, "unverified" and merge-while-checking are covered by engine tests.
+- **Plan board** — live against the real CLI:
+  - a haiku head agent called `propose_plan` for two steps, the second depending on the
+    first, and `--run-plans` ran it;
+  - step two waited while step one was checked and landed on its own at Land safe;
+  - step two then ran on top of it and landed too; the commit order shows the dependency
+    held.
+
+  Finding: on the first try, haiku left `depends_on` out, so both steps started together.
+  The tool description now says what happens without it, and the board shows how many
+  steps start at once so you catch it in review.
 - **Autonomy slider** — Ask verified live: with the level at Ask, the real head agent's
   native `Agent` call was refused by the hook, it delegated through `delegate` instead,
   and that returned awaiting approval. Auto-landing, its refusals, undo and conflict
@@ -136,7 +146,7 @@ output can merge anything.
 
 ### Known gaps
 
-- **No CI.** The repository has no workflows, so the 196 tests run only by hand. This
+- **No CI.** The repository has no workflows, so the 205 tests run only by hand. This
   matters more than usual here: both CLIs' JSON output is parsed leniently against
   fixtures rather than a stable contract, so upstream schema drift would go unnoticed
   until a live run misbehaved. Deferred by choice.
@@ -182,12 +192,14 @@ In the order that unblocks the most.
    section of the review drawer — and report what feels off.
 6. **Turn on `[verify]`** in a real project: its test command, and a cheap reviewer. Watch
    whether the risk levels match your own judgement before trusting them for more.
-7. **Try the autonomy slider** at Land safe on a project with `[verify]` set up, and see
+7. **Ask for a multi-step change and review it on the Plan tab** — edit a step, comment on
+   another, send feedback, then run the revision.
+8. **Try the autonomy slider** at Land safe on a project with `[verify]` set up, and see
    whether what lands by itself is what you would have merged.
-8. **Push-to-talk voice assistant**: a menu-bar popover and global hotkey,
+9. **Push-to-talk voice assistant**: a menu-bar popover and global hotkey,
    on-device speech-to-text, fixed commands matched first, a *small* LM Studio model for
    the rest (not `qwen3-coder-30b`), and "ask the fleet" sent to the head agent.
-9. **Add CI** when the schema-drift risk starts to bite.
+10. **Add CI** when the schema-drift risk starts to bite.
 
 ## Risks worth tracking
 

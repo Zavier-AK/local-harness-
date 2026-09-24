@@ -1142,3 +1142,166 @@ async fn a_merge_that_fails_stays_proposed_for_the_person() {
     assert!(status.stdout.is_empty(), "{}", String::from_utf8_lossy(&status.stdout));
     assert_eq!(tokio::fs::read_to_string(f.root.join("README.md")).await.unwrap(), "ours\n");
 }
+
+// ---------------------------------------------------------------------- plans
+
+use harness_core::plan::{PlanStatus, StepInput, StepState};
+
+fn plan_step(id: &str, task: &str, deps: &[&str]) -> StepInput {
+    StepInput {
+        id: id.into(),
+        title: format!("step {id}"),
+        role: "local_builder".into(),
+        task: task.into(),
+        context_files: vec![],
+        depends_on: deps.iter().map(|d| d.to_string()).collect(),
+    }
+}
+
+async fn plan_until(
+    f: &Fixture,
+    plan_id: &str,
+    done: impl Fn(&harness_core::plan::Plan) -> bool,
+) -> harness_core::plan::Plan {
+    for _ in 0..200 {
+        let plans = f.harness.plans().await;
+        if let Some(plan) = plans.iter().find(|p| p.id == plan_id) {
+            if done(plan) {
+                return plan.clone();
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("plan did not get there: {:?}", f.harness.plans().await);
+}
+
+#[tokio::test]
+async fn a_proposed_plan_runs_nothing_until_the_person_runs_it() {
+    let mut f = fixture().await;
+    let plan = f
+        .harness
+        .propose_plan("Add notes", "", vec![plan_step("a", "WRITE:a.md:a", &[])])
+        .await
+        .unwrap();
+    assert_eq!(plan.status, PlanStatus::Draft);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(f.harness.workers().await.is_empty(), "a draft runs nothing");
+    assert!(drain(&mut f.events).iter().any(|e| matches!(e, HarnessEvent::PlanUpdated { .. })));
+
+    // A revision replaces the draft rather than piling up.
+    let revised = f
+        .harness
+        .propose_plan("Add notes v2", "", vec![plan_step("a", "WRITE:a.md:a", &[])])
+        .await
+        .unwrap();
+    let plans = f.harness.plans().await;
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].id, revised.id);
+}
+
+#[tokio::test]
+async fn a_dependent_step_waits_until_the_one_before_it_has_landed() {
+    let f = fixture().await;
+    let plan = f
+        .harness
+        .propose_plan(
+            "Two steps",
+            "",
+            vec![plan_step("a", "WRITE:a.md:first", &[]), plan_step("b", "WRITE:b.md:second", &["a"])],
+        )
+        .await
+        .unwrap();
+    f.harness.run_plan(&plan.id, None).await.unwrap();
+
+    // `a` finishes and waits for review; `b` must not start on top of unmerged work.
+    let waiting = plan_until(&f, &plan.id, |p| p.steps[0].state == StepState::Review).await;
+    assert_eq!(waiting.steps[1].state, StepState::Waiting);
+    assert!(waiting.steps[1].worker_id.is_none());
+
+    // The person merges `a`; now `b` runs, and sees `a`'s file in its worktree.
+    let a_worker = waiting.steps[0].worker_id.clone().unwrap();
+    f.harness.approve_merge(&a_worker).await.unwrap();
+    let running = plan_until(&f, &plan.id, |p| p.steps[1].state == StepState::Review).await;
+    let b_worker = running.steps[1].worker_id.clone().unwrap();
+    f.harness.approve_merge(&b_worker).await.unwrap();
+
+    let done = plan_until(&f, &plan.id, |p| p.status == PlanStatus::Finished).await;
+    assert!(done.steps.iter().all(|s| s.state == StepState::Landed));
+    assert!(f.root.join("a.md").exists() && f.root.join("b.md").exists());
+}
+
+#[tokio::test]
+async fn a_discarded_step_fails_and_what_depends_on_it_is_skipped() {
+    let mut f = fixture().await;
+    let plan = f
+        .harness
+        .propose_plan(
+            "Chain",
+            "",
+            vec![plan_step("a", "WRITE:a.md:x", &[]), plan_step("b", "WRITE:b.md:y", &["a"])],
+        )
+        .await
+        .unwrap();
+    f.harness.run_plan(&plan.id, None).await.unwrap();
+    let review = plan_until(&f, &plan.id, |p| p.steps[0].state == StepState::Review).await;
+    f.harness.reject_merge(review.steps[0].worker_id.as_ref().unwrap()).await.unwrap();
+
+    let done = plan_until(&f, &plan.id, |p| p.status == PlanStatus::Finished).await;
+    assert_eq!(done.steps[0].state, StepState::Failed);
+    assert_eq!(done.steps[1].state, StepState::Skipped);
+    assert!(drain(&mut f.events)
+        .iter()
+        .any(|e| matches!(e, HarnessEvent::PlanFinished { outcome, .. } if outcome.contains("skipped"))));
+}
+
+#[tokio::test]
+async fn independent_steps_run_together_and_land_by_themselves_when_the_level_allows() {
+    let f = fixture_with(&with_verify("commands = [\"true\"]")).await;
+    f.harness.set_autonomy(Autonomy::LandSafe).await;
+    let plan = f
+        .harness
+        .propose_plan(
+            "Parallel",
+            "",
+            vec![plan_step("a", "WRITE:a.md:1", &[]), plan_step("b", "WRITE:b.md:2", &[])],
+        )
+        .await
+        .unwrap();
+    f.harness.run_plan(&plan.id, None).await.unwrap();
+
+    let done = plan_until(&f, &plan.id, |p| p.status == PlanStatus::Finished).await;
+    assert!(done.steps.iter().all(|s| s.state == StepState::Landed), "{done:?}");
+    assert!(f.root.join("a.md").exists() && f.root.join("b.md").exists());
+}
+
+#[tokio::test]
+async fn the_person_can_edit_or_stop_a_plan() {
+    let f = fixture().await;
+    let plan = f
+        .harness
+        .propose_plan("Edit me", "", vec![plan_step("a", "WRITE:a.md:old", &[])])
+        .await
+        .unwrap();
+    // Run with an edited task: the edit is what runs.
+    f.harness
+        .run_plan(&plan.id, Some(vec![plan_step("a", "WRITE:edited.md:new", &[])]))
+        .await
+        .unwrap();
+    let review = plan_until(&f, &plan.id, |p| p.steps[0].state == StepState::Review).await;
+    let worker = f.harness.worker(review.steps[0].worker_id.as_ref().unwrap()).await.unwrap();
+    assert_eq!(worker.diff.unwrap().files, ["edited.md"]);
+    assert!(f.harness.edit_plan(&plan.id, vec![plan_step("a", "x", &[])]).await.is_err(), "not once running");
+
+    // Stopping a running plan skips what has not started.
+    let two = f
+        .harness
+        .propose_plan("Stop me", "", vec![plan_step("a", "WRITE:c.md:1", &[]), plan_step("b", "WRITE:d.md:2", &["a"])])
+        .await
+        .unwrap();
+    f.harness.run_plan(&two.id, None).await.unwrap();
+    plan_until(&f, &two.id, |p| p.steps[1].state == StepState::Waiting).await;
+    f.harness.discard_plan(&two.id).await.unwrap();
+    let stopped = f.harness.plans().await.into_iter().find(|p| p.id == two.id).unwrap();
+    assert_eq!(stopped.status, PlanStatus::Discarded);
+    assert_eq!(stopped.steps[1].state, StepState::Skipped);
+}

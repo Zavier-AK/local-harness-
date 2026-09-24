@@ -46,6 +46,11 @@ struct Cli {
     #[arg(long, global = true, default_value = "review", value_parser = parse_autonomy)]
     autonomy: harness_core::autonomy::Autonomy,
 
+    /// Run plans the head agent proposes, unedited. Headless, there is no board to
+    /// review them on; without this they are printed and left alone.
+    #[arg(long, global = true)]
+    run_plans: bool,
+
     /// Skills and MCP servers for Claude workers. Defaults to the desktop app's, so
     /// both use one library.
     #[arg(long, global = true)]
@@ -191,6 +196,29 @@ fn render(event: &HarnessEvent, streaming: &mut bool) {
                 diff.files_changed, diff.insertions, diff.deletions
             );
         }
+        HarnessEvent::PlanUpdated { plan } => {
+            end_stream(streaming);
+            let lanes: Vec<String> = plan
+                .steps
+                .iter()
+                .map(|s| {
+                    let state = serde_json::to_value(s.state)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .unwrap_or_default();
+                    if s.input.depends_on.is_empty() {
+                        format!("{}={state}", s.input.id)
+                    } else {
+                        format!("{}(after {})={state}", s.input.id, s.input.depends_on.join(","))
+                    }
+                })
+                .collect();
+            println!("  ▦ plan \"{}\" [{:?}]: {}", plan.title, plan.status, lanes.join(" "));
+        }
+        HarnessEvent::PlanFinished { title, outcome, .. } => {
+            end_stream(streaming);
+            println!("  ▦ plan \"{title}\" finished — {outcome}");
+        }
         HarnessEvent::DelegationRequested { worker_id, role, task } => {
             end_stream(streaming);
             println!("  ? {worker_id} [{role}] awaits approval: {}", task.lines().next().unwrap_or_default());
@@ -278,6 +306,7 @@ fn spawn_renderer(
     mut events: UnboundedReceiver<HarnessEvent>,
     harness: Weak<Harness>,
     turn_done: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    run_plans: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut streaming = false;
@@ -286,6 +315,13 @@ fn spawn_renderer(
             // tail of the stream after it is gone is still worth doing.
             if let Some(harness) = harness.upgrade() {
                 harness.note_event(&event).await;
+                if let HarnessEvent::PlanUpdated { plan } = &event {
+                    if run_plans && plan.status == harness_core::plan::PlanStatus::Draft {
+                        if let Err(err) = harness.run_plan(&plan.id, None).await {
+                            eprintln!("  ✗ could not run the plan: {err:#}");
+                        }
+                    }
+                }
                 // Headless: there is nobody to approve a delegation, so under `Ask` say so
                 // and decline it rather than leave the head agent waiting forever.
                 if let HarnessEvent::DelegationRequested { worker_id, .. } = &event {
@@ -471,7 +507,7 @@ async fn main() -> Result<()> {
             context_file,
             patch,
         } => {
-            let renderer = spawn_renderer(rx, Arc::downgrade(&harness), None);
+            let renderer = spawn_renderer(rx, Arc::downgrade(&harness), None, false);
             let record = harness.delegate(role, task, context_file.clone()).await?;
 
             println!("\n--- result ---\n{}", record.summary);
@@ -526,9 +562,9 @@ async fn main() -> Result<()> {
             println!("MCP server: {}", orchestrator.mcp_url());
 
             let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel();
-            let renderer = spawn_renderer(worker_events, Arc::downgrade(&harness), None);
+            let renderer = spawn_renderer(worker_events, Arc::downgrade(&harness), None, cli.run_plans);
             let orchestrator_renderer =
-                spawn_renderer(orchestrator_events, Arc::downgrade(&harness), Some(done_tx));
+                spawn_renderer(orchestrator_events, Arc::downgrade(&harness), Some(done_tx), cli.run_plans);
 
             let mut orchestrator = orchestrator;
             for (index, turn) in turns.iter().enumerate() {
@@ -555,7 +591,8 @@ async fn main() -> Result<()> {
             // Exiting now would cut both off and leave the verdict unprinted.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
             while std::time::Instant::now() < deadline {
-                let working = harness.workers().await.iter().any(|w| !w.status.is_terminal());
+                let working = harness.workers().await.iter().any(|w| !w.status.is_terminal())
+                    || harness.plans_running().await;
                 if !working && harness.verifications_running().await == 0 {
                     break;
                 }
@@ -575,7 +612,7 @@ async fn main() -> Result<()> {
             println!("\nmcp-config:\n{}", server.claude_mcp_config());
             println!("\nCtrl-C to stop.");
 
-            let renderer = spawn_renderer(rx, Arc::downgrade(&harness), None);
+            let renderer = spawn_renderer(rx, Arc::downgrade(&harness), None, false);
             tokio::signal::ctrl_c().await?;
             server.shutdown().await;
             drop(harness);

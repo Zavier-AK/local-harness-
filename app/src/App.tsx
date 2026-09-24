@@ -12,12 +12,15 @@ import BudgetMeter from "./BudgetMeter";
 import PreviewPanel from "./PreviewPanel";
 import ToolsView from "./ToolsView";
 import AutonomyDial, { nextStop } from "./AutonomyDial";
+import PlanBoard from "./PlanBoard";
 import SettingsView from "./SettingsView";
 import { notifyIfAway } from "./notify";
 import { applySettings } from "./appSettings";
 import type {
   AppSettings,
   Autonomy,
+  Plan,
+  StepInput,
   ChatItem,
   HarnessEvent,
   McpStatus,
@@ -41,7 +44,9 @@ export default function App() {
   const [rateLimited, setRateLimited] = useState(false);
   const [selectedWorker, setSelectedWorker] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [activePane, setActivePane] = useState<"chat" | "preview">("chat");
+  const [activePane, setActivePane] = useState<"chat" | "plan" | "preview">("chat");
+  /** The plan on the board: the one under review or running, else the last one. */
+  const [plan, setPlan] = useState<Plan | null>(null);
   const [fleetOpen, setFleetOpen] = useState(false);
   const [projects, setProjects] = useState<ProjectView[]>([]);
   const [switching, setSwitching] = useState(false);
@@ -53,6 +58,55 @@ export default function App() {
   const [autonomy, setAutonomy] = useState<Autonomy>("review");
   /** Per project: which MCP servers its head agent's CLI managed to connect. */
   const [mcpStatus, setMcpStatus] = useState<Record<string, McpStatus>>({});
+
+  // The project's plans, re-read when a different project comes to the front.
+  useEffect(() => {
+    if (!session?.project_root) return;
+    invoke<Plan[]>("list_plans")
+      .then((plans) => {
+        const live = plans.find((p) => p.status === "draft" || p.status === "running");
+        setPlan(live ?? plans.find((p) => p.status === "finished") ?? null);
+      })
+      .catch(() => setPlan(null));
+  }, [session?.project_root]);
+
+  async function runPlan(steps: StepInput[]) {
+    if (!plan) return;
+    try {
+      await invoke("run_plan", { planId: plan.id, steps });
+    } catch (err) {
+      setChat((prev) => [...prev, { kind: "notice", tone: "error", text: String(err) }]);
+    }
+  }
+
+  async function sendPlanFeedback(
+    steps: StepInput[],
+    comments: { step_id: string; text: string }[],
+    note: string,
+  ) {
+    if (!plan) return;
+    try {
+      await invoke("plan_feedback", { planId: plan.id, steps, comments, note });
+      setBusy(true);
+      setActivePane("chat");
+      setChat((prev) => [
+        ...prev,
+        { kind: "user", text: note.trim() || "Feedback on the plan" },
+        { kind: "notice", tone: "info", text: `Sent ${comments.length} comment(s) on the plan; the head agent is revising it.` },
+      ]);
+    } catch (err) {
+      setChat((prev) => [...prev, { kind: "notice", tone: "error", text: String(err) }]);
+    }
+  }
+
+  async function discardPlan() {
+    if (!plan) return;
+    try {
+      await invoke("discard_plan", { planId: plan.id });
+    } catch (err) {
+      setChat((prev) => [...prev, { kind: "notice", tone: "error", text: String(err) }]);
+    }
+  }
 
   // The project's autonomy level, read whenever a different project comes to the front.
   const activeRoot = session?.project_root;
@@ -194,6 +248,18 @@ export default function App() {
         setRateLimited(payload.error === "rate_limit");
       }
       if (payload.type === "turn_interrupted") setBusy(false);
+      if (payload.type === "plan_updated") {
+        const incoming = payload.plan;
+        setPlan((current) => {
+          // A discarded plan leaves the board only if it is the one on it.
+          if (incoming.status === "discarded") return current?.id === incoming.id ? null : current;
+          return incoming;
+        });
+        if (incoming.status === "draft") {
+          setActivePane("plan");
+          void notifyIfAway("The head agent proposed a plan", incoming.title);
+        }
+      }
       if (payload.type === "run_finished") {
         if (payload.run_id === headRun.current) setBusy(false);
         setRateLimited(false);
@@ -424,6 +490,20 @@ export default function App() {
               </button>
               <button
                 role="tab"
+                aria-selected={activePane === "plan"}
+                className={activePane === "plan" ? "active" : ""}
+                onClick={() => setActivePane("plan")}
+              >
+                Plan
+                {plan?.status === "draft" && <span className="tab-dot" aria-label="waiting for you" />}
+                {plan?.status === "running" && (
+                  <span className="tab-count">
+                    {plan.steps.filter((s) => s.state === "landed").length}/{plan.steps.length}
+                  </span>
+                )}
+              </button>
+              <button
+                role="tab"
                 aria-selected={activePane === "preview"}
                 className={activePane === "preview" ? "active" : ""}
                 onClick={() => setActivePane("preview")}
@@ -443,6 +523,21 @@ export default function App() {
                 onSend={send}
                 onSelectWorker={setSelectedWorker}
                 onUndo={(id) => void undoMerge(id)}
+              />
+            </div>
+            <div
+              className={`tab-panel plan-panel ${activePane === "plan" ? "" : "hidden"}`}
+              role="tabpanel"
+              aria-hidden={activePane !== "plan"}
+            >
+              <PlanBoard
+                plan={plan}
+                roles={session.roles}
+                workers={workers}
+                onRun={(steps) => void runPlan(steps)}
+                onFeedback={(steps, comments, note) => void sendPlanFeedback(steps, comments, note)}
+                onDiscard={() => void discardPlan()}
+                onSelectWorker={setSelectedWorker}
               />
             </div>
             <div
@@ -556,6 +651,20 @@ function reduceChat(
       return prev.map((item) =>
         item.kind === "landed" && item.workerId === event.worker_id ? { ...item, undone: true } : item,
       );
+
+    case "plan_updated":
+      if (event.plan.status !== "draft") return prev;
+      return [
+        ...prev,
+        {
+          kind: "notice",
+          tone: "info",
+          text: `Proposed a plan — "${event.plan.title}", ${event.plan.steps.length} step(s). Review it on the Plan tab.`,
+        },
+      ];
+
+    case "plan_finished":
+      return [...prev, { kind: "notice", tone: "info", text: `Plan "${event.title}" finished.` }];
 
     case "merge_not_landed":
       return [
