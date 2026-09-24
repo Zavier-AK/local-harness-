@@ -273,6 +273,10 @@ me?" is three commands in one hold. Letting go finishes whatever you were saying
 is a commander for the harness itself, plus a small, safe list of things on the Mac. It
 is off until you turn it on in **Settings › Voice** and click **Save**.
 
+The bar appears at the top of the screen you're using. It works on any desktop and over
+full-screen apps (on macOS it's a floating panel, like Spotlight), and using it doesn't
+switch you to Harness. Click **×** to hide it.
+
 - **Look:** "what's waiting for me?", "what's running", "how's the night shift going?",
   "show me the plan", "switch to blog", "open worker 3".
 - **Decide:** "approve the builder's merge", "reject it because it drops the cache",
