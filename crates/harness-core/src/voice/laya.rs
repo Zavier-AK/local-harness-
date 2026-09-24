@@ -523,8 +523,13 @@ pub fn decide(
             ),
         },
         "computer" => match sure("computer_target") {
-            Some((t, p)) if t == "app" => match &slots.app {
-                Some(name) => act(VoiceAction::OpenApp { name: name.clone() }, both(p)),
+            // Laya says "an app"; only an app that is installed makes it one. Anything
+            // else after "open" is most likely about the work.
+            Some((t, p)) if t == "app" => match slots.app.as_deref() {
+                Some(phrase) => match matcher::resolve_open(phrase, snapshot) {
+                    Some(action) => act(action, both(p)),
+                    None => to_head(both(p)),
+                },
                 None => ask("Which app?", both(p)),
             },
             Some((t, p)) if t == "website" => match &slots.url {

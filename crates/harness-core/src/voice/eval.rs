@@ -84,6 +84,23 @@ pub fn fixture() -> Snapshot {
         }),
         autonomy: Autonomy::Review,
         landed: vec!["w-old".into()],
+        apps: [
+            "Notes",
+            "Safari",
+            "Visual Studio Code",
+            "Slack",
+            "Google Chrome",
+            "Cursor",
+            "Terminal",
+            "Finder",
+            "Microsoft Word",
+            "Microsoft Excel",
+            "LM Studio",
+            "System Settings",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
     }
 }
 

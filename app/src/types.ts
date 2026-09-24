@@ -407,6 +407,7 @@ export type VoiceSettings = {
   confidence: number;
   laya_idle_minutes: number;
   speak_replies: boolean;
+  pause_ms: number;
 };
 
 export type Pane = "chat" | "plan" | "night" | "preview" | "tools" | "settings";

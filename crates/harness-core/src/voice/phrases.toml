@@ -3,7 +3,9 @@
 #   #2 tester    — running
 #   #3 reviewer  — a delegation waiting for approval
 #   a draft plan, a running night shift, projects "shop" (open) and "blog", autonomy Review,
-#   and an earlier landing (w-old) that can be undone.
+#   an earlier landing (w-old) that can be undone, and a dozen installed apps (Notes,
+#   Safari, Visual Studio Code, Slack, Google Chrome, Cursor, Terminal, Finder, Microsoft
+#   Word and Excel, LM Studio, System Settings).
 #
 # `expect` is the action and its key argument, as `eval::label` writes it; `to_head` means
 # the words should go to the head agent. The unit tests require that the phrase matcher is
@@ -204,4 +206,39 @@ said = "open the project in vs code"
 expect = "open_project_in_editor"
 [[phrase]]
 said = "open the fetcher test file"
+expect = "to_head"
+
+# Apps are only apps if they are installed; the words around the name don't matter.
+[[phrase]]
+said = "open notes"
+expect = "open_app notes"
+[[phrase]]
+said = "can you open notes for me"
+expect = "open_app notes"
+[[phrase]]
+said = "open apple notes"
+expect = "open_app notes"
+[[phrase]]
+said = "Open Cursor."
+expect = "open_app cursor"
+[[phrase]]
+said = "open curser"
+expect = "open_app cursor"
+[[phrase]]
+said = "open word"
+expect = "open_app microsoft word"
+[[phrase]]
+said = "launch the chrome app"
+expect = "open_app google chrome"
+[[phrase]]
+said = "open github"
+expect = "open_url github.com"
+[[phrase]]
+said = "open the login page and make the button bigger"
+expect = "to_head"
+[[phrase]]
+said = "open a pull request for this"
+expect = "to_head"
+[[phrase]]
+said = "open the readme"
 expect = "to_head"

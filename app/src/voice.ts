@@ -80,7 +80,7 @@ export function replyLine(heard: Heard): string | null {
     case "reply":
       return outcome.text;
     case "to_head":
-      return "Sending that to Claude.";
+      return "In the chat box — edit it and send when ready.";
     case "nothing":
       return null;
     case "act":

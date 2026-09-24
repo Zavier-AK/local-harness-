@@ -10,6 +10,8 @@ type Props = {
   onStop: () => void;
   onSelectWorker: (id: string) => void;
   onUndo: (workerId: string) => void;
+  /** Words said for the head agent: added to the box to edit and send, never sent. */
+  dictated?: { text: string; at: number } | null;
 };
 
 /** Tool calls into the harness read as delegation, not as plumbing. */
@@ -33,9 +35,22 @@ function toolLabel(name: string): string {
   }
 }
 
-export default function HeadChat({ items, busy, onSend, onStop, onSelectWorker, onUndo }: Props) {
+export default function HeadChat({ items, busy, onSend, onStop, onSelectWorker, onUndo, dictated }: Props) {
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // What was said lands after anything already typed, ready to edit.
+  useEffect(() => {
+    if (!dictated?.text) return;
+    setDraft((prev) => (prev.trim() ? `${prev.trimEnd()} ${dictated.text}` : dictated.text));
+    requestAnimationFrame(() => {
+      const input = inputRef.current;
+      if (!input) return;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
+  }, [dictated?.at]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -112,6 +127,7 @@ export default function HeadChat({ items, busy, onSend, onStop, onSelectWorker, 
 
       <div className="composer">
         <textarea
+          ref={inputRef}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {

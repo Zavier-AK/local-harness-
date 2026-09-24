@@ -21,7 +21,6 @@ use harness_core::voice::laya::{LayaClient, LayaConfig, LayaState};
 use harness_core::voice::{self, computer, Interpretation, Outcome, Snapshot, VoiceAction};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
@@ -47,6 +46,8 @@ pub struct VoiceSettings {
     pub laya_idle_minutes: u32,
     /// Say answers aloud, not only show them.
     pub speak_replies: bool,
+    /// How long a pause ends a command while the key is held.
+    pub pause_ms: u32,
 }
 
 impl Default for VoiceSettings {
@@ -58,6 +59,7 @@ impl Default for VoiceSettings {
             confidence: 0.75,
             laya_idle_minutes: 10,
             speak_replies: true,
+            pause_ms: 700,
         }
     }
 }
@@ -84,6 +86,9 @@ impl VoiceSettings {
         if !(1..=240).contains(&self.laya_idle_minutes) {
             return Err("unload Laya after 1 to 240 minutes".into());
         }
+        if !(300..=2000).contains(&self.pause_ms) {
+            return Err("the pause must be between 0.3 and 2 seconds".into());
+        }
         Ok(self)
     }
 }
@@ -96,14 +101,23 @@ pub struct Pending {
     since: Option<Instant>,
 }
 
+/// Listening while the key is held: the microphone, and the worker that turns each
+/// spoken piece into an action, in order, while the person keeps talking.
+#[cfg(feature = "voice")]
+struct Session {
+    listener: audio::Listener,
+    worker: tauri::async_runtime::JoinHandle<()>,
+}
+
 pub struct Voice {
     pub laya: Arc<LayaClient>,
     #[cfg(feature = "voice")]
     stt: tokio::sync::Mutex<Option<Arc<stt::Stt>>>,
     #[cfg(feature = "voice")]
-    recorder: std::sync::Mutex<Option<audio::Recorder>>,
+    session: std::sync::Mutex<Option<Session>>,
     pending: std::sync::Mutex<Option<Pending>>,
-    busy: AtomicBool,
+    /// Installed apps, and when they were last looked up.
+    apps: std::sync::Mutex<Option<(Instant, Vec<String>)>>,
 }
 
 impl Voice {
@@ -116,9 +130,23 @@ impl Voice {
             #[cfg(feature = "voice")]
             stt: tokio::sync::Mutex::new(None),
             #[cfg(feature = "voice")]
-            recorder: std::sync::Mutex::new(None),
+            session: std::sync::Mutex::new(None),
             pending: std::sync::Mutex::new(None),
-            busy: AtomicBool::new(false),
+            apps: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The apps "open …" can mean, looked up again every few minutes so a new install is
+    /// found without a restart.
+    fn apps(&self) -> Vec<String> {
+        let mut cached = self.apps.lock().expect("not poisoned");
+        match cached.as_ref() {
+            Some((at, apps)) if at.elapsed() < Duration::from_secs(300) => apps.clone(),
+            _ => {
+                let apps = installed_apps();
+                *cached = Some((Instant::now(), apps.clone()));
+                apps
+            }
         }
     }
 
@@ -141,6 +169,52 @@ impl Voice {
 
 pub fn models_dir() -> Option<PathBuf> {
     Some(harness_core::extensions::app_data_dir()?.join("models"))
+}
+
+/// Apps installed on this Mac, by name. Folders of apps (Utilities, Setapp) are looked
+/// into one level. Elsewhere, empty: "open …" then takes the name as said.
+pub fn installed_apps() -> Vec<String> {
+    if !cfg!(target_os = "macos") {
+        return Vec::new();
+    }
+    let mut roots = vec![
+        PathBuf::from("/Applications"),
+        PathBuf::from("/System/Applications"),
+        PathBuf::from("/System/Applications/Utilities"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        roots.push(PathBuf::from(home).join("Applications"));
+    }
+    /// `.app` bundles in `dir`, and one level into plain folders when `deeper`.
+    fn scan(dir: &std::path::Path, deeper: bool, apps: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(app) = name.strip_suffix(".app") {
+                apps.push(app.to_string());
+            } else if deeper && !name.starts_with('.') && entry.path().is_dir() {
+                scan(&entry.path(), false, apps);
+            }
+        }
+    }
+    let mut apps = vec!["Finder".to_string()];
+    for root in &roots {
+        scan(root, true, &mut apps);
+    }
+    apps.sort();
+    apps.dedup();
+    apps
+}
+
+/// Bring the main window forward, for text that was put in its chat box.
+fn bring_forward(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
 }
 
 // ---------------------------------------------------------------- events
@@ -302,7 +376,7 @@ pub fn create_hud(app: &AppHandle) -> tauri::Result<()> {
     }
     tauri::WebviewWindowBuilder::new(app, HUD_LABEL, tauri::WebviewUrl::App("index.html".into()))
         .title("Harness voice")
-        .inner_size(460.0, 180.0)
+        .inner_size(460.0, 220.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
@@ -440,24 +514,38 @@ async fn whisper(app: &AppHandle) -> Result<Arc<stt::Stt>, String> {
 
 #[cfg(feature = "voice")]
 pub async fn start(app: &AppHandle) -> Result<(), String> {
-    if !settings::load().voice.enabled {
+    let settings = settings::load().voice;
+    if !settings.enabled {
         return Err("voice is off — Settings › Voice".into());
     }
     let voice = app.state::<Voice>();
-    if voice.busy.load(Ordering::SeqCst) {
-        return Err("still working on the last one".into());
-    }
     {
-        let mut recorder = voice.recorder.lock().expect("not poisoned");
-        if recorder.is_some() {
+        let mut session = voice.session.lock().expect("not poisoned");
+        if session.is_some() {
             return Ok(());
         }
+        // Each piece is understood and acted on in turn, while listening goes on.
+        let (pieces, mut incoming) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
         let level_app = app.clone();
-        let started = audio::Recorder::start(move |level| {
-            let _ = level_app.emit("voice://level", level);
-        })
+        let listener = audio::Listener::start(
+            Duration::from_millis(settings.pause_ms as u64),
+            move |level| {
+                let _ = level_app.emit("voice://level", level);
+            },
+            move |piece| {
+                let _ = pieces.send(piece);
+            },
+        )
         .map_err(|e| format!("{e:#}"))?;
-        *recorder = Some(started);
+        let worker_app = app.clone();
+        let worker = tauri::async_runtime::spawn(async move {
+            while let Some(piece) = incoming.recv().await {
+                if let Err(err) = understand(&worker_app, piece).await {
+                    phase(&worker_app, "error", Some(err));
+                }
+            }
+        });
+        *session = Some(Session { listener, worker });
     }
     show_hud(app);
     phase(app, "listening", voice.pending().map(|p| p.describe));
@@ -470,56 +558,59 @@ pub async fn start(_app: &AppHandle) -> Result<(), String> {
     Err("this build has no voice support".into())
 }
 
-/// Stop listening, work out what was said, and act on it.
+/// One spoken piece: write it down, work out what it means, act on it.
 #[cfg(feature = "voice")]
-pub async fn finish(app: &AppHandle) -> Result<Option<Heard>, String> {
-    let voice = app.state::<Voice>();
-    let Some(recorder) = voice.recorder.lock().expect("not poisoned").take() else {
-        return Ok(None);
-    };
-    if voice.busy.swap(true, Ordering::SeqCst) {
-        return Ok(None);
-    }
-    let result: Result<Option<Heard>, String> = async {
-        let captured = tokio::task::spawn_blocking(move || recorder.finish())
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| format!("{e:#}"))?;
-        if captured.seconds < audio::MIN_SECONDS {
-            phase(app, "idle", None);
-            return Ok(None);
-        }
-        phase(app, "transcribing", None);
+async fn understand(app: &AppHandle, piece: Vec<f32>) -> Result<(), String> {
+    let _ = app.emit("voice://busy", true);
+    let result = async {
         let whisper = whisper(app).await?;
         let (snapshot, _, roles) = snapshot(&app.state::<AppState>()).await;
         let names: Vec<String> = snapshot.projects.iter().map(|p| p.name.clone()).collect();
         let prompt = stt::prompt(&roles, &names);
-        let text =
-            tokio::task::spawn_blocking(move || whisper.transcribe(&captured.samples, &prompt))
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| format!("{e:#}"))?;
-        phase(app, "thinking", Some(text.clone()));
-        Ok(Some(hear(app, &text).await))
+        let text = tokio::task::spawn_blocking(move || whisper.transcribe(&piece, &prompt))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("{e:#}"))?;
+        if !text.trim().is_empty() {
+            hear(app, &text).await;
+        }
+        Ok(())
     }
     .await;
-    voice.busy.store(false, Ordering::SeqCst);
-    if let Err(err) = &result {
-        phase(app, "error", Some(err.clone()));
-    }
+    let _ = app.emit("voice://busy", false);
     result
 }
 
+/// The key was let go: stop listening, finish what was being said, then rest.
+#[cfg(feature = "voice")]
+pub async fn finish(app: &AppHandle) -> Result<(), String> {
+    let voice = app.state::<Voice>();
+    let Some(session) = voice.session.lock().expect("not poisoned").take() else {
+        return Ok(());
+    };
+    phase(app, "transcribing", None);
+    let Session { listener, worker } = session;
+    let stopped = tokio::task::spawn_blocking(move || listener.finish())
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r.map_err(|e| format!("{e:#}")));
+    // The listener is gone, so the worker ends once the last piece is handled.
+    let _ = worker.await;
+    phase(app, "idle", None);
+    stopped
+}
+
 #[cfg(not(feature = "voice"))]
-pub async fn finish(_app: &AppHandle) -> Result<Option<Heard>, String> {
-    Ok(None)
+pub async fn finish(_app: &AppHandle) -> Result<(), String> {
+    Ok(())
 }
 
 /// Interpret words and settle the outcome: the shared path for speech and typed tests.
 pub async fn hear(app: &AppHandle, text: &str) -> Heard {
     let voice = app.state::<Voice>();
     let settings = settings::load().voice;
-    let (snapshot, root, _) = snapshot(&app.state::<AppState>()).await;
+    let (mut snapshot, root, _) = snapshot(&app.state::<AppState>()).await;
+    snapshot.apps = voice.apps();
     let pending = voice.pending();
     let interpretation = voice::interpret(
         text,
@@ -574,6 +665,10 @@ pub async fn hear(app: &AppHandle, text: &str) -> Heard {
         },
         _ => {}
     }
+    // Words for the head agent go into its chat box, to be edited and sent by hand.
+    if matches!(interpretation.outcome, Outcome::ToHead { .. }) {
+        bring_forward(app);
+    }
     let heard = Heard {
         interpretation,
         pending: voice.pending(),
@@ -607,6 +702,21 @@ async fn execute(
         }
         // Answered in words; nothing to run.
         Status { .. } => Ok(None),
+        // "Tell Claude to …" is put in the chat box too, never sent unseen.
+        AskHead { .. } => {
+            bring_forward(app);
+            app.emit_to(
+                "main",
+                "voice://run",
+                Run {
+                    action: action.clone(),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(Some(
+                "In the chat box — edit it and send when ready.".into(),
+            ))
+        }
         _ => {
             app.emit_to(
                 "main",
@@ -645,7 +755,7 @@ pub async fn voice_status(app: AppHandle) -> Result<VoiceStatus, String> {
         let _ = voice.laya.probe().await;
     }
     #[cfg(feature = "voice")]
-    let listening = voice.recorder.lock().expect("not poisoned").is_some();
+    let listening = voice.session.lock().expect("not poisoned").is_some();
     #[cfg(not(feature = "voice"))]
     let listening = false;
     Ok(VoiceStatus {
@@ -725,7 +835,7 @@ pub async fn voice_start(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn voice_stop(app: AppHandle) -> Result<Option<Heard>, String> {
+pub async fn voice_stop(app: AppHandle) -> Result<(), String> {
     finish(&app).await
 }
 
@@ -740,7 +850,8 @@ pub async fn voice_confirm(app: AppHandle, yes: bool) -> Result<Heard, String> {
 pub async fn voice_try(app: AppHandle, text: String) -> Result<Interpretation, String> {
     let voice = app.state::<Voice>();
     let settings = settings::load().voice;
-    let (snapshot, _, _) = snapshot(&app.state::<AppState>()).await;
+    let (mut snapshot, _, _) = snapshot(&app.state::<AppState>()).await;
+    snapshot.apps = voice.apps();
     Ok(voice::interpret(
         &text,
         &snapshot,

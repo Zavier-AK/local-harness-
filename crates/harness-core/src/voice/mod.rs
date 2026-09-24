@@ -192,6 +192,11 @@ pub struct Snapshot {
     pub autonomy: Autonomy,
     /// Workers whose merge landed and can still be undone, most recent last.
     pub landed: Vec<String>,
+    /// Apps installed on this computer, by name ("Notes", "Visual Studio Code"). "Open X"
+    /// is an app command only if X is one of these; empty means unknown, and the name is
+    /// then taken as said.
+    #[serde(default)]
+    pub apps: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
