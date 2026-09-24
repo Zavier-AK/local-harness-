@@ -204,7 +204,11 @@ fn rate_limits_from(value: &serde_json::Value) -> Option<(i64, Vec<QuotaWindow>)
     let observed_at = value
         .get("timestamp")
         .and_then(parse_timestamp)
-        .or_else(|| value.pointer("/payload/timestamp").and_then(parse_timestamp))
+        .or_else(|| {
+            value
+                .pointer("/payload/timestamp")
+                .and_then(parse_timestamp)
+        })
         .unwrap_or_else(now);
 
     let mut windows = Vec::new();
@@ -269,15 +273,26 @@ mod tests {
     fn claude_before_its_first_turn_is_missing_not_zero() {
         let quota = claude_quota(None);
         assert_eq!(quota.state, QuotaState::Missing);
-        assert!(quota.windows.is_empty(), "an unknown share of a limit is not an empty one");
+        assert!(
+            quota.windows.is_empty(),
+            "an unknown share of a limit is not an empty one"
+        );
         assert!(quota.note.unwrap().contains("every turn"));
     }
 
     #[test]
     fn a_recent_claude_report_is_shown_as_it_came() {
         let windows = vec![
-            QuotaWindow { label: "5h".into(), used_percent: 48.0, resets_at: Some(1790122800) },
-            QuotaWindow { label: "weekly".into(), used_percent: 6.0, resets_at: Some(1790668800) },
+            QuotaWindow {
+                label: "5h".into(),
+                used_percent: 48.0,
+                resets_at: Some(1790122800),
+            },
+            QuotaWindow {
+                label: "weekly".into(),
+                used_percent: 6.0,
+                resets_at: Some(1790668800),
+            },
         ];
         let quota = claude_quota(Some((now() - 30, windows.clone())));
         assert_eq!(quota.state, QuotaState::Available);
@@ -287,7 +302,11 @@ mod tests {
 
     #[test]
     fn an_old_claude_report_is_stale_not_current() {
-        let windows = vec![QuotaWindow { label: "5h".into(), used_percent: 90.0, resets_at: None }];
+        let windows = vec![QuotaWindow {
+            label: "5h".into(),
+            used_percent: 90.0,
+            resets_at: None,
+        }];
         let quota = claude_quota(Some((now() - STALE_AFTER_SECS - 60, windows)));
         // Real figures, but a turn since then may have moved them.
         assert_eq!(quota.state, QuotaState::Stale);
@@ -354,7 +373,11 @@ mod tests {
 
         // A session file with no rate-limit line is the same situation.
         let sessions = dir.path().join("sessions");
-        write(&sessions, "rollout-x.jsonl", "{\"type\":\"turn.completed\"}\n");
+        write(
+            &sessions,
+            "rollout-x.jsonl",
+            "{\"type\":\"turn.completed\"}\n",
+        );
         assert_eq!(codex_quota_in(&sessions).state, QuotaState::Missing);
     }
 
@@ -403,6 +426,9 @@ mod tests {
             Some(1789992000)
         );
         // A bare number is already unix seconds and passes through unchanged.
-        assert_eq!(parse_timestamp(&serde_json::json!(1789992000)), Some(1789992000));
+        assert_eq!(
+            parse_timestamp(&serde_json::json!(1789992000)),
+            Some(1789992000)
+        );
     }
 }

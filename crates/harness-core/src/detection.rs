@@ -249,7 +249,8 @@ fn configurable_roles(
                 // of the two agent CLIs. Codex is also how a local model gets a real
                 // agent loop, so local models appear here too — via Codex, not raw HTTP.
                 _ => {
-                    let mut options = backend_options(backends, "claude", Provider::Claude.as_str());
+                    let mut options =
+                        backend_options(backends, "claude", Provider::Claude.as_str());
                     options.extend(codex_options(backends));
                     let reason = options.is_empty().then(|| {
                         "Neither the Claude nor the Codex CLI is available, so this role \
@@ -276,7 +277,11 @@ fn configurable_roles(
 /// Local models reachable over plain chat completions.
 fn local_chat_options(backends: &[DetectedBackend]) -> Vec<ModelOption> {
     let mut options = backend_options(backends, "lmstudio", Provider::OpenaiCompat.as_str());
-    options.extend(backend_options(backends, "ollama", Provider::OpenaiCompat.as_str()));
+    options.extend(backend_options(
+        backends,
+        "ollama",
+        Provider::OpenaiCompat.as_str(),
+    ));
     options
 }
 
@@ -300,9 +305,7 @@ fn codex_options(backends: &[DetectedBackend]) -> Vec<ModelOption> {
                 model: model.id.clone(),
                 // Health-check target only; Codex is told which provider to use below.
                 base_url: local.base_url.clone(),
-                provider_opts: BTreeMap::from([
-                    ("model_provider".to_string(), local.id.clone()),
-                ]),
+                provider_opts: BTreeMap::from([("model_provider".to_string(), local.id.clone())]),
             });
         }
     }
@@ -468,7 +471,10 @@ mod tests {
                 available: true,
                 message: String::new(),
                 base_url: None,
-                models: vec![DetectedModel { id: "sonnet".into(), capability: "chat".into() }],
+                models: vec![DetectedModel {
+                    id: "sonnet".into(),
+                    capability: "chat".into(),
+                }],
             },
             DetectedBackend {
                 id: "codex".into(),
@@ -484,12 +490,20 @@ mod tests {
                 available: true,
                 message: String::new(),
                 base_url: Some(LM_STUDIO_URL.into()),
-                models: vec![DetectedModel { id: "qwen".into(), capability: "chat".into() }],
+                models: vec![DetectedModel {
+                    id: "qwen".into(),
+                    capability: "chat".into(),
+                }],
             },
         ];
         let roles = configurable_roles(&registry(), &backends);
         let options_for = |name: &str| {
-            roles.iter().find(|r| r.name == name).unwrap().options.clone()
+            roles
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap()
+                .options
+                .clone()
         };
 
         // A `none` role is a raw chat completion, so only the HTTP endpoints can serve
@@ -502,7 +516,9 @@ mod tests {
         // move between them. This is the swap the fleet editor exists for.
         let builder = options_for("builder");
         assert!(
-            builder.iter().any(|o| o.provider == "claude" && o.model == "sonnet"),
+            builder
+                .iter()
+                .any(|o| o.provider == "claude" && o.model == "sonnet"),
             "a Claude builder should still be offered Claude models: {builder:?}"
         );
         let via_codex = builder
@@ -511,14 +527,19 @@ mod tests {
             .expect("a Claude builder should be offered Codex too");
         assert_eq!(via_codex.model, "qwen");
         assert_eq!(
-            via_codex.provider_opts.get("model_provider").map(String::as_str),
+            via_codex
+                .provider_opts
+                .get("model_provider")
+                .map(String::as_str),
             Some("lmstudio"),
             "a local model under Codex needs the provider id that gives it a tool loop"
         );
 
         // Symmetrically, a Codex-backed role can move onto Claude.
         assert!(
-            options_for("local_builder").iter().any(|o| o.provider == "claude"),
+            options_for("local_builder")
+                .iter()
+                .any(|o| o.provider == "claude"),
             "a Codex builder should be able to move back onto Claude"
         );
     }
@@ -533,13 +554,20 @@ mod tests {
             available: true,
             message: String::new(),
             base_url: Some(LM_STUDIO_URL.into()),
-            models: vec![DetectedModel { id: "qwen".into(), capability: "chat".into() }],
+            models: vec![DetectedModel {
+                id: "qwen".into(),
+                capability: "chat".into(),
+            }],
         }];
 
         let roles = configurable_roles(&registry(), &backends);
         let builder = roles.iter().find(|r| r.name == "builder").unwrap();
         assert!(builder.options.is_empty());
-        assert!(builder.blocked_reason.as_deref().unwrap().contains("cannot be reassigned"));
+        assert!(builder
+            .blocked_reason
+            .as_deref()
+            .unwrap()
+            .contains("cannot be reassigned"));
     }
 
     #[test]
@@ -574,16 +602,23 @@ mod tests {
                 model: "qwen".into(),
                 base_url: None,
                 provider: Some("codex".into()),
-                provider_opts: BTreeMap::from([
-                    ("model_provider".to_string(), "lmstudio".to_string()),
-                ]),
+                provider_opts: BTreeMap::from([(
+                    "model_provider".to_string(),
+                    "lmstudio".to_string(),
+                )]),
             },
         )
         .unwrap();
 
         assert_eq!(patched.provider, Provider::Codex);
         assert_eq!(patched.model.as_deref(), Some("qwen"));
-        assert_eq!(patched.provider_opts.get("model_provider").map(String::as_str), Some("lmstudio"));
+        assert_eq!(
+            patched
+                .provider_opts
+                .get("model_provider")
+                .map(String::as_str),
+            Some("lmstudio")
+        );
         // Policy is not the model picker's business: isolation and tools survive a swap.
         assert_eq!(patched.isolation, role.isolation);
         assert_eq!(patched.tools, role.tools);

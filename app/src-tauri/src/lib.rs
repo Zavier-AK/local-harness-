@@ -19,6 +19,7 @@ use harness_core::store::Store;
 use harness_core::{DetectedBackend, FleetInspection, RoleModelPatch};
 use preview_probe::{discover_dev_servers, parse_loopback_http_url, DevServer};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,7 +27,6 @@ use tauri::webview::{NewWindowResponse, WebviewBuilder};
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Webview, WebviewUrl,
 };
-use std::collections::HashMap;
 use tokio::sync::Mutex;
 
 /// The first argument that makes this binary answer a Claude Code hook instead of
@@ -233,19 +233,27 @@ fn forward_events(
                 }
                 // Under `Ask`, `delegate` returned before the work ran. Close the loop so
                 // the head agent learns how each approved delegation ended.
-                HarnessEvent::WorkerFinished { worker_id, summary, diff, is_error, .. }
-                    if harness.take_approved(worker_id).await =>
-                {
+                HarnessEvent::WorkerFinished {
+                    worker_id,
+                    summary,
+                    diff,
+                    is_error,
+                    ..
+                } if harness.take_approved(worker_id).await => {
                     let outcome = if *is_error { "failed" } else { "finished" };
                     let merge = if diff.as_ref().is_some_and(|d| d.files_changed > 0) {
                         " Its changes are on a branch; call `request_merge` to propose them."
                     } else {
                         ""
                     };
-                    tell_head(&app, &project, &format!(
+                    tell_head(
+                        &app,
+                        &project,
+                        &format!(
                         "The delegation {worker_id} the person approved has {outcome}: {}.{merge}",
                         first_line(summary)
-                    ))
+                    ),
+                    )
                     .await;
                 }
                 HarnessEvent::PlanFinished { title, outcome, .. } => {
@@ -256,16 +264,25 @@ fn forward_events(
                     .await;
                 }
                 HarnessEvent::DelegationDeclined { worker_id, reason } => {
-                    tell_head(&app, &project, &format!(
+                    tell_head(
+                        &app,
+                        &project,
+                        &format!(
                         "The person declined delegation {worker_id}: {reason}. Do not retry it \
                          as it was; ask them, or take a different approach."
-                    ))
+                    ),
+                    )
                     .await;
                 }
                 _ => {}
             }
-            if let Err(err) = app.emit(EVENT_CHANNEL, ProjectEvent { project: &project, event: &event })
-            {
+            if let Err(err) = app.emit(
+                EVENT_CHANNEL,
+                ProjectEvent {
+                    project: &project,
+                    event: &event,
+                },
+            ) {
                 tracing::warn!("dropping event, webview gone: {err}");
                 break;
             }
@@ -307,7 +324,11 @@ async fn tell_head_about_failed_checks(
 async fn tell_head(app: &AppHandle, project: &str, notice: &str) {
     let state = app.state::<AppState>();
     let mut projects = state.projects.lock().await;
-    if let Some(Session { head: Head::Live(orchestrator), .. }) = projects.get_mut(project) {
+    if let Some(Session {
+        head: Head::Live(orchestrator),
+        ..
+    }) = projects.get_mut(project)
+    {
         if let Err(error) = orchestrator.send(notice).await {
             tracing::warn!("could not send the head agent a notice: {error:#}");
         }
@@ -458,7 +479,9 @@ async fn save_role_assignments(
             );
             if let Head::Live(orchestrator) = &mut session.head {
                 if let Err(error) = orchestrator.send(&notice).await {
-                    tracing::warn!("could not notify the head agent of the fleet change: {error:#}");
+                    tracing::warn!(
+                        "could not notify the head agent of the fleet change: {error:#}"
+                    );
                 }
             }
         }
@@ -497,7 +520,12 @@ async fn start_session(
                 )
                 .await
                 .map_err(|e| format!("{e:#}"))?;
-                forward_events(app.clone(), Arc::clone(&session.harness), key.clone(), events);
+                forward_events(
+                    app.clone(),
+                    Arc::clone(&session.harness),
+                    key.clone(),
+                    events,
+                );
                 session.head = Head::Live(Box::new(orchestrator));
             }
             let info = describe(&key, session).await;
@@ -568,7 +596,12 @@ async fn start_session(
 
     // Worker and orchestrator streams are separate; the UI keys them apart by run id, and
     // by project now that several can be open at once.
-    forward_events(app.clone(), Arc::clone(&harness), key.clone(), worker_events);
+    forward_events(
+        app.clone(),
+        Arc::clone(&harness),
+        key.clone(),
+        worker_events,
+    );
     forward_events(app, Arc::clone(&harness), key.clone(), orchestrator_events);
 
     let info = SessionInfo {
@@ -697,15 +730,14 @@ async fn send_turn(
 ) -> Result<(), String> {
     let key = key_for(&state, project).await?;
     let mut projects = state.projects.lock().await;
-    let session = projects.get_mut(&key).ok_or("no session for that project")?;
+    let session = projects
+        .get_mut(&key)
+        .ok_or("no session for that project")?;
 
     let Head::Live(orchestrator) = &mut session.head else {
         return Err("that project's head agent is suspended; open the project first".into());
     };
-    orchestrator
-        .send(&text)
-        .await
-        .map_err(|e| format!("{e:#}"))
+    orchestrator.send(&text).await.map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -770,7 +802,11 @@ async fn discard_plan(
     let key = key_for(&state, project).await?;
     let projects = state.projects.lock().await;
     let session = projects.get(&key).ok_or("no session for that project")?;
-    session.harness.discard_plan(&plan_id).await.map_err(|e| format!("{e:#}"))
+    session
+        .harness
+        .discard_plan(&plan_id)
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 
 #[derive(Deserialize)]
@@ -792,7 +828,9 @@ async fn plan_feedback(
 ) -> Result<(), String> {
     let key = key_for(&state, project).await?;
     let mut projects = state.projects.lock().await;
-    let session = projects.get_mut(&key).ok_or("no session for that project")?;
+    let session = projects
+        .get_mut(&key)
+        .ok_or("no session for that project")?;
     let plan = session
         .harness
         .edit_plan(&plan_id, steps)
@@ -804,7 +842,11 @@ async fn plan_feedback(
         message.push_str(&format!(" Overall: {}", note.trim()));
     }
     for comment in comments.iter().filter(|c| !c.text.trim().is_empty()) {
-        message.push_str(&format!("\n- On step `{}`: {}", comment.step_id, comment.text.trim()));
+        message.push_str(&format!(
+            "\n- On step `{}`: {}",
+            comment.step_id,
+            comment.text.trim()
+        ));
     }
     message.push_str(&format!(
         "\nThe plan as it now stands, with their edits: {}\nRevise it and call `propose_plan` \
@@ -813,7 +855,10 @@ async fn plan_feedback(
             .unwrap_or_default()
     ));
     match &mut session.head {
-        Head::Live(orchestrator) => orchestrator.send(&message).await.map_err(|e| format!("{e:#}")),
+        Head::Live(orchestrator) => orchestrator
+            .send(&message)
+            .await
+            .map_err(|e| format!("{e:#}")),
         Head::Suspended => Err("the head agent is not running for this project".into()),
     }
 }
@@ -840,7 +885,11 @@ async fn start_night(
     let key = key_for(&state, project).await?;
     let projects = state.projects.lock().await;
     let session = projects.get(&key).ok_or("no session for that project")?;
-    session.harness.start_night(config).await.map_err(|e| format!("{e:#}"))
+    session
+        .harness
+        .start_night(config)
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -853,11 +902,18 @@ async fn stop_night(state: State<'_, AppState>, project: Option<String>) -> Resu
 
 /// Put the night's kept work up for review, as an ordinary merge proposal.
 #[tauri::command]
-async fn propose_night(state: State<'_, AppState>, project: Option<String>) -> Result<String, String> {
+async fn propose_night(
+    state: State<'_, AppState>,
+    project: Option<String>,
+) -> Result<String, String> {
     let key = key_for(&state, project).await?;
     let projects = state.projects.lock().await;
     let session = projects.get(&key).ok_or("no session for that project")?;
-    session.harness.propose_night().await.map_err(|e| format!("{e:#}"))
+    session
+        .harness
+        .propose_night()
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 
 // ------------------------------------------------------------------ autonomy
@@ -883,14 +939,19 @@ async fn set_autonomy(
 ) -> Result<harness_core::autonomy::Autonomy, String> {
     let key = key_for(&state, project).await?;
     let mut projects = state.projects.lock().await;
-    let session = projects.get_mut(&key).ok_or("no session for that project")?;
+    let session = projects
+        .get_mut(&key)
+        .ok_or("no session for that project")?;
     if session.harness.autonomy().await == level {
         return Ok(level);
     }
     harness_core::autonomy::save(&session.project_root, level).map_err(|e| e.to_string())?;
     session.harness.set_autonomy(level).await;
     if let Head::Live(orchestrator) = &mut session.head {
-        let notice = format!("The person changed how much runs without them: {}.", level.summary());
+        let notice = format!(
+            "The person changed how much runs without them: {}.",
+            level.summary()
+        );
         if let Err(error) = orchestrator.send(&notice).await {
             tracing::warn!("could not tell the head agent about the autonomy change: {error:#}");
         }
@@ -941,7 +1002,11 @@ async fn undo_merge(
     let key = key_for(&state, project).await?;
     let projects = state.projects.lock().await;
     let session = projects.get(&key).ok_or("no session for that project")?;
-    session.harness.undo_merge(&worker_id).await.map_err(|e| format!("{e:#}"))
+    session
+        .harness
+        .undo_merge(&worker_id)
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// Where a proposed merge's checks stand — for a drawer opened after the events passed.
@@ -1032,15 +1097,17 @@ async fn usage(state: State<'_, AppState>, hours: i64) -> Result<Vec<UsageView>,
             .map_err(|e| format!("{e:#}"))?;
 
         for row in rows {
-            let entry = totals.entry(row.provider.clone()).or_insert_with(|| UsageView {
-                provider: row.provider.clone(),
-                input_tokens: 0,
-                output_tokens: 0,
-                cache_creation_tokens: 0,
-                cache_read_tokens: 0,
-                cost_usd: 0.0,
-                runs: 0,
-            });
+            let entry = totals
+                .entry(row.provider.clone())
+                .or_insert_with(|| UsageView {
+                    provider: row.provider.clone(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_creation_tokens: 0,
+                    cache_read_tokens: 0,
+                    cost_usd: 0.0,
+                    runs: 0,
+                });
             entry.input_tokens += row.usage.input_tokens;
             entry.output_tokens += row.usage.output_tokens;
             entry.cache_creation_tokens += row.usage.cache_creation_input_tokens;
@@ -1185,7 +1252,10 @@ async fn quotas(state: State<'_, AppState>) -> Result<QuotaReport, String> {
     let mut claude = None;
     for session in projects.values() {
         if let Some(snapshot) = session.harness.claude_quota_snapshot().await {
-            if claude.as_ref().is_none_or(|(seen, _): &(i64, _)| snapshot.0 > *seen) {
+            if claude
+                .as_ref()
+                .is_none_or(|(seen, _): &(i64, _)| snapshot.0 > *seen)
+            {
                 claude = Some(snapshot);
             }
         }
@@ -1210,7 +1280,9 @@ pub struct QuotaReport {
 async fn stop_turn(state: State<'_, AppState>, project: Option<String>) -> Result<(), String> {
     let key = key_for(&state, project).await?;
     let mut projects = state.projects.lock().await;
-    let session = projects.get_mut(&key).ok_or("no session for that project")?;
+    let session = projects
+        .get_mut(&key)
+        .ok_or("no session for that project")?;
     let Head::Live(orchestrator) = &mut session.head else {
         return Ok(()); // Suspended: nothing is running to stop.
     };
@@ -1341,7 +1413,10 @@ async fn close_project(state: State<'_, AppState>, project: Option<String>) -> R
     // stays on its branch.
     session.harness.stop_night().await;
     if let Head::Live(orchestrator) = std::mem::replace(&mut session.head, Head::Suspended) {
-        orchestrator.shutdown().await.map_err(|e| format!("{e:#}"))?;
+        orchestrator
+            .shutdown()
+            .await
+            .map_err(|e| format!("{e:#}"))?;
     }
     drop(projects);
 
@@ -1362,9 +1437,7 @@ async fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-
 // ------------------------------------------------------------------ settings
-
 #[tauri::command]
 fn get_settings() -> settings::Settings {
     settings::load()
@@ -1373,7 +1446,10 @@ fn get_settings() -> settings::Settings {
 /// Takes effect for heads started from now on; a running head keeps the turn limit and
 /// model it was started with.
 #[tauri::command]
-fn save_settings(app: AppHandle, settings: settings::Settings) -> Result<settings::Settings, String> {
+fn save_settings(
+    app: AppHandle,
+    settings: settings::Settings,
+) -> Result<settings::Settings, String> {
     let settings = settings.validated()?;
     let path = settings::path().ok_or("no home directory to keep settings in")?;
     settings::save_to(&path, &settings)?;
@@ -1426,7 +1502,8 @@ async fn set_skill_enabled(
     enabled: bool,
 ) -> Result<Vec<SkillInfo>, String> {
     let ext = extensions()?;
-    ext.set_skill_enabled(&name, enabled).map_err(describe_error)?;
+    ext.set_skill_enabled(&name, enabled)
+        .map_err(describe_error)?;
     apply_extras(&state).await;
     ext.skills().map_err(describe_error)
 }
@@ -1457,7 +1534,10 @@ async fn import_skills_folder(
 }
 
 #[tauri::command]
-async fn import_skills_git(state: State<'_, AppState>, url: String) -> Result<ImportReport, String> {
+async fn import_skills_git(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<ImportReport, String> {
     let report = extensions()?
         .import_skills_from_git(&url)
         .await
@@ -1573,7 +1653,9 @@ async fn save_role_tools(
                      with the `delegate` tool instead."
                 );
                 if let Err(error) = orchestrator.send(&notice).await {
-                    tracing::warn!("could not notify the head agent of the tools change: {error:#}");
+                    tracing::warn!(
+                        "could not notify the head agent of the tools change: {error:#}"
+                    );
                 }
             }
         }

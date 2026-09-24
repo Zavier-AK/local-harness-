@@ -135,18 +135,39 @@ fn high_risk_path(path: &str) -> bool {
         || lower.starts_with(".github/workflows/")
         || name == "roles.toml"
         || lower.starts_with(".claude/")
-        || ["auth", "security", "secret", "credential", "password", "crypto", "permission"]
-            .iter()
-            .any(|word| lower.contains(word))
+        || [
+            "auth",
+            "security",
+            "secret",
+            "credential",
+            "password",
+            "crypto",
+            "permission",
+        ]
+        .iter()
+        .any(|word| lower.contains(word))
 }
 
 /// Paths that change what the project depends on or how it is built.
 fn build_path(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
     [
-        "cargo.lock", "cargo.toml", "package-lock.json", "package.json", "yarn.lock",
-        "pnpm-lock.yaml", "poetry.lock", "uv.lock", "pyproject.toml", "go.mod", "go.sum",
-        "gemfile", "gemfile.lock", "dockerfile", ".gitlab-ci.yml", "makefile",
+        "cargo.lock",
+        "cargo.toml",
+        "package-lock.json",
+        "package.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "poetry.lock",
+        "uv.lock",
+        "pyproject.toml",
+        "go.mod",
+        "go.sum",
+        "gemfile",
+        "gemfile.lock",
+        "dockerfile",
+        ".gitlab-ci.yml",
+        "makefile",
     ]
     .contains(&name.as_str())
         || (name.starts_with("requirements") && name.ends_with(".txt"))
@@ -179,16 +200,19 @@ fn is_test_path(path: &str) -> bool {
 /// Whether the patch adds a test inline — Rust keeps unit tests beside the code, so a
 /// path-only check would call every Rust change untested.
 fn patch_adds_tests(patch: &str) -> bool {
-    patch.lines().filter(|line| line.starts_with('+')).any(|line| {
-        let line = line.trim_start_matches('+').trim();
-        line.starts_with("#[test]")
-            || line.starts_with("#[tokio::test")
-            || line.starts_with("def test_")
-            || line.starts_with("it(")
-            || line.starts_with("test(")
-            || line.starts_with("describe(")
-            || line.starts_with("func Test")
-    })
+    patch
+        .lines()
+        .filter(|line| line.starts_with('+'))
+        .any(|line| {
+            let line = line.trim_start_matches('+').trim();
+            line.starts_with("#[test]")
+                || line.starts_with("#[tokio::test")
+                || line.starts_with("def test_")
+                || line.starts_with("it(")
+                || line.starts_with("test(")
+                || line.starts_with("describe(")
+                || line.starts_with("func Test")
+        })
 }
 
 pub fn signals(diff: &DiffStat, patch: &str) -> Vec<Signal> {
@@ -198,17 +222,27 @@ pub fn signals(diff: &DiffStat, patch: &str) -> Vec<Signal> {
     if lines > 800 {
         found.push(Signal {
             risk: Risk::High,
-            reason: format!("large change: {lines} lines across {} files", diff.files_changed),
+            reason: format!(
+                "large change: {lines} lines across {} files",
+                diff.files_changed
+            ),
         });
     } else if lines > 250 || diff.files_changed > 15 {
         found.push(Signal {
             risk: Risk::Medium,
-            reason: format!("sizeable change: {lines} lines across {} files", diff.files_changed),
+            reason: format!(
+                "sizeable change: {lines} lines across {} files",
+                diff.files_changed
+            ),
         });
     }
 
-    let sensitive: Vec<&str> =
-        diff.files.iter().map(String::as_str).filter(|p| high_risk_path(p)).collect();
+    let sensitive: Vec<&str> = diff
+        .files
+        .iter()
+        .map(String::as_str)
+        .filter(|p| high_risk_path(p))
+        .collect();
     if !sensitive.is_empty() {
         found.push(Signal {
             risk: Risk::High,
@@ -216,7 +250,12 @@ pub fn signals(diff: &DiffStat, patch: &str) -> Vec<Signal> {
         });
     }
 
-    let build: Vec<&str> = diff.files.iter().map(String::as_str).filter(|p| build_path(p)).collect();
+    let build: Vec<&str> = diff
+        .files
+        .iter()
+        .map(String::as_str)
+        .filter(|p| build_path(p))
+        .collect();
     if !build.is_empty() {
         found.push(Signal {
             risk: Risk::Medium,
@@ -224,16 +263,25 @@ pub fn signals(diff: &DiffStat, patch: &str) -> Vec<Signal> {
         });
     }
 
-    let deleted = patch.lines().filter(|l| l.starts_with("deleted file mode")).count();
+    let deleted = patch
+        .lines()
+        .filter(|l| l.starts_with("deleted file mode"))
+        .count();
     if deleted > 0 {
         found.push(Signal {
             risk: Risk::Medium,
-            reason: format!("deletes {deleted} file{}", if deleted == 1 { "" } else { "s" }),
+            reason: format!(
+                "deletes {deleted} file{}",
+                if deleted == 1 { "" } else { "s" }
+            ),
         });
     }
 
     if patch.lines().any(|l| l.starts_with("Binary files ")) {
-        found.push(Signal { risk: Risk::Medium, reason: "adds or changes a binary file".into() });
+        found.push(Signal {
+            risk: Risk::Medium,
+            reason: "adds or changes a binary file".into(),
+        });
     }
 
     let code_changed = diff.files.iter().any(|p| is_code(p) && !is_test_path(p));
@@ -267,7 +315,11 @@ pub fn signals_check(signals: &[Signal]) -> Check {
         summary: if signals.is_empty() {
             "small, touches nothing sensitive".into()
         } else {
-            signals.iter().map(|s| s.reason.clone()).collect::<Vec<_>>().join("; ")
+            signals
+                .iter()
+                .map(|s| s.reason.clone())
+                .collect::<Vec<_>>()
+                .join("; ")
         },
         output: None,
         risk: Some(risk),
@@ -303,8 +355,16 @@ pub async fn run_command(cwd: &Path, command: &str, timeout: Duration) -> Check 
             if out.status.success() {
                 (CheckStatus::Passed, "passed".to_string(), Some(tail))
             } else {
-                let code = out.status.code().map(|c| c.to_string()).unwrap_or("a signal".into());
-                (CheckStatus::Failed, format!("failed (exit {code})"), Some(tail))
+                let code = out
+                    .status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or("a signal".into());
+                (
+                    CheckStatus::Failed,
+                    format!("failed (exit {code})"),
+                    Some(tail),
+                )
             }
         }
     };
@@ -349,13 +409,23 @@ pub fn review_prompt(request: &ReviewRequest) -> String {
         "You are reviewing a change another agent made, before a person decides whether to \
          merge it. You did not write it. Look for what would actually go wrong.\n\n",
     );
-    prompt.push_str(&format!("The task it was given:\n{}\n\n", request.task.trim()));
+    prompt.push_str(&format!(
+        "The task it was given:\n{}\n\n",
+        request.task.trim()
+    ));
     if !request.summary.trim().is_empty() {
-        prompt.push_str(&format!("What it said it did:\n{}\n\n", request.summary.trim()));
+        prompt.push_str(&format!(
+            "What it said it did:\n{}\n\n",
+            request.summary.trim()
+        ));
     }
     prompt.push_str(&format!(
         "The diff{}:\n```diff\n{}\n```\n\n",
-        if request.patch_truncated { " (truncated — the full change is larger)" } else { "" },
+        if request.patch_truncated {
+            " (truncated — the full change is larger)"
+        } else {
+            ""
+        },
         request.patch.trim_end()
     ));
     if request.has_checkout {
@@ -400,11 +470,15 @@ pub fn parse_verdict(text: &str) -> Option<Verdict> {
     }
 
     for (start, _) in text.match_indices('{') {
-        let Some(end) = matching_brace(&text[start..]) else { continue };
+        let Some(end) = matching_brace(&text[start..]) else {
+            continue;
+        };
         let Ok(raw) = serde_json::from_str::<Raw>(&text[start..start + end + 1]) else {
             continue;
         };
-        let Some(risk) = Risk::parse(&raw.risk_level) else { continue };
+        let Some(risk) = Risk::parse(&raw.risk_level) else {
+            continue;
+        };
         return Some(Verdict {
             risk,
             summary: raw.summary.trim().to_string(),
@@ -421,7 +495,9 @@ pub fn parse_verdict(text: &str) -> Option<Verdict> {
                         .as_str()
                         .to_string(),
                     file: f.file.filter(|p| !p.trim().is_empty()),
-                    line: f.line.and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok())),
+                    line: f
+                        .line
+                        .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok())),
                     message: f.message.trim().to_string(),
                 })
                 .collect(),
@@ -486,7 +562,9 @@ pub async fn review(
                 status: CheckStatus::Skipped,
                 summary: format!(
                     "skipped: {}",
-                    availability.reason.unwrap_or_else(|| "reviewer unavailable".into())
+                    availability
+                        .reason
+                        .unwrap_or_else(|| "reviewer unavailable".into())
                 ),
                 output: None,
                 risk: None,
@@ -577,7 +655,12 @@ pub async fn review(
 }
 
 fn first_line(text: &str) -> String {
-    text.lines().next().unwrap_or_default().chars().take(200).collect()
+    text.lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(200)
+        .collect()
 }
 
 // ---------------------------------------------------------------------- risk
@@ -596,7 +679,9 @@ pub fn assess(checks: Vec<Check>) -> VerificationReport {
         }
     }
 
-    let verdict = checks.iter().rfind(|c| c.kind == CheckKind::Review && c.risk.is_some());
+    let verdict = checks
+        .iter()
+        .rfind(|c| c.kind == CheckKind::Review && c.risk.is_some());
     if let Some(review) = verdict {
         let review_risk = review.risk.unwrap_or(Risk::Low);
         risk = risk.max(review_risk);
@@ -617,9 +702,10 @@ pub fn assess(checks: Vec<Check>) -> VerificationReport {
         }
     }
 
-    let ran_command = checks
-        .iter()
-        .any(|c| c.kind == CheckKind::Command && matches!(c.status, CheckStatus::Passed | CheckStatus::Failed));
+    let ran_command = checks.iter().any(|c| {
+        c.kind == CheckKind::Command
+            && matches!(c.status, CheckStatus::Passed | CheckStatus::Failed)
+    });
     let verified = ran_command || verdict.is_some();
     if !verified {
         reasons.push(
@@ -628,7 +714,12 @@ pub fn assess(checks: Vec<Check>) -> VerificationReport {
         );
     }
 
-    VerificationReport { risk, verified, reasons, checks }
+    VerificationReport {
+        risk,
+        verified,
+        reasons,
+        checks,
+    }
 }
 
 #[cfg(test)]
@@ -645,7 +736,11 @@ mod tests {
     }
 
     fn reasons(signals: &[Signal]) -> String {
-        signals.iter().map(|s| s.reason.as_str()).collect::<Vec<_>>().join(" | ")
+        signals
+            .iter()
+            .map(|s| s.reason.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     #[test]
@@ -663,20 +758,30 @@ mod tests {
             "roles.toml",
         ] {
             let found = signals(&diff(&[path], 3), "");
-            assert!(found.iter().any(|s| s.risk == Risk::High), "{path}: {}", reasons(&found));
+            assert!(
+                found.iter().any(|s| s.risk == Risk::High),
+                "{path}: {}",
+                reasons(&found)
+            );
         }
     }
 
     #[test]
     fn dependency_changes_are_medium() {
         let found = signals(&diff(&["Cargo.lock", "docs/x.md"], 10), "");
-        assert!(found.iter().any(|s| s.risk == Risk::Medium && s.reason.contains("Cargo.lock")));
+        assert!(found
+            .iter()
+            .any(|s| s.risk == Risk::Medium && s.reason.contains("Cargo.lock")));
     }
 
     #[test]
     fn size_scales_the_risk() {
-        assert!(signals(&diff(&["a.md"], 300), "").iter().any(|s| s.risk == Risk::Medium));
-        assert!(signals(&diff(&["a.md"], 900), "").iter().any(|s| s.risk == Risk::High));
+        assert!(signals(&diff(&["a.md"], 300), "")
+            .iter()
+            .any(|s| s.risk == Risk::Medium));
+        assert!(signals(&diff(&["a.md"], 900), "")
+            .iter()
+            .any(|s| s.risk == Risk::High));
     }
 
     #[test]
@@ -686,15 +791,21 @@ mod tests {
 
         // A test file alongside, or a Rust test added inline, both count.
         assert!(signals(&diff(&["src/app.ts", "src/app.test.ts"], 10), "").is_empty());
-        assert!(signals(&diff(&["src/lib.rs"], 10), "+fn add() {}\n+    #[test]\n+    fn adds() {}")
-            .is_empty());
+        assert!(signals(
+            &diff(&["src/lib.rs"], 10),
+            "+fn add() {}\n+    #[test]\n+    fn adds() {}"
+        )
+        .is_empty());
     }
 
     #[test]
     fn deletions_and_binaries_are_noted() {
         let patch = "diff --git a/old.txt b/old.txt\ndeleted file mode 100644\nBinary files a/x.png and b/x.png differ";
         let found = reasons(&signals(&diff(&["old.txt", "x.png"], 1), patch));
-        assert!(found.contains("deletes 1 file") && found.contains("binary"), "{found}");
+        assert!(
+            found.contains("deletes 1 file") && found.contains("binary"),
+            "{found}"
+        );
     }
 
     #[test]
@@ -702,9 +813,16 @@ mod tests {
         let text = "Here is my review:\n```json\n{\"risk_level\": \"Medium\", \"summary\": \"Missing a { brace } check\", \"findings\": [{\"severity\": \"high\", \"file\": \"src/a.rs\", \"line\": \"12\", \"message\": \"unwrap on user input\"}, {\"message\": \"\"}]}\n```\nThanks!";
         let verdict = parse_verdict(text).unwrap();
         assert_eq!(verdict.risk, Risk::Medium);
-        assert_eq!(verdict.summary, "Missing a { brace } check", "braces in strings are not structure");
+        assert_eq!(
+            verdict.summary, "Missing a { brace } check",
+            "braces in strings are not structure"
+        );
         assert_eq!(verdict.findings.len(), 1, "an empty finding is dropped");
-        assert_eq!(verdict.findings[0].line, Some(12), "a line given as a string still counts");
+        assert_eq!(
+            verdict.findings[0].line,
+            Some(12),
+            "a line given as a string still counts"
+        );
         assert_eq!(verdict.findings[0].severity, "high");
     }
 
@@ -767,7 +885,11 @@ mod tests {
             check(CheckKind::Signals, CheckStatus::Passed, Some(Risk::High)),
             check(CheckKind::Review, CheckStatus::Passed, Some(Risk::Low)),
         ]);
-        assert_eq!(report.risk, Risk::High, "a migration is worth a look whatever the reviewer says");
+        assert_eq!(
+            report.risk,
+            Risk::High,
+            "a migration is worth a look whatever the reviewer says"
+        );
     }
 
     #[tokio::test]

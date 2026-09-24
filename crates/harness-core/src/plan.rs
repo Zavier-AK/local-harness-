@@ -105,7 +105,12 @@ impl Plan {
             status: PlanStatus::Draft,
             steps: steps
                 .into_iter()
-                .map(|input| PlanStep { input, state: StepState::Planned, worker_id: None, note: None })
+                .map(|input| PlanStep {
+                    input,
+                    state: StepState::Planned,
+                    worker_id: None,
+                    note: None,
+                })
                 .collect(),
         }
     }
@@ -120,7 +125,9 @@ impl Plan {
                     .and_then(|v| v.as_str().map(str::to_string))
                     .unwrap_or_default();
                 match &step.note {
-                    Some(note) => format!("{} ({}): {state} — {note}", step.input.title, step.input.id),
+                    Some(note) => {
+                        format!("{} ({}): {state} — {note}", step.input.title, step.input.id)
+                    }
                     None => format!("{} ({}): {state}", step.input.title, step.input.id),
                 }
             })
@@ -174,8 +181,10 @@ pub fn validate(steps: &[StepInput], registry: &RoleRegistry) -> Result<()> {
 }
 
 fn find_cycle(steps: &[StepInput]) -> Option<String> {
-    let deps: HashMap<&str, &[String]> =
-        steps.iter().map(|s| (s.id.as_str(), s.depends_on.as_slice())).collect();
+    let deps: HashMap<&str, &[String]> = steps
+        .iter()
+        .map(|s| (s.id.as_str(), s.depends_on.as_slice()))
+        .collect();
     // 0 = unvisited, 1 = on the current path, 2 = done.
     let mut mark: HashMap<&str, u8> = HashMap::new();
     fn visit<'a>(
@@ -197,7 +206,9 @@ fn find_cycle(steps: &[StepInput]) -> Option<String> {
         mark.insert(id, 2);
         None
     }
-    steps.iter().find_map(|s| visit(s.id.as_str(), &deps, &mut mark))
+    steps
+        .iter()
+        .find_map(|s| visit(s.id.as_str(), &deps, &mut mark))
 }
 
 /// What the runner should do with a step that has not started, given its dependencies.
@@ -211,7 +222,9 @@ pub enum Readiness {
 pub fn readiness(plan: &Plan, step: &PlanStep) -> Readiness {
     let mut waiting = false;
     for dep in &step.input.depends_on {
-        let Some(other) = plan.steps.iter().find(|s| s.input.id == *dep) else { continue };
+        let Some(other) = plan.steps.iter().find(|s| s.input.id == *dep) else {
+            continue;
+        };
         match other.state {
             StepState::Landed => {}
             StepState::Failed | StepState::Skipped => {
@@ -252,7 +265,11 @@ mod tests {
 
     #[test]
     fn a_sound_plan_passes() {
-        validate(&[step("a", &[]), step("b", &["a"]), step("c", &["a", "b"])], &registry()).unwrap();
+        validate(
+            &[step("a", &[]), step("b", &["a"]), step("c", &["a", "b"])],
+            &registry(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -264,7 +281,10 @@ mod tests {
             (vec![step("a", &["missing"])], "not in the plan"),
             (vec![step("a", &["a"])], "depends on itself"),
             (vec![step("a", &["b"]), step("b", &["a"])], "circle"),
-            ((0..=MAX_STEPS).map(|i| step(&i.to_string(), &[])).collect(), "at most"),
+            (
+                (0..=MAX_STEPS).map(|i| step(&i.to_string(), &[])).collect(),
+                "at most",
+            ),
         ];
         for (steps, expected) in cases {
             let err = validate(&steps, &reg).unwrap_err().to_string();
@@ -272,12 +292,20 @@ mod tests {
         }
         let mut unknown = step("a", &[]);
         unknown.role = "wizard".into();
-        assert!(validate(&[unknown], &reg).unwrap_err().to_string().contains("not in the fleet"));
+        assert!(validate(&[unknown], &reg)
+            .unwrap_err()
+            .to_string()
+            .contains("not in the fleet"));
     }
 
     #[test]
     fn a_step_waits_for_its_dependencies_to_land_and_is_skipped_if_one_does_not() {
-        let mut plan = Plan::new("p".into(), "t".into(), "s".into(), vec![step("a", &[]), step("b", &["a"])]);
+        let mut plan = Plan::new(
+            "p".into(),
+            "t".into(),
+            "s".into(),
+            vec![step("a", &[]), step("b", &["a"])],
+        );
         assert_eq!(readiness(&plan, &plan.steps[0]), Readiness::Start);
         assert_eq!(readiness(&plan, &plan.steps[1]), Readiness::Wait);
 
@@ -287,7 +315,10 @@ mod tests {
         plan.steps[0].state = StepState::Landed;
         assert_eq!(readiness(&plan, &plan.steps[1]), Readiness::Start);
         plan.steps[0].state = StepState::Failed;
-        assert!(matches!(readiness(&plan, &plan.steps[1]), Readiness::Skip(_)));
+        assert!(matches!(
+            readiness(&plan, &plan.steps[1]),
+            Readiness::Skip(_)
+        ));
     }
 
     #[test]

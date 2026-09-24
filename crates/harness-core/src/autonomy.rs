@@ -112,7 +112,10 @@ pub fn save(project: &Path, level: Autonomy) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = target.with_extension(format!("json.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, serde_json::to_string(&Stored { level }).unwrap_or_default())?;
+    std::fs::write(
+        &tmp,
+        serde_json::to_string(&Stored { level }).unwrap_or_default(),
+    )?;
     std::fs::rename(&tmp, &target)
 }
 
@@ -135,7 +138,12 @@ mod tests {
                 reviewer: None,
             });
         }
-        VerificationReport { risk, verified, reasons: Vec::new(), checks }
+        VerificationReport {
+            risk,
+            verified,
+            reasons: Vec::new(),
+            checks,
+        }
     }
 
     #[test]
@@ -149,7 +157,11 @@ mod tests {
             (Autonomy::LandMost, Risk::High, false),
         ];
         for (level, risk, lands) in cases {
-            assert_eq!(level.lands(&report(risk, true, None)), lands, "{level:?} at {risk:?}");
+            assert_eq!(
+                level.lands(&report(risk, true, None)),
+                lands,
+                "{level:?} at {risk:?}"
+            );
         }
     }
 
@@ -170,7 +182,11 @@ mod tests {
         save(dir.path(), Autonomy::Ask).unwrap();
         assert_eq!(load(dir.path()), Autonomy::Ask);
         std::fs::write(dir.path().join(FILE), "not json").unwrap();
-        assert_eq!(load(dir.path()), Autonomy::Review, "a broken file never grants autonomy");
+        assert_eq!(
+            load(dir.path()),
+            Autonomy::Review,
+            "a broken file never grants autonomy"
+        );
     }
 
     #[test]

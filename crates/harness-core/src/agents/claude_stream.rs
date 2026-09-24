@@ -99,7 +99,10 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<ParsedLine, String> {
         serde_json::from_str(line).map_err(|e| format!("unparseable stream line: {e}"))?;
 
     let mut out = ParsedLine::default();
-    let msg_type = value.get("type").and_then(Value::as_str).unwrap_or_default();
+    let msg_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
 
     // Nested subagent output gets its own stream key.
     let key = value
@@ -110,22 +113,39 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<ParsedLine, String> {
 
     match msg_type {
         "system" => {
-            let subtype = value.get("subtype").and_then(Value::as_str).unwrap_or_default();
+            let subtype = value
+                .get("subtype")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             match subtype {
                 "init" => {
-                    let session_id = value.get("session_id").and_then(Value::as_str).map(str::to_string);
+                    let session_id = value
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
                     out.backend_session_id = session_id.clone();
                     out.events.push(HarnessEvent::SessionStarted {
                         run_id: key,
                         backend_session_id: session_id,
                         // Where the CLI reports it, this distinguishes subscription OAuth
                         // (`firstParty`) from API-key billing — the whole premise, observable.
-                        provider: value.get("provider").and_then(Value::as_str).map(str::to_string),
-                        model: value.get("model").and_then(Value::as_str).map(str::to_string),
+                        provider: value
+                            .get("provider")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        model: value
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
                         tools: value
                             .get("tools")
                             .and_then(Value::as_array)
-                            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_string)
+                                    .collect()
+                            })
                             .unwrap_or_default(),
                         mcp_servers: value
                             .get("mcp_servers")
@@ -146,7 +166,10 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<ParsedLine, String> {
                                 a.iter()
                                     .filter(|s| {
                                         let status = s.get("status").and_then(Value::as_str);
-                                        !matches!(status, Some("connected") | Some("pending") | None)
+                                        !matches!(
+                                            status,
+                                            Some("connected") | Some("pending") | None
+                                        )
                                     })
                                     .filter_map(|s| s.get("name").and_then(Value::as_str))
                                     .map(str::to_string)
@@ -159,8 +182,14 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<ParsedLine, String> {
                     out.events.push(HarnessEvent::ApiRetry {
                         run_id: key,
                         attempt: value.get("attempt").and_then(Value::as_u64).unwrap_or(0) as u32,
-                        max_retries: value.get("max_retries").and_then(Value::as_u64).unwrap_or(0) as u32,
-                        retry_delay_ms: value.get("retry_delay_ms").and_then(Value::as_u64).unwrap_or(0),
+                        max_retries: value
+                            .get("max_retries")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0) as u32,
+                        retry_delay_ms: value
+                            .get("retry_delay_ms")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
                         error: value
                             .get("error")
                             .and_then(Value::as_str)
@@ -172,7 +201,11 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<ParsedLine, String> {
                 // it runs inside the head agent's process, not as a process of ours.
                 "task_started" => {
                     let text = |field: &str| {
-                        value.get(field).and_then(Value::as_str).unwrap_or_default().to_string()
+                        value
+                            .get(field)
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()
                     };
                     out.events.push(HarnessEvent::SubagentStarted {
                         run_id: key,
@@ -185,23 +218,48 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<ParsedLine, String> {
                 "task_progress" => {
                     out.events.push(HarnessEvent::SubagentProgress {
                         run_id: key,
-                        task_id: value.get("task_id").and_then(Value::as_str).unwrap_or_default().into(),
+                        task_id: value
+                            .get("task_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .into(),
                         description: value
                             .get("description")
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .into(),
-                        last_tool: value.get("last_tool_name").and_then(Value::as_str).map(str::to_string),
-                        total_tokens: value.pointer("/usage/total_tokens").and_then(Value::as_u64).unwrap_or(0),
+                        last_tool: value
+                            .get("last_tool_name")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        total_tokens: value
+                            .pointer("/usage/total_tokens")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
                     });
                 }
                 "task_notification" => {
                     out.events.push(HarnessEvent::SubagentFinished {
                         run_id: key,
-                        task_id: value.get("task_id").and_then(Value::as_str).unwrap_or_default().into(),
-                        status: value.get("status").and_then(Value::as_str).unwrap_or("unknown").into(),
-                        summary: value.get("summary").and_then(Value::as_str).unwrap_or_default().into(),
-                        total_tokens: value.pointer("/usage/total_tokens").and_then(Value::as_u64).unwrap_or(0),
+                        task_id: value
+                            .get("task_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .into(),
+                        status: value
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
+                            .into(),
+                        summary: value
+                            .get("summary")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .into(),
+                        total_tokens: value
+                            .pointer("/usage/total_tokens")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
                     });
                 }
                 // Other system subtypes (plugin_install, hook_*, permission_denied) carry no
@@ -218,7 +276,11 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<ParsedLine, String> {
                 .unwrap_or_default();
 
             for block in blocks {
-                match block.get("type").and_then(Value::as_str).unwrap_or_default() {
+                match block
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                {
                     "text" => {
                         if let Some(text) = block.get("text").and_then(Value::as_str) {
                             out.events.push(HarnessEvent::AssistantText {
@@ -282,7 +344,10 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<ParsedLine, String> {
                             .unwrap_or_default()
                             .to_string(),
                         content: flatten_content(block.get("content").unwrap_or(&Value::Null)),
-                        is_error: block.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                        is_error: block
+                            .get("is_error")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
                     });
                 }
             }
@@ -325,7 +390,11 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<ParsedLine, String> {
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .unwrap_or_else(|| {
-                    value.get("subtype").and_then(Value::as_str).unwrap_or("success") != "success"
+                    value
+                        .get("subtype")
+                        .and_then(Value::as_str)
+                        .unwrap_or("success")
+                        != "success"
                 });
 
             let summary = ResultSummary {
@@ -374,7 +443,14 @@ mod tests {
         assert_eq!(parsed.backend_session_id.as_deref(), Some("sess-1"));
 
         match &parsed.events[0] {
-            HarnessEvent::SessionStarted { provider, model, tools, mcp_servers, mcp_failed, .. } => {
+            HarnessEvent::SessionStarted {
+                provider,
+                model,
+                tools,
+                mcp_servers,
+                mcp_failed,
+                ..
+            } => {
                 // The observable proof that the subscription, not an API key, is paying.
                 assert_eq!(provider.as_deref(), Some("firstParty"));
                 assert_eq!(model.as_deref(), Some("claude-sonnet-5"));
@@ -402,7 +478,12 @@ mod tests {
             HarnessEvent::AssistantText { text, partial: false, .. } if text == "Delegating."));
 
         match &parsed.events[1] {
-            HarnessEvent::ToolCall { tool_use_id, name, input, run_id } => {
+            HarnessEvent::ToolCall {
+                tool_use_id,
+                name,
+                input,
+                run_id,
+            } => {
                 assert_eq!(run_id, "run-1");
                 assert_eq!(tool_use_id, "tu_1");
                 assert_eq!(name, "mcp__harness__delegate");
@@ -454,7 +535,13 @@ mod tests {
 
         let parsed = parse_line("run-1", line).unwrap();
         match &parsed.events[0] {
-            HarnessEvent::ApiRetry { attempt, max_retries, retry_delay_ms, error, .. } => {
+            HarnessEvent::ApiRetry {
+                attempt,
+                max_retries,
+                retry_delay_ms,
+                error,
+                ..
+            } => {
                 assert_eq!((*attempt, *max_retries, *retry_delay_ms), (2, 5, 4000));
                 assert_eq!(error, "rate_limit");
             }
@@ -489,7 +576,10 @@ mod tests {
     #[test]
     fn unknown_and_blank_lines_are_ignored_not_fatal() {
         assert!(parse_line("run-1", "").unwrap().events.is_empty());
-        assert!(parse_line("run-1", r#"{"type":"something_new_in_2027"}"#).unwrap().events.is_empty());
+        assert!(parse_line("run-1", r#"{"type":"something_new_in_2027"}"#)
+            .unwrap()
+            .events
+            .is_empty());
         // Schema drift must not take the run down.
         assert!(parse_line("run-1", r#"{"type":"system","subtype":"init"}"#).is_ok());
     }
@@ -507,7 +597,12 @@ mod tests {
         let parsed = parse_line("orchestrator-1", line).unwrap();
 
         match &parsed.events[..] {
-            [HarnessEvent::QuotaReport { provider, status, windows, .. }] => {
+            [HarnessEvent::QuotaReport {
+                provider,
+                status,
+                windows,
+                ..
+            }] => {
                 assert_eq!(provider, "claude");
                 assert_eq!(status, "allowed");
                 // Ordered five-hour first regardless of JSON key order.
@@ -542,7 +637,13 @@ mod tests {
         let finished = r#"{"type":"system","subtype":"task_notification","task_id":"af7922364ce2c7f50","tool_use_id":"toolu_012b","status":"completed","output_file":"/tmp/x.output","summary":"Done. I've created the file.","usage":{"total_tokens":3682,"tool_uses":2,"duration_ms":4674},"uuid":"u","session_id":"s"}"#;
 
         match &parse_line("head", started).unwrap().events[..] {
-            [HarnessEvent::SubagentStarted { task_id, tool_use_id, subagent_type, description, .. }] => {
+            [HarnessEvent::SubagentStarted {
+                task_id,
+                tool_use_id,
+                subagent_type,
+                description,
+                ..
+            }] => {
                 assert_eq!(task_id, "af7922364ce2c7f50");
                 assert_eq!(tool_use_id, "toolu_012b");
                 assert_eq!(subagent_type, "builder");
@@ -551,7 +652,12 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         match &parse_line("head", progress).unwrap().events[..] {
-            [HarnessEvent::SubagentProgress { last_tool, total_tokens, description, .. }] => {
+            [HarnessEvent::SubagentProgress {
+                last_tool,
+                total_tokens,
+                description,
+                ..
+            }] => {
                 assert_eq!(last_tool.as_deref(), Some("Write"));
                 assert_eq!(*total_tokens, 3391);
                 assert_eq!(description, "Writing hello.txt");
@@ -559,7 +665,12 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         match &parse_line("head", finished).unwrap().events[..] {
-            [HarnessEvent::SubagentFinished { status, summary, total_tokens, .. }] => {
+            [HarnessEvent::SubagentFinished {
+                status,
+                summary,
+                total_tokens,
+                ..
+            }] => {
                 assert_eq!(status, "completed");
                 assert!(summary.starts_with("Done."));
                 assert_eq!(*total_tokens, 3682);
