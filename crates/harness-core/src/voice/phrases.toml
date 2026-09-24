@@ -242,3 +242,41 @@ expect = "to_head"
 [[phrase]]
 said = "open the readme"
 expect = "to_head"
+
+# Everyday things on the Mac: fixed recipes, not a message for Claude.
+[[phrase]]
+said = "open chrome and search for shoes"
+expect = "search the web shoes"
+[[phrase]]
+said = "search youtube for lofi beats"
+expect = "search youtube lofi beats"
+[[phrase]]
+said = "search for running shoes on amazon"
+expect = "search amazon running shoes"
+[[phrase]]
+said = "open spotify and play my playlist called top 200"
+expect = "play_playlist top 200"
+[[phrase]]
+said = "pause the music"
+expect = "media pause"
+[[phrase]]
+said = "skip this song"
+expect = "media skip"
+[[phrase]]
+said = "play some jazz on spotify"
+expect = "play_query jazz"
+[[phrase]]
+said = "make a note: call the dentist about Thursday"
+expect = "new_note call the dentist about Thursday"
+[[phrase]]
+said = "remind me to push the branch at 5"
+expect = "remind push the branch"
+[[phrase]]
+said = "turn it up"
+expect = "system volume up"
+[[phrase]]
+said = "lock my screen"
+expect = "system lock the screen"
+[[phrase]]
+said = "search for the retry function in the code"
+expect = "to_head"

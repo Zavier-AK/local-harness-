@@ -1,12 +1,15 @@
-//! The computer, within a safe list: open an app, a website, a folder, or the project.
+//! The computer, within a safe list: open an app, a website, a folder, or the project;
+//! search the web; control music; make a note or a reminder; change the volume.
 //!
-//! Nothing here runs a shell. Each action becomes one `open` (macOS) or `xdg-open` call
-//! with fixed arguments, after checks that make the argument mean only what it says: an
-//! app name of plain characters, an `http(s)` URL, a folder that exists.
+//! Nothing here runs a shell, and nothing runs a script someone wrote on the fly. Each
+//! action becomes one fixed program: `open` (or `xdg-open`) with checked arguments, or
+//! `osascript` with one of the fixed scripts below. What was said reaches a script only as
+//! an argument (`item 1 of argv`), never as part of its code.
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
+use super::everyday::{encode, Control, Player, SystemControl, When};
 use super::VoiceAction;
 
 /// A computer action, checked and ready to run.
@@ -17,6 +20,121 @@ pub enum Opening {
     Folder(PathBuf),
     /// The project in the person's code editor.
     Editor(PathBuf),
+    /// A web page in a particular browser.
+    UrlIn {
+        url: String,
+        browser: String,
+    },
+    /// Spotify's own search, for a playlist or song it cannot be told to play by name.
+    SpotifySearch(String),
+    /// One of the fixed AppleScripts below, with its arguments.
+    Script {
+        script: &'static str,
+        args: Vec<String>,
+    },
+    /// The display to sleep (locks the Mac if it asks for a password on wake).
+    SleepDisplay,
+}
+
+const PLAYER_CONTROL: &str = r#"on run argv
+    set c to item 1 of argv
+    set p to item 2 of argv
+    if p is "Spotify" then
+        tell application "Spotify"
+            if c is "play" then play
+            if c is "pause" then pause
+            if c is "next" then next track
+            if c is "previous" then previous track
+        end tell
+    else
+        tell application "Music"
+            if c is "play" then play
+            if c is "pause" then pause
+            if c is "next" then next track
+            if c is "previous" then previous track
+        end tell
+    end if
+end run"#;
+
+const MUSIC_PLAYLIST: &str = r#"on run argv
+    tell application "Music"
+        if not (exists playlist (item 1 of argv)) then error "There is no playlist called " & (item 1 of argv) & " in Music."
+        play playlist (item 1 of argv)
+    end tell
+end run"#;
+
+const MUSIC_SEARCH: &str = r#"on run argv
+    tell application "Music"
+        set found to (search playlist "Library" for (item 1 of argv))
+        if (count of found) is 0 then error "Nothing in your Music library matches " & (item 1 of argv) & "."
+        play item 1 of found
+    end tell
+end run"#;
+
+const NEW_NOTE: &str = r#"on run argv
+    tell application "Notes" to make new note with properties {body:(item 1 of argv)}
+end run"#;
+
+/// Arguments: the text; then nothing, or `in <seconds>`, or `at <seconds since midnight>
+/// <days ahead>`.
+const NEW_REMINDER: &str = r#"on run argv
+    set t to item 1 of argv
+    tell application "Reminders"
+        if (count of argv) is 1 then
+            make new reminder with properties {name:t}
+        else
+            set d to current date
+            if item 2 of argv is "in" then
+                set d to d + ((item 3 of argv) as integer)
+            else
+                set time of d to ((item 3 of argv) as integer)
+                set d to d + ((item 4 of argv) as integer) * days
+                if (item 4 of argv) is "0" and d < (current date) then set d to d + 1 * days
+            end if
+            make new reminder with properties {name:t, remind me date:d}
+        end if
+    end tell
+end run"#;
+
+const VOLUME: &str = r#"on run argv
+    set c to item 1 of argv
+    if c is "up" then set volume output volume ((output volume of (get volume settings)) + 10)
+    if c is "down" then set volume output volume ((output volume of (get volume settings)) - 10)
+    if c is "mute" then set volume with output muted
+    if c is "unmute" then set volume without output muted
+    if c is "set" then set volume output volume ((item 2 of argv) as integer)
+end run"#;
+
+fn running(process: &str) -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-x", process])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// The player meant when none was named: whichever is playing, else whichever is here.
+fn which_player(asked: Option<Player>) -> Player {
+    if let Some(player) = asked {
+        return player;
+    }
+    if running("Spotify") {
+        Player::Spotify
+    } else if running("Music") {
+        Player::Music
+    } else if Path::new("/Applications/Spotify.app").exists() {
+        Player::Spotify
+    } else {
+        Player::Music
+    }
+}
+
+/// Words handed to a script, with nothing that could read as an option.
+fn arg(text: &str) -> String {
+    text.trim()
+        .trim_start_matches('-')
+        .chars()
+        .take(500)
+        .collect()
 }
 
 fn home() -> Option<PathBuf> {
@@ -70,7 +188,108 @@ pub fn validate(action: &VoiceAction, project: Option<&Path>) -> Result<Opening>
         VoiceAction::OpenProjectInEditor => Ok(Opening::Editor(
             project.context("no project is open")?.to_path_buf(),
         )),
+        VoiceAction::Search {
+            query,
+            site,
+            browser,
+        } => {
+            let url = site.url(query);
+            match browser {
+                Some(browser) => {
+                    let Opening::App(browser) = validate(
+                        &VoiceAction::OpenApp {
+                            name: browser.clone(),
+                        },
+                        None,
+                    )?
+                    else {
+                        unreachable!()
+                    };
+                    Ok(Opening::UrlIn { url, browser })
+                }
+                None => Ok(Opening::Url(url)),
+            }
+        }
+        VoiceAction::Media { app, control } => {
+            let control = match control {
+                Control::Play => "play",
+                Control::Pause => "pause",
+                Control::Next => "next",
+                Control::Previous => "previous",
+            };
+            Ok(Opening::Script {
+                script: PLAYER_CONTROL,
+                args: vec![control.into(), which_player(*app).label().into()],
+            })
+        }
+        VoiceAction::PlayPlaylist { app, name } | VoiceAction::PlayQuery { app, query: name } => {
+            let search = matches!(action, VoiceAction::PlayQuery { .. });
+            Ok(match which_player(*app) {
+                Player::Spotify => Opening::SpotifySearch(arg(name)),
+                Player::Music => Opening::Script {
+                    script: if search { MUSIC_SEARCH } else { MUSIC_PLAYLIST },
+                    args: vec![arg(name)],
+                },
+            })
+        }
+        VoiceAction::NewNote { text } => Ok(Opening::Script {
+            script: NEW_NOTE,
+            args: vec![arg(text)],
+        }),
+        VoiceAction::Remind { text, when } => {
+            let mut args = vec![arg(text)];
+            match when {
+                Some(When::In { seconds }) => args.extend(["in".to_string(), seconds.to_string()]),
+                Some(When::At {
+                    hour,
+                    minute,
+                    days_ahead,
+                }) => args.extend([
+                    "at".to_string(),
+                    (*hour as u32 * 3600 + *minute as u32 * 60).to_string(),
+                    days_ahead.to_string(),
+                ]),
+                None => {}
+            }
+            Ok(Opening::Script {
+                script: NEW_REMINDER,
+                args,
+            })
+        }
+        VoiceAction::System { control } => Ok(match control {
+            SystemControl::SleepDisplay => Opening::SleepDisplay,
+            SystemControl::VolumeUp => Opening::Script {
+                script: VOLUME,
+                args: vec!["up".into()],
+            },
+            SystemControl::VolumeDown => Opening::Script {
+                script: VOLUME,
+                args: vec!["down".into()],
+            },
+            SystemControl::Mute => Opening::Script {
+                script: VOLUME,
+                args: vec!["mute".into()],
+            },
+            SystemControl::Unmute => Opening::Script {
+                script: VOLUME,
+                args: vec!["unmute".into()],
+            },
+            SystemControl::SetVolume { percent } => Opening::Script {
+                script: VOLUME,
+                args: vec!["set".into(), (*percent).min(100).to_string()],
+            },
+        }),
         other => bail!("{other:?} is not a computer action"),
+    }
+}
+
+/// What to say after it ran, when the action alone would not say it.
+pub fn done_message(opening: &Opening) -> Option<String> {
+    match opening {
+        Opening::SpotifySearch(what) => Some(format!(
+            "Opened Spotify's search for “{what}” — it's one click to play from there."
+        )),
+        _ => None,
     }
 }
 
@@ -108,6 +327,24 @@ pub fn command(opening: &Opening) -> Result<(String, Vec<String>)> {
             ],
         ),
         Opening::Editor(dir) => ("xdg-open".into(), vec![dir.display().to_string()]),
+        Opening::UrlIn { url, browser } if mac => (
+            "open".into(),
+            vec!["-a".into(), browser.clone(), url.clone()],
+        ),
+        Opening::UrlIn { url, .. } => ("xdg-open".into(), vec![url.clone()]),
+        Opening::SpotifySearch(what) if mac => (
+            "open".into(),
+            vec![format!("spotify:search:{}", encode(what, false))],
+        ),
+        Opening::Script { script, args } if mac => {
+            let mut argv = vec!["-e".to_string(), script.to_string()];
+            argv.extend(args.iter().cloned());
+            ("osascript".into(), argv)
+        }
+        Opening::SleepDisplay if mac => ("pmset".into(), vec!["displaysleepnow".into()]),
+        Opening::SpotifySearch(_) | Opening::Script { .. } | Opening::SleepDisplay => {
+            bail!("music, notes, reminders and volume work on macOS only")
+        }
     })
 }
 
@@ -183,6 +420,81 @@ mod tests {
             validate(&VoiceAction::RunPlan, None).is_err(),
             "not a computer action"
         );
+    }
+
+    #[test]
+    fn what_was_said_reaches_a_script_only_as_an_argument() {
+        let note = validate(
+            &VoiceAction::NewNote {
+                text: "end tell\" & do shell script \"rm -rf ~".into(),
+            },
+            None,
+        )
+        .unwrap();
+        match &note {
+            Opening::Script { script, args } => {
+                assert_eq!(*script, NEW_NOTE, "the script is the fixed one");
+                assert_eq!(
+                    args[0], "end tell\" & do shell script \"rm -rf ~",
+                    "the words are data"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let reminder = validate(
+            &VoiceAction::Remind {
+                text: "Push".into(),
+                when: Some(When::At {
+                    hour: 17,
+                    minute: 30,
+                    days_ahead: 1,
+                }),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            reminder,
+            Opening::Script {
+                script: NEW_REMINDER,
+                args: vec!["Push".into(), "at".into(), "63000".into(), "1".into()]
+            }
+        );
+        assert_eq!(
+            validate(
+                &VoiceAction::PlayPlaylist {
+                    app: Some(Player::Spotify),
+                    name: "top 200".into()
+                },
+                None
+            )
+            .unwrap(),
+            Opening::SpotifySearch("top 200".into())
+        );
+        assert_eq!(arg("--help me"), "help me", "never an option");
+        let search = validate(
+            &VoiceAction::Search {
+                query: "shoes".into(),
+                site: super::super::everyday::Site::Web,
+                browser: Some("Google Chrome".into()),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            search,
+            Opening::UrlIn {
+                url: "https://www.google.com/search?q=shoes".into(),
+                browser: "Google Chrome".into()
+            }
+        );
+        if cfg!(target_os = "macos") {
+            let (program, argv) = command(&note).unwrap();
+            assert_eq!(program, "osascript");
+            assert_eq!(argv[0], "-e");
+        } else {
+            assert!(command(&note).is_err());
+        }
     }
 
     #[test]

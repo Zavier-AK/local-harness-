@@ -76,7 +76,7 @@ output can merge anything.
 
 ### Working and verified
 
-- **243 engine tests** (264 including the separate Tauri shell workspace), no network or
+- **249 engine tests** (270 including the separate Tauri shell workspace), no network or
   CLI login required.
 - **Orchestrator** — live end-to-end against the real `claude` CLI: it called `list_roles`,
   then `delegate`, a worker wrote into its worktree, and it correctly reported the work as
@@ -119,7 +119,7 @@ output can merge anything.
   The tool description now says what happens without it, and the board shows how many
   steps start at once so you catch it in review.
 - **Voice commander.** What was checked here:
-  - Without Laya, voice is right on 56 of the 71 labelled phrases and wrong on none. The
+  - Without Laya, voice is right on 68 of the 83 labelled phrases and wrong on none. The
     other 15 are paraphrases that are Laya's to read.
   - Tried on the Mac. Two follow-ups came from that:
     - "open Notes" failed while "Cursor" worked, because app names were guessed from
@@ -127,6 +127,12 @@ output can merge anything.
     - Commands had to wait for the key to be let go. Now each runs at the pause after it,
       while the key is held.
   - Text meant for Claude now goes into the chat box and is never sent automatically.
+  - Inside apps, from the Mac tries ("open chrome and search for shoes", "open spotify and
+    play my playlist called top 200" went to Claude): web search, music control, notes,
+    reminders and volume are now fixed recipes. They are `open` or `osascript` with fixed
+    scripts, and what was said is only an argument.
+    - **Not verified here:** the AppleScripts run only on macOS. Spotify has no way to
+      play a playlist by name, so it opens Spotify's search instead.
   - The real `@receptron/laya` package runs in the helper. Its protocol and error paths
     work, including a clean error when the weights can't be downloaded.
   - whisper.cpp loads a model and transcribes 11 s of audio (a test model, CPU only).
@@ -175,7 +181,7 @@ output can merge anything.
 
 ### Known gaps
 
-- **No CI.** The repository has no workflows, so the 243 tests run only by hand. This
+- **No CI.** The repository has no workflows, so the 249 tests run only by hand. This
   matters more than usual here: both CLIs' JSON output is parsed leniently against
   fixtures rather than a stable contract, so upstream schema drift would go unnoticed
   until a live run misbehaved. Deferred by choice.

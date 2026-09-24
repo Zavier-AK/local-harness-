@@ -4,5 +4,7 @@
 <dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>Harness listens only while you hold the push-to-talk key, and turns what you say into commands on this Mac. No audio leaves the computer.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Harness controls Spotify, Music, Notes, Reminders and the volume when you ask it to by voice, with a fixed set of commands.</string>
 </dict>
 </plist>

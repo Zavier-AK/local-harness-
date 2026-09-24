@@ -439,6 +439,13 @@ export type VoiceAction =
   | { action: "open_folder"; path: string }
   | { action: "reveal_project" }
   | { action: "open_project_in_editor" }
+  | { action: "search"; query: string; site: string; browser: string | null }
+  | { action: "media"; app: "spotify" | "music" | null; control: "play" | "pause" | "next" | "previous" }
+  | { action: "play_playlist"; app: "spotify" | "music" | null; name: string }
+  | { action: "play_query"; app: "spotify" | "music" | null; query: string }
+  | { action: "new_note"; text: string }
+  | { action: "remind"; text: string; when: unknown }
+  | { action: "system"; control: { control: string; percent?: number } }
   | { action: "confirm" }
   | { action: "cancel" };
 

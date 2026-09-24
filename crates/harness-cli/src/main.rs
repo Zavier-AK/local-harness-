@@ -551,8 +551,12 @@ async fn voice(
 
     let words = words.context("say something: `harness-cli voice \"what's waiting for me\"`, or --eval")?;
     let snapshot = ev::fixture();
-    let heard = voice::interpret(words, &snapshot, client.as_ref(), threshold, None).await;
-    println!("{}", serde_json::to_string_pretty(&heard)?);
+    // Several commands in one breath are read one by one, as the app does.
+    let parts = voice::everyday::split_commands(words, &snapshot).unwrap_or_else(|| vec![words.to_string()]);
+    for part in parts {
+        let heard = voice::interpret(&part, &snapshot, client.as_ref(), threshold, None).await;
+        println!("{}", serde_json::to_string_pretty(&heard)?);
+    }
     println!("\n(against the example harness in voice/phrases.toml; nothing was done)");
     Ok(())
 }

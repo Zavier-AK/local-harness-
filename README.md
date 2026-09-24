@@ -291,6 +291,25 @@ is off until you turn it on in **Settings › Voice** and click **Save**.
   - A few well-known sites open by name ("open github").
   - Anything else after "open" ("open the login page and…") is about the work, so it goes
     to the chat box.
+- **Inside apps.** Each of these is a fixed recipe with your words filled in, never a
+  script written on the fly:
+  - **Search:** "search for shoes", "google salt and pepper grinders", "open chrome and
+    search for shoes", "search YouTube for lofi beats", "search for running shoes on
+    Amazon". GitHub, Maps, Wikipedia and Reddit work too. It opens in the browser you name,
+    or your default.
+  - **Music:** "pause the music", "play", "skip this song", "previous song", "play some
+    jazz on Spotify".
+    - "Play my playlist called Top 200" plays it directly in **Apple Music**. **Spotify**
+      doesn't let other apps play a playlist by name, so it opens Spotify's search for it,
+      one click from playing.
+    - With no app named, it uses whichever one is playing.
+  - **Notes and reminders:** "make a note: call the dentist about Thursday", "remind me to
+    push the branch at 5", "…in 20 minutes", "…tomorrow at 9:30". "At 5" means 5 PM.
+  - **The Mac:** "turn it up", "volume down", "mute", "set the volume to 30 percent",
+    "lock my screen" (sleeps the display).
+  - macOS asks once per app ("Harness wants to control Spotify"). Click OK.
+- **Two at once:** "open notes and show me the plan" runs both, in order. It splits only
+  when every part is a command on its own; "search for salt and pepper" stays one search.
 
 **Workers have numbers now.** Each card in the rail shows **#1**, **#2**, …, in the order
 they started, so "worker 3" means something. Ids are UUIDs nobody can say.
@@ -491,7 +510,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 243 engine tests, no network, no CLI login needed
+cargo test                        # 249 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -506,7 +525,7 @@ Preview discovery, URL safety, settings — run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **243 engine tests, 264 including the Tauri shell** — worth stating explicitly,
+That makes **249 engine tests, 270 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats

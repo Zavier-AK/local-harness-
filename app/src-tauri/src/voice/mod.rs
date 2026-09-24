@@ -607,6 +607,25 @@ pub async fn finish(_app: &AppHandle) -> Result<(), String> {
 
 /// Interpret words and settle the outcome: the shared path for speech and typed tests.
 pub async fn hear(app: &AppHandle, text: &str) -> Heard {
+    // "Open notes and show me the plan": each part in turn, when each is a command.
+    let voice = app.state::<Voice>();
+    if voice.pending().is_none() {
+        let (mut snapshot, _, _) = snapshot(&app.state::<AppState>()).await;
+        snapshot.apps = voice.apps();
+        if let Some(parts) = voice::everyday::split_commands(text, &snapshot) {
+            let mut last = None;
+            for part in parts {
+                last = Some(hear_one(app, &part).await);
+            }
+            if let Some(heard) = last {
+                return heard;
+            }
+        }
+    }
+    hear_one(app, text).await
+}
+
+async fn hear_one(app: &AppHandle, text: &str) -> Heard {
     let voice = app.state::<Voice>();
     let settings = settings::load().voice;
     let (mut snapshot, root, _) = snapshot(&app.state::<AppState>()).await;
@@ -693,12 +712,19 @@ async fn execute(
         | OpenUrl { .. }
         | OpenFolder { .. }
         | RevealProject
-        | OpenProjectInEditor => {
+        | OpenProjectInEditor
+        | Search { .. }
+        | Media { .. }
+        | PlayPlaylist { .. }
+        | PlayQuery { .. }
+        | NewNote { .. }
+        | Remind { .. }
+        | System { .. } => {
             let opening = computer::validate(action, project).map_err(|e| format!("{e:#}"))?;
             computer::open(&opening)
                 .await
                 .map_err(|e| format!("{e:#}"))?;
-            Ok(None)
+            Ok(computer::done_message(&opening))
         }
         // Answered in words; nothing to run.
         Status { .. } => Ok(None),

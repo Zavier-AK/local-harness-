@@ -129,7 +129,7 @@ pub fn normalize(text: &str) -> String {
 }
 
 /// `text` without the leading words `prefix`, if it starts with them as whole words.
-fn strip_words<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+pub(crate) fn strip_words<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     let rest = text.strip_prefix(prefix)?;
     if rest.is_empty() {
         Some(rest)
@@ -138,25 +138,25 @@ fn strip_words<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     }
 }
 
-fn has_word(text: &str, word: &str) -> bool {
+pub(crate) fn has_word(text: &str, word: &str) -> bool {
     text.split(' ').any(|w| w == word)
 }
 
-fn has_phrase(text: &str, phrase: &str) -> bool {
+pub(crate) fn has_phrase(text: &str, phrase: &str) -> bool {
     format!(" {text} ").contains(&format!(" {phrase} "))
 }
 
-fn is_any(text: &str, phrases: &[&str]) -> bool {
+pub(crate) fn is_any(text: &str, phrases: &[&str]) -> bool {
     phrases.contains(&text)
 }
 
-fn starts_any<'a>(text: &'a str, prefixes: &[&str]) -> Option<&'a str> {
+pub(crate) fn starts_any<'a>(text: &'a str, prefixes: &[&str]) -> Option<&'a str> {
     prefixes.iter().find_map(|p| strip_words(text, p))
 }
 
 /// The original words after the first whole-word, case-insensitive occurrence of
 /// `marker`, with leading punctuation and "to"/"that" trimmed.
-fn original_after(original: &str, markers: &[&str]) -> Option<String> {
+pub(crate) fn original_after(original: &str, markers: &[&str]) -> Option<String> {
     let lower = original.to_lowercase();
     let mut best: Option<usize> = None;
     for marker in markers {
@@ -841,6 +841,11 @@ pub fn match_command(original: &str, snapshot: &Snapshot, pending: bool) -> Opti
     }
 
     if let Some(action) = worker_command(original, n, snapshot) {
+        return Some(action);
+    }
+
+    // Everyday things on the Mac: search, music, notes, reminders, volume.
+    if let Some(action) = super::everyday::match_everyday(original, snapshot) {
         return Some(action);
     }
 

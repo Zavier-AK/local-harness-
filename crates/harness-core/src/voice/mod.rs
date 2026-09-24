@@ -18,6 +18,7 @@
 
 pub mod computer;
 pub mod eval;
+pub mod everyday;
 pub mod laya;
 pub mod matcher;
 
@@ -94,6 +95,38 @@ pub enum VoiceAction {
     },
     RevealProject,
     OpenProjectInEditor,
+    /// A web search, on a site ("youtube") or the web, in a browser if one was named.
+    Search {
+        query: String,
+        site: everyday::Site,
+        browser: Option<String>,
+    },
+    /// Play, pause, skip… in Spotify or Music; `None` means whichever is playing.
+    Media {
+        app: Option<everyday::Player>,
+        control: everyday::Control,
+    },
+    /// A playlist by name. Music plays it; Spotify opens its search for it.
+    PlayPlaylist {
+        app: Option<everyday::Player>,
+        name: String,
+    },
+    /// Anything else to play ("some jazz", "Drake").
+    PlayQuery {
+        app: Option<everyday::Player>,
+        query: String,
+    },
+    NewNote {
+        text: String,
+    },
+    Remind {
+        text: String,
+        when: Option<everyday::When>,
+    },
+    /// The Mac's own volume and display.
+    System {
+        control: everyday::SystemControl,
+    },
     /// Answers to a pending confirmation.
     Confirm,
     Cancel,
@@ -476,6 +509,39 @@ pub fn finalize(action: VoiceAction, snapshot: &Snapshot) -> Outcome {
         OpenFolder { path } => format!("Open {path}"),
         RevealProject => "Show the project in Finder".into(),
         OpenProjectInEditor => "Open the project in your editor".into(),
+        Search {
+            query,
+            site,
+            browser,
+        } => {
+            let place = site.label();
+            match browser {
+                Some(browser) => format!("Search {place} for “{query}” in {browser}"),
+                None => format!("Search {place} for “{query}”"),
+            }
+        }
+        Media { app, control } => {
+            format!(
+                "{} {}",
+                control.label(),
+                app.map(|a| a.label()).unwrap_or("the music")
+            )
+        }
+        PlayPlaylist { app, name } => format!(
+            "Play the playlist “{name}” in {}",
+            app.map(|a| a.label()).unwrap_or("your music app")
+        ),
+        PlayQuery { app, query } => format!(
+            "Play “{query}” in {}",
+            app.map(|a| a.label()).unwrap_or("your music app")
+        ),
+        NewNote { text } => format!("New note: {text}"),
+        Remind {
+            text,
+            when: Some(when),
+        } => format!("Remind you to {text} {}", when.label()),
+        Remind { text, when: None } => format!("Remind you to {text}"),
+        System { control } => control.label().to_string(),
         Confirm => "Yes".into(),
         Cancel => "Cancel".into(),
     };
