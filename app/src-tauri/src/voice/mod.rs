@@ -48,6 +48,11 @@ pub struct VoiceSettings {
     pub speak_replies: bool,
     /// How long a pause ends a command while the key is held.
     pub pause_ms: u32,
+    /// Requests the exact commands don't cover go to the voice agent, which plans and
+    /// does several steps. Off: they go to Laya and the chat box as before.
+    pub agent: bool,
+    /// The voice agent's model, a Claude CLI alias or id.
+    pub agent_model: String,
 }
 
 impl Default for VoiceSettings {
@@ -60,6 +65,8 @@ impl Default for VoiceSettings {
             laya_idle_minutes: 10,
             speak_replies: true,
             pause_ms: 700,
+            agent: true,
+            agent_model: "haiku".into(),
         }
     }
 }
@@ -88,6 +95,20 @@ impl VoiceSettings {
         }
         if !(300..=2000).contains(&self.pause_ms) {
             return Err("the pause must be between 0.3 and 2 seconds".into());
+        }
+        self.agent_model = self.agent_model.trim().to_string();
+        let model_ok = !self.agent_model.is_empty()
+            && self.agent_model.len() <= 100
+            && !self.agent_model.starts_with('-')
+            && self
+                .agent_model
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.[]/".contains(c));
+        if !model_ok {
+            return Err(format!(
+                "`{}` does not look like a model name",
+                self.agent_model
+            ));
         }
         Ok(self)
     }
@@ -118,6 +139,8 @@ pub struct Voice {
     pending: std::sync::Mutex<Option<Pending>>,
     /// Installed apps, and when they were last looked up.
     apps: std::sync::Mutex<Option<(Instant, Vec<String>)>>,
+    /// The voice agent, started on first use and kept for follow-ups.
+    agent: tokio::sync::Mutex<Option<(String, voice::agent::VoiceAgent)>>,
 }
 
 impl Voice {
@@ -133,6 +156,7 @@ impl Voice {
             session: std::sync::Mutex::new(None),
             pending: std::sync::Mutex::new(None),
             apps: std::sync::Mutex::new(None),
+            agent: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -484,6 +508,15 @@ fn warm(app: &AppHandle) {
             let _ = whisper(&app).await;
         });
     }
+    let settings = settings::load().voice;
+    if settings.agent {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = ensure_agent(&app, &settings.agent_model).await {
+                tracing::warn!("voice agent did not start: {error}");
+            }
+        });
+    }
 }
 
 /// The Whisper model, loaded on first use. Errors if it is not downloaded yet.
@@ -625,20 +658,162 @@ pub async fn hear(app: &AppHandle, text: &str) -> Heard {
     hear_one(app, text).await
 }
 
+/// The voice agent's hands: the same checks and handlers as a spoken command.
+struct AppHands {
+    app: AppHandle,
+}
+
+impl voice::agent::Hands for AppHands {
+    fn snapshot(&self) -> futures_util::future::BoxFuture<'static, voice::Snapshot> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            let (mut snapshot, _, _) = snapshot(&app.state::<AppState>()).await;
+            snapshot.apps = app.state::<Voice>().apps();
+            snapshot
+        })
+    }
+
+    fn perform(
+        &self,
+        action: VoiceAction,
+        confirm: bool,
+        describe: String,
+    ) -> futures_util::future::BoxFuture<'static, Result<String, String>> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            if confirm {
+                app.state::<Voice>().set_pending(Some(Pending {
+                    action,
+                    describe,
+                    since: Some(Instant::now()),
+                }));
+                return Ok(String::new());
+            }
+            let (_, root, _) = snapshot(&app.state::<AppState>()).await;
+            execute(&app, &action, root.as_deref())
+                .await
+                .map(|m| m.unwrap_or_default())
+        })
+    }
+
+    fn chat_box(&self, text: String) -> futures_util::future::BoxFuture<'static, ()> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            bring_forward(&app);
+            let _ = app.emit_to(
+                "main",
+                "voice://run",
+                Run {
+                    action: VoiceAction::AskHead { text },
+                },
+            );
+        })
+    }
+
+    fn step(&self, line: String) {
+        let _ = self.app.emit("voice://step", line);
+    }
+}
+
+/// The folder the voice agent runs in: its own, so no project's instructions reach it.
+fn agent_dir() -> PathBuf {
+    harness_core::extensions::app_data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("voice-agent")
+}
+
+/// Start the voice agent if it is not running, or is running another model.
+async fn ensure_agent(app: &AppHandle, model: &str) -> Result<(), String> {
+    let voice = app.state::<Voice>();
+    let mut slot = voice.agent.lock().await;
+    if slot.as_ref().is_some_and(|(m, _)| m == model) {
+        return Ok(());
+    }
+    if let Some((_, old)) = slot.take() {
+        old.shutdown().await;
+    }
+    let hands: Arc<dyn voice::agent::Hands> = Arc::new(AppHands { app: app.clone() });
+    let agent = voice::agent::VoiceAgent::start(hands, model, &agent_dir())
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    *slot = Some((model.to_string(), agent));
+    Ok(())
+}
+
+/// Hand the words to the voice agent and wait for it. `None` if it could not run, so the
+/// words go the old way instead.
+async fn ask_agent(
+    app: &AppHandle,
+    text: &str,
+    snapshot: &voice::Snapshot,
+    model: &str,
+) -> Option<Interpretation> {
+    if let Err(error) = ensure_agent(app, model).await {
+        tracing::warn!("voice agent unavailable: {error}");
+        return None;
+    }
+    phase(app, "thinking", Some(text.to_string()));
+    let voice = app.state::<Voice>();
+    let mut slot = voice.agent.lock().await;
+    let (_, agent) = slot.as_mut()?;
+    match agent.ask(text, snapshot, Duration::from_secs(120)).await {
+        Ok(reply) => {
+            let said = reply.text.trim_start_matches("Done:").trim().to_string();
+            Some(Interpretation {
+                transcript: text.to_string(),
+                outcome: Outcome::Reply {
+                    text: if said.is_empty() {
+                        "Done.".into()
+                    } else {
+                        said
+                    },
+                },
+                source: voice::Source::Agent,
+                confidence: None,
+                laya_ms: Some(reply.ms),
+                reply: None,
+            })
+        }
+        Err(error) => {
+            // A stuck or dead agent is replaced next time.
+            tracing::warn!("voice agent failed: {error:#}");
+            if let Some((_, agent)) = slot.take() {
+                agent.shutdown().await;
+            }
+            None
+        }
+    }
+}
+
 async fn hear_one(app: &AppHandle, text: &str) -> Heard {
     let voice = app.state::<Voice>();
     let settings = settings::load().voice;
     let (mut snapshot, root, _) = snapshot(&app.state::<AppState>()).await;
     snapshot.apps = voice.apps();
     let pending = voice.pending();
-    let interpretation = voice::interpret(
-        text,
-        &snapshot,
-        Some(&voice.laya),
-        settings.confidence,
-        pending.as_ref().map(|p| p.describe.as_str()),
-    )
-    .await;
+    // Exact commands stay instant; anything else, with the agent on, is the agent's.
+    let for_agent = settings.agent
+        && pending.is_none()
+        && voice::matcher::match_command(text, &snapshot, false).is_none()
+        && !voice::matcher::normalize(text).is_empty();
+    let from_agent = if for_agent {
+        ask_agent(app, text, &snapshot, &settings.agent_model).await
+    } else {
+        None
+    };
+    let interpretation = match from_agent {
+        Some(interpretation) => interpretation,
+        None => {
+            voice::interpret(
+                text,
+                &snapshot,
+                Some(&voice.laya),
+                settings.confidence,
+                pending.as_ref().map(|p| p.describe.as_str()),
+            )
+            .await
+        }
+    };
 
     let mut done = None;
     let mut error = None;
@@ -878,6 +1053,21 @@ pub async fn voice_try(app: AppHandle, text: String) -> Result<Interpretation, S
     let settings = settings::load().voice;
     let (mut snapshot, _, _) = snapshot(&app.state::<AppState>()).await;
     snapshot.apps = voice.apps();
+    // Never runs the agent here: it would really do things.
+    if settings.agent && voice::matcher::match_command(&text, &snapshot, false).is_none() {
+        return Ok(Interpretation {
+            transcript: text.clone(),
+            outcome: Outcome::Reply {
+                text:
+                    "Not an exact command — the voice agent would work out the steps and do them."
+                        .into(),
+            },
+            source: voice::Source::Agent,
+            confidence: None,
+            laya_ms: None,
+            reply: None,
+        });
+    }
     Ok(voice::interpret(
         &text,
         &snapshot,

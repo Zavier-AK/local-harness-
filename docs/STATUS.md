@@ -76,7 +76,7 @@ output can merge anything.
 
 ### Working and verified
 
-- **249 engine tests** (270 including the separate Tauri shell workspace), no network or
+- **254 engine tests** (275 including the separate Tauri shell workspace), no network or
   CLI login required.
 - **Orchestrator** — live end-to-end against the real `claude` CLI: it called `list_roles`,
   then `delegate`, a worker wrote into its worktree, and it correctly reported the work as
@@ -133,6 +133,20 @@ output can merge anything.
     scripts, and what was said is only an argument.
     - **Not verified here:** the AppleScripts run only on macOS. Spotify has no way to
       play a playlist by name, so it opens Spotify's search instead.
+  - **Voice agent** (Claude Haiku, with the safe list as MCP tools and nothing else). It
+    was added after multi-step requests and "create a new note" kept failing on the Mac.
+    Real Haiku runs here, with `voice --agent` printing the steps instead of doing them:
+    - "open notes and make a note with my groceries … then remind me at six to go
+      shopping": open Notes, a *Groceries* note, a reminder at 18:00 (8.8 s);
+    - "create a new note saying call the plumber tomorrow": one note (4.6 s);
+    - "open chrome and search for running shoes on amazon then play my top 200 playlist
+      on spotify": three steps in order (5.4 s);
+    - "what's waiting for me, and approve the builder's change": the status, then a merge
+      that **waits for a yes**;
+    - a request to add retries to the fetcher went to the chat box.
+
+    The app wiring (the steps ticking off in the bar, the fallback to Laya) was rendered
+    headlessly. **Not verified here:** the agent driving the real Mac apps.
   - The real `@receptron/laya` package runs in the helper. Its protocol and error paths
     work, including a clean error when the weights can't be downloaded.
   - whisper.cpp loads a model and transcribes 11 s of audio (a test model, CPU only).
@@ -181,7 +195,7 @@ output can merge anything.
 
 ### Known gaps
 
-- **No CI.** The repository has no workflows, so the 249 tests run only by hand. This
+- **No CI.** The repository has no workflows, so the 254 tests run only by hand. This
   matters more than usual here: both CLIs' JSON output is parsed leniently against
   fixtures rather than a stable contract, so upstream schema drift would go unnoticed
   until a live run misbehaved. Deferred by choice.
@@ -234,10 +248,13 @@ In the order that unblocks the most.
 9. **Measure voice on the Mac.** `brew install cmake`, then Settings › Voice: download
    Whisper, and install and load Laya. Run `harness-cli voice --eval --laya` and set the
    confidence to the suggested threshold. Add phrases you actually say to `phrases.toml`.
-10. **Run a night shift on something real** with a score you trust: a benchmark, a
+10. **Try the voice agent** with the longer things you actually say ("open notes and…",
+   "…then remind me…"). Note what it gets wrong. That decides what Level 2, a browser the
+   agent can read and click, needs to handle.
+11. **Run a night shift on something real** with a score you trust: a benchmark, a
    bundle size, a test count. Start with a few experiments and read the report before
    giving it a whole night.
-11. **Add CI** when the schema-drift risk starts to bite.
+12. **Add CI** when the schema-drift risk starts to bite.
 
 ## Risks worth tracking
 

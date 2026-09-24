@@ -637,6 +637,15 @@ fn system(n: &str) -> Option<VoiceAction> {
 
 fn note(original: &str, n: &str) -> Option<VoiceAction> {
     let markers = [
+        "create a new note that",
+        "create a new note saying",
+        "create a new note",
+        "make a new note that",
+        "make a new note",
+        "start a new note",
+        "add a new note",
+        "write a new note",
+        "new note saying",
         "make a note that",
         "make a note saying",
         "make a note",
@@ -875,6 +884,12 @@ mod tests {
             heard("Make a note: call the dentist about Thursday."),
             Some(VoiceAction::NewNote {
                 text: "call the dentist about Thursday".into()
+            })
+        );
+        assert_eq!(
+            heard("create a new note saying buy milk and eggs"),
+            Some(VoiceAction::NewNote {
+                text: "buy milk and eggs".into()
             })
         );
         assert_eq!(

@@ -9,6 +9,7 @@ description = "Headless driver for the harness engine."
 harness-core = { path = "../harness-core" }
 anyhow.workspace = true
 serde_json.workspace = true
+futures.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

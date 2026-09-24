@@ -311,6 +311,41 @@ is off until you turn it on in **Settings › Voice** and click **Save**.
 - **Two at once:** "open notes and show me the plan" runs both, in order. It splits only
   when every part is a command on its own; "search for salt and pepper" stays one search.
 
+### Longer requests: the voice agent
+
+Anything that isn't one exact command goes to a small **voice agent**: Claude Haiku,
+through your own `claude` login. It works out the steps and does them in order, using
+the same safe list as above as its only tools. It has no shell, no file access and no
+browser.
+
+- "Open Notes and make a note with my groceries, milk, eggs and bread, then remind me at
+  six to go shopping": Notes opens, a note titled *Groceries* is written, and a reminder
+  is set for 18:00.
+- "Open Chrome and search for running shoes on Amazon, then play my Top 200 playlist on
+  Spotify": three steps.
+- "What's waiting for me, and approve the builder's change": it answers, then **asks for
+  your yes** before merging, like any other risky action.
+- "Add retries to the fetcher": that's code, so it goes into the chat box, unsent.
+
+The bar ticks off each step as it happens (✓ Opened Notes, ✓ Made a note…), then reads one
+short sentence aloud.
+
+- **Speed:** 4–9 s for a request, against milliseconds for an exact command. Exact
+  commands still skip the agent.
+- **Cost:** it draws on the same Claude plan as the rest of the harness. Each request is a
+  short Haiku turn.
+- **Settings › Voice › Voice agent** turns it off (then it's Laya, then the chat box, as
+  before), and sets its model (`haiku` by default).
+- If the agent fails or times out, the request falls back to Laya, then the chat box.
+- **Fine-tuning isn't needed.** Understanding comes from the model; what it may *do* comes
+  from the tool list.
+
+Try it without the app. This prints each step instead of doing it:
+
+```bash
+cargo run -p harness-cli -- voice --agent "open notes and make a note to call the plumber"
+```
+
 **Workers have numbers now.** Each card in the rail shows **#1**, **#2**, …, in the order
 they started, so "worker 3" means something. Ids are UUIDs nobody can say.
 
@@ -328,8 +363,10 @@ Everything runs on the Mac; no audio leaves it.
      workers that actually exist) with a calibrated probability, in about 0.15 s.
    - It can never invent a worker.
    - Below the confidence you set (0.75 by default), nothing is done on its word.
-4. **Otherwise the words go into the chat box**, for you to edit and send. Nothing
-   reaches Claude unless you send it.
+4. **The voice agent** (above) takes everything else when it is on. It turns a longer
+   request into steps from the safe list, and puts coding requests into the chat box.
+5. **Otherwise the words go into the chat box**, for you to edit and send. Nothing
+   reaches Claude's coding session unless you send it.
 
 ### What stays safe
 
@@ -510,7 +547,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 249 engine tests, no network, no CLI login needed
+cargo test                        # 254 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -525,7 +562,7 @@ Preview discovery, URL safety, settings — run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **249 engine tests, 270 including the Tauri shell** — worth stating explicitly,
+That makes **254 engine tests, 275 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats
