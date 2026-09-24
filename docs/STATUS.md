@@ -76,7 +76,7 @@ output can merge anything.
 
 ### Working and verified
 
-- **205 engine tests** (216 including the separate Tauri shell workspace), no network or
+- **215 engine tests** (226 including the separate Tauri shell workspace), no network or
   CLI login required.
 - **Orchestrator** — live end-to-end against the real `claude` CLI: it called `list_roles`,
   then `delegate`, a worker wrote into its worktree, and it correctly reported the work as
@@ -118,6 +118,15 @@ output can merge anything.
   Finding: on the first try, haiku left `depends_on` out, so both steps started together.
   The tool description now says what happens without it, and the board shows how many
   steps start at once so you catch it in review.
+- **Night shift** — live against the real CLI, with a haiku builder on a toy project
+  (score: distinct lines in a file; guard: no line over 20 characters):
+  - the starting point scored 2;
+  - experiment 1 was kept at 13, and experiment 2 built on it and was kept at 21;
+  - `--propose` put the night's branch up for review, and it was verified low risk;
+  - the checkout was untouched, and no experiment branches or worktrees were left.
+
+  Thrown-away changes, a broken guard, an unscorable starting point and Stop are covered
+  by engine tests.
 - **Autonomy slider** — Ask verified live: with the level at Ask, the real head agent's
   native `Agent` call was refused by the hook, it delegated through `delegate` instead,
   and that returned awaiting approval. Auto-landing, its refusals, undo and conflict
@@ -146,7 +155,7 @@ output can merge anything.
 
 ### Known gaps
 
-- **No CI.** The repository has no workflows, so the 205 tests run only by hand. This
+- **No CI.** The repository has no workflows, so the 215 tests run only by hand. This
   matters more than usual here: both CLIs' JSON output is parsed leniently against
   fixtures rather than a stable contract, so upstream schema drift would go unnoticed
   until a live run misbehaved. Deferred by choice.
@@ -196,10 +205,13 @@ In the order that unblocks the most.
    another, send feedback, then run the revision.
 8. **Try the autonomy slider** at Land safe on a project with `[verify]` set up, and see
    whether what lands by itself is what you would have merged.
-9. **Push-to-talk voice assistant**: a menu-bar popover and global hotkey,
+9. **Run a night shift on something real** with a score you trust: a benchmark, a
+   bundle size, a test count. Start with a few experiments and read the report before
+   giving it a whole night.
+10. **Push-to-talk voice assistant**: a menu-bar popover and global hotkey,
    on-device speech-to-text, fixed commands matched first, a *small* LM Studio model for
    the rest (not `qwen3-coder-30b`), and "ask the fleet" sent to the head agent.
-10. **Add CI** when the schema-drift risk starts to bite.
+11. **Add CI** when the schema-drift risk starts to bite.
 
 ## Risks worth tracking
 

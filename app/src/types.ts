@@ -41,6 +41,7 @@ export type HarnessEvent =
   | { type: "merge_reverted"; worker_id: string; commit: string }
   | { type: "plan_updated"; plan: Plan }
   | { type: "plan_finished"; plan_id: string; title: string; outcome: string }
+  | { type: "night_updated"; report: NightReport }
   | { type: "verification_started"; worker_id: string }
   | { type: "verification_check"; worker_id: string; check: VerifyCheck }
   | { type: "verification_finished"; worker_id: string; report: VerificationReport }
@@ -352,4 +353,41 @@ export type Plan = {
   summary: string;
   status: "draft" | "running" | "finished" | "discarded";
   steps: PlanStep[];
+};
+
+// ---------- Night shift ----------
+
+/** Mirrors `harness_core::night::NightConfig`. */
+export type NightConfig = {
+  goal: string;
+  metric: string;
+  direction: "higher" | "lower";
+  guard: string | null;
+  role: string;
+  max_experiments: number;
+  max_hours: number;
+  timeout_secs: number;
+};
+
+export type Experiment = {
+  n: number;
+  worker_id: string;
+  summary: string;
+  score: number | null;
+  kept: boolean;
+  reason: string;
+};
+
+export type NightReport = {
+  id: string;
+  config: NightConfig;
+  status: "running" | "finished" | "stopped";
+  branch: string;
+  baseline: number | null;
+  best: number | null;
+  experiments: Experiment[];
+  started_at: number;
+  finished_at: number | null;
+  ended_because: string | null;
+  proposed_as: string | null;
 };

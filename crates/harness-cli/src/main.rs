@@ -102,6 +102,43 @@ enum Command {
     #[command(hide = true)]
     Hook { which: String },
 
+    /// Run a night shift: try one change at a time on its own branch, keep what scores
+    /// better, and throw the rest away. Ctrl-C stops it; what was kept stays kept.
+    Night {
+        /// What to improve, in plain words.
+        goal: String,
+
+        /// Prints the score; the last number in its output counts.
+        #[arg(long)]
+        metric: String,
+
+        /// Lower scores are better (the default is higher).
+        #[arg(long)]
+        lower: bool,
+
+        /// Must keep passing for a change to be kept, e.g. the test suite.
+        #[arg(long)]
+        guard: Option<String>,
+
+        /// The role that makes each change. Needs worktree isolation.
+        #[arg(long, default_value = "builder")]
+        role: String,
+
+        #[arg(long, default_value = "20")]
+        experiments: u32,
+
+        #[arg(long, default_value = "8")]
+        hours: f64,
+
+        /// Seconds the metric and the guard may each run.
+        #[arg(long, default_value = "900")]
+        timeout: u64,
+
+        /// Put the kept work up for review at the end, as an ordinary merge proposal.
+        #[arg(long)]
+        propose: bool,
+    },
+
     /// Token totals for the rolling window that governs a subscription.
     Usage {
         #[arg(long, default_value = "5")]
@@ -287,6 +324,34 @@ fn render(event: &HarnessEvent, streaming: &mut bool) {
         HarnessEvent::Error { message, .. } => {
             end_stream(streaming);
             eprintln!("  ✗ {message}");
+        }
+        // Each publish of a night's report adds exactly one thing; print that thing.
+        HarnessEvent::NightUpdated { report } => {
+            use harness_core::night::NightStatus;
+            end_stream(streaming);
+            if let Some(worker) = &report.proposed_as {
+                println!("  ☾ proposed for review as {worker}");
+            } else if report.status != NightStatus::Running {
+                println!(
+                    "  ☾ night shift {}: {} — {}",
+                    if report.status == NightStatus::Stopped { "stopped" } else { "finished" },
+                    report.ended_because.as_deref().unwrap_or("done"),
+                    report.headline()
+                );
+            } else if let Some(e) = report.experiments.last() {
+                println!(
+                    "  ☾ #{} {} {}: {} — {}",
+                    e.n,
+                    if e.kept { "kept" } else { "thrown away" },
+                    e.score.map(|s| s.to_string()).unwrap_or_else(|| "–".into()),
+                    e.summary.lines().next().unwrap_or("(no summary)"),
+                    e.reason
+                );
+            } else if let Some(base) = report.baseline {
+                println!("  ☾ starting score {base}");
+            } else {
+                println!("  ☾ night shift on {}: {}", report.branch, report.config.goal);
+            }
         }
         _ => {}
     }
@@ -615,6 +680,70 @@ async fn main() -> Result<()> {
             let renderer = spawn_renderer(rx, Arc::downgrade(&harness), None, false);
             tokio::signal::ctrl_c().await?;
             server.shutdown().await;
+            drop(harness);
+            drain(renderer).await;
+        }
+
+        Command::Night {
+            goal,
+            metric,
+            lower,
+            guard,
+            role,
+            experiments,
+            hours,
+            timeout,
+            propose,
+        } => {
+            use harness_core::night::{Direction, NightConfig, NightStatus};
+            let renderer = spawn_renderer(rx, Arc::downgrade(&harness), None, false);
+            harness
+                .start_night(NightConfig {
+                    goal: goal.clone(),
+                    metric: metric.clone(),
+                    direction: if *lower { Direction::Lower } else { Direction::Higher },
+                    guard: guard.clone(),
+                    role: role.clone(),
+                    max_experiments: *experiments,
+                    max_hours: *hours,
+                    timeout_secs: *timeout,
+                })
+                .await?;
+
+            let ctrl_c = tokio::signal::ctrl_c();
+            tokio::pin!(ctrl_c);
+            let mut stopping = false;
+            loop {
+                let done = harness
+                    .night_report()
+                    .await
+                    .is_some_and(|report| report.status != NightStatus::Running);
+                if done {
+                    break;
+                }
+                tokio::select! {
+                    _ = &mut ctrl_c, if !stopping => {
+                        eprintln!("  ☾ stopping after the current experiment is cut short…");
+                        harness.stop_night().await;
+                        stopping = true;
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                }
+            }
+
+            let report = harness.night_report().await.context("the night shift vanished")?;
+            if report.kept() > 0 {
+                println!("\nkept work is on {}", report.branch);
+                if *propose {
+                    harness.propose_night().await?;
+                    // A proposal is verified like any other merge; wait for that to finish.
+                    while harness.verifications_running().await > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    }
+                } else {
+                    println!("(re-run with --propose to put it up for review, or merge the branch yourself)");
+                }
+            }
             drop(harness);
             drain(renderer).await;
         }

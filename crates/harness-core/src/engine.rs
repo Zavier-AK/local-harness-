@@ -84,6 +84,9 @@ pub struct Harness {
     discarded: RwLock<std::collections::HashSet<String>>,
     /// Plans proposed in this session, keyed by id.
     plans: RwLock<HashMap<String, crate::plan::Plan>>,
+    /// The project's night shift — running, or last night's report.
+    night: RwLock<Option<crate::night::NightReport>>,
+    night_stop: RwLock<Option<tokio::sync::watch::Sender<bool>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +140,8 @@ impl Harness {
             landed: RwLock::new(HashMap::new()),
             discarded: RwLock::new(Default::default()),
             plans: RwLock::new(HashMap::new()),
+            night: RwLock::new(None),
+            night_stop: RwLock::new(None),
         }
     }
 
@@ -515,6 +520,19 @@ impl Harness {
         task: &str,
         context_files: Vec<String>,
     ) -> Result<WorkerRecord> {
+        self.run_delegation_on(worker_id, requested_role, task, context_files, None).await
+    }
+
+    /// [`Harness::run_delegation`], with the worker's worktree branched from `base`
+    /// instead of the current checkout.
+    pub(crate) async fn run_delegation_on(
+        self: &Arc<Self>,
+        worker_id: String,
+        requested_role: &str,
+        task: &str,
+        context_files: Vec<String>,
+        base: Option<&str>,
+    ) -> Result<WorkerRecord> {
         let role_name = self.resolve_role(requested_role).await?;
         // Cloned out of the lock: the worker runs for minutes and must not hold it.
         let role = self.registry.read().await.get(&role_name)?.clone();
@@ -551,7 +569,7 @@ impl Harness {
 
         let workspace = self
             .workspaces
-            .prepare(&worker_id, role.isolation)
+            .prepare_from(&worker_id, role.isolation, base.unwrap_or("HEAD"))
             .await
             .context("preparing the worker's workspace")?;
 
@@ -825,6 +843,270 @@ impl Harness {
             .values()
             .filter(|state| matches!(state, VerificationState::Running { .. }))
             .count()
+    }
+
+    // ------------------------------------------------------------ night shift
+
+    pub async fn night_report(&self) -> Option<crate::night::NightReport> {
+        self.night.read().await.clone()
+    }
+
+    async fn publish_night(&self, report: crate::night::NightReport) {
+        *self.night.write().await = Some(report.clone());
+        self.record(HarnessEvent::NightUpdated { report }).await;
+    }
+
+    /// Start an improvement loop on its own branch. One per project at a time.
+    pub async fn start_night(
+        self: &Arc<Self>,
+        config: crate::night::NightConfig,
+    ) -> Result<crate::night::NightReport> {
+        use crate::night::{NightReport, NightStatus};
+        config.validate(&*self.registry.read().await)?;
+        if matches!(self.night.read().await.as_ref(), Some(r) if r.status == NightStatus::Running) {
+            bail!("a night shift is already running");
+        }
+        let id = Uuid::new_v4().simple().to_string()[..8].to_string();
+        let branch = format!("{}/night-{id}", crate::isolation::BRANCH_PREFIX);
+        self.workspaces.create_branch(&branch).await?;
+        let report = NightReport {
+            id,
+            config,
+            status: NightStatus::Running,
+            branch,
+            baseline: None,
+            best: None,
+            experiments: Vec::new(),
+            started_at: now_secs(),
+            finished_at: None,
+            ended_because: None,
+            proposed_as: None,
+        };
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        *self.night_stop.write().await = Some(stop);
+        self.publish_night(report.clone()).await;
+        let harness = Arc::clone(self);
+        tokio::spawn(async move { harness.run_night(stopped).await });
+        Ok(report)
+    }
+
+    /// Stop after the current experiment is cut short; what was kept stays kept.
+    pub async fn stop_night(&self) -> bool {
+        match self.night_stop.read().await.as_ref() {
+            Some(stop) => stop.send(true).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Put the night's kept work in front of the person as an ordinary merge proposal.
+    pub async fn propose_night(self: &Arc<Self>) -> Result<String> {
+        use crate::night::NightStatus;
+        let mut report = self.night_report().await.context("there is no night shift to propose")?;
+        if report.status == NightStatus::Running {
+            bail!("the night shift is still running");
+        }
+        if report.kept() == 0 {
+            bail!("nothing was kept, so there is nothing to propose");
+        }
+        if let Some(existing) = &report.proposed_as {
+            bail!("already proposed as {existing}");
+        }
+        let worker_id = format!("night-{}", report.id);
+        let diff = self.workspaces.branch_diffstat(&report.branch).await?;
+        self.upsert(WorkerRecord {
+            id: worker_id.clone(),
+            role: "night shift".into(),
+            status: WorkerStatus::Done,
+            task: report.config.goal.clone(),
+            summary: report.headline(),
+            usage: Usage::default(),
+            diff: Some(diff.clone()),
+            branch: Some(report.branch.clone()),
+            is_error: false,
+        })
+        .await;
+        self.record(HarnessEvent::WorkerSpawned {
+            worker_id: worker_id.clone(),
+            role: "night shift".into(),
+            provider: "harness".into(),
+            model: None,
+            isolation: "worktree".into(),
+            cwd: String::new(),
+        })
+        .await;
+        self.record(HarnessEvent::WorkerFinished {
+            worker_id: worker_id.clone(),
+            summary: report.headline(),
+            usage: Usage::default(),
+            diff: Some(diff),
+            is_error: false,
+        })
+        .await;
+        self.request_merge(&worker_id).await?;
+        report.proposed_as = Some(worker_id.clone());
+        self.publish_night(report).await;
+        Ok(worker_id)
+    }
+
+    /// Score a branch in a fresh checkout: the guard must pass, then the metric is read.
+    async fn score_branch(
+        &self,
+        checkout_id: &str,
+        branch: &str,
+        config: &crate::night::NightConfig,
+    ) -> std::result::Result<f64, String> {
+        let timeout = std::time::Duration::from_secs(config.timeout_secs);
+        let workspace = self
+            .workspaces
+            .checkout_branch(checkout_id, branch)
+            .await
+            .map_err(|err| format!("could not check it out: {err:#}"))?;
+        let result = async {
+            if let Some(guard) = &config.guard {
+                let check = crate::verify::run_command(&workspace.cwd, guard, timeout).await;
+                if check.status != crate::verify::CheckStatus::Passed {
+                    return Err(format!("`{guard}` {}", check.summary));
+                }
+            }
+            crate::night::run_metric(&workspace.cwd, &config.metric, timeout).await
+        }
+        .await;
+        if let Err(err) = workspace.release().await {
+            tracing::warn!("failed to release night checkout {checkout_id}: {err:#}");
+        }
+        result
+    }
+
+    async fn run_night(self: Arc<Self>, mut stop: tokio::sync::watch::Receiver<bool>) {
+        use crate::night::{experiment_task, Experiment, NightStatus};
+        let Some(mut report) = self.night_report().await else { return };
+        let config = report.config.clone();
+        let started = std::time::Instant::now();
+        let budget = std::time::Duration::from_secs_f64(config.max_hours * 3600.0);
+        let provider = self
+            .registry
+            .read()
+            .await
+            .roles
+            .get(&config.role)
+            .map(|r| r.provider.as_str().to_string())
+            .unwrap_or_default();
+
+        let finish = |mut report: crate::night::NightReport, status: NightStatus, why: String| {
+            report.status = status;
+            report.finished_at = Some(now_secs());
+            report.ended_because = Some(why);
+            report
+        };
+
+        // Where the night starts from. If that does not pass or cannot be scored, no
+        // experiment could be judged fairly, so stop before spending anything.
+        match self.score_branch(&format!("night-{}-base", report.id), &report.branch, &config).await {
+            Ok(score) => {
+                report.baseline = Some(score);
+                report.best = Some(score);
+                self.publish_night(report.clone()).await;
+            }
+            Err(why) => {
+                let report = finish(report, NightStatus::Stopped, format!("the starting point could not be scored: {why}"));
+                self.publish_night(report).await;
+                return;
+            }
+        }
+
+        let night_branch = report.branch.clone();
+        let mut failures_in_a_row = 0;
+        for n in 1..=config.max_experiments {
+            if *stop.borrow() {
+                let report = finish(report, NightStatus::Stopped, "stopped by the person".into());
+                self.publish_night(report).await;
+                return;
+            }
+            if started.elapsed() >= budget {
+                let report = finish(report, NightStatus::Finished, "the time budget is spent".into());
+                self.publish_night(report).await;
+                return;
+            }
+            if self.is_rate_limited(&provider).await {
+                let report = finish(report, NightStatus::Stopped, format!("{provider} hit its usage limit"));
+                self.publish_night(report).await;
+                return;
+            }
+
+            let worker_id = format!("w-night-{}-{n}", report.id);
+            let task = experiment_task(&config, report.best, &report.experiments);
+            let run = self.run_delegation_on(worker_id.clone(), &config.role, &task, Vec::new(), Some(&night_branch));
+            tokio::pin!(run);
+            let outcome = tokio::select! {
+                outcome = &mut run => outcome,
+                _ = stop.changed() => {
+                    // Cut the experiment short; it still finishes cleanly and is discarded.
+                    self.cancel_worker(&worker_id).await;
+                    (&mut run).await
+                }
+            };
+
+            let (summary, verdict) = match outcome {
+                Err(err) => (String::new(), Err(format!("{err:#}"))),
+                Ok(record) => {
+                    let summary = record.summary.lines().last().unwrap_or_default().trim().to_string();
+                    let changed = record.diff.as_ref().is_some_and(|d| d.files_changed > 0);
+                    let verdict = match (&record.branch, changed, record.is_error || record.status != WorkerStatus::Done) {
+                        (_, _, true) => Err(format!("the worker did not finish: {}", record.summary.lines().next().unwrap_or_default())),
+                        (None, _, _) | (_, false, _) => Err("it made no change".into()),
+                        (Some(branch), true, false) => {
+                            match self.score_branch(&format!("night-{}-{n}", report.id), branch, &config).await {
+                                Err(why) => Err(why),
+                                Ok(score) => Ok(score),
+                            }
+                        }
+                    };
+                    (summary, verdict)
+                }
+            };
+
+            let worker_branch = format!("{}/{worker_id}", crate::isolation::BRANCH_PREFIX);
+            let mut experiment = Experiment { n, worker_id: worker_id.clone(), summary, score: None, kept: false, reason: String::new() };
+            match verdict {
+                Ok(score) => {
+                    failures_in_a_row = 0;
+                    experiment.score = Some(score);
+                    let best = report.best.unwrap_or(score);
+                    if config.improves(score, best) {
+                        match self.workspaces.advance_branch(&night_branch, &worker_branch).await {
+                            Ok(()) => {
+                                experiment.kept = true;
+                                experiment.reason = format!("{score} beats {best}");
+                                report.best = Some(score);
+                            }
+                            Err(err) => experiment.reason = format!("could not keep it: {err:#}"),
+                        }
+                    } else {
+                        experiment.reason = format!("{score} is not better than {best}");
+                    }
+                }
+                Err(why) => {
+                    failures_in_a_row += 1;
+                    experiment.reason = why;
+                }
+            }
+            // Kept work lives on the night branch now; the experiment's own branch goes.
+            let _ = self.workspaces.discard(&worker_branch).await;
+            if let Some(mut record) = self.worker(&worker_id).await {
+                record.branch = None;
+                self.upsert(record).await;
+            }
+            report.experiments.push(experiment);
+            self.publish_night(report.clone()).await;
+
+            if failures_in_a_row >= 3 {
+                let report = finish(report, NightStatus::Stopped, "three experiments in a row failed to produce a score".into());
+                self.publish_night(report).await;
+                return;
+            }
+        }
+        let report = finish(report, NightStatus::Finished, "every experiment in the budget ran".into());
+        self.publish_night(report).await;
     }
 
     // ------------------------------------------------------------------ plans
@@ -1714,4 +1996,11 @@ fn stopped_outcome() -> agents::RunOutcome {
         cancelled: true,
         ..Default::default()
     }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
 }
