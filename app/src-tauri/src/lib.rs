@@ -817,6 +817,48 @@ async fn plan_feedback(
     }
 }
 
+// ---------------------------------------------------------------- night shift
+
+#[tauri::command]
+async fn night_status(
+    state: State<'_, AppState>,
+    project: Option<String>,
+) -> Result<Option<harness_core::night::NightReport>, String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
+    Ok(session.harness.night_report().await)
+}
+
+#[tauri::command]
+async fn start_night(
+    state: State<'_, AppState>,
+    config: harness_core::night::NightConfig,
+    project: Option<String>,
+) -> Result<harness_core::night::NightReport, String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
+    session.harness.start_night(config).await.map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn stop_night(state: State<'_, AppState>, project: Option<String>) -> Result<bool, String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
+    Ok(session.harness.stop_night().await)
+}
+
+/// Put the night's kept work up for review, as an ordinary merge proposal.
+#[tauri::command]
+async fn propose_night(state: State<'_, AppState>, project: Option<String>) -> Result<String, String> {
+    let key = key_for(&state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
+    session.harness.propose_night().await.map_err(|e| format!("{e:#}"))
+}
+
 // ------------------------------------------------------------------ autonomy
 
 #[tauri::command]
@@ -1294,6 +1336,9 @@ async fn close_project(state: State<'_, AppState>, project: Option<String>) -> R
     let Some(mut session) = projects.remove(&key) else {
         return Ok(());
     };
+    // A night shift is not left running where nobody can see or stop it. What it kept
+    // stays on its branch.
+    session.harness.stop_night().await;
     if let Head::Live(orchestrator) = std::mem::replace(&mut session.head, Head::Suspended) {
         orchestrator.shutdown().await.map_err(|e| format!("{e:#}"))?;
     }
@@ -1576,6 +1621,10 @@ pub fn run() {
             run_plan,
             discard_plan,
             plan_feedback,
+            night_status,
+            start_night,
+            stop_night,
+            propose_night,
             get_autonomy,
             set_autonomy,
             approve_delegation,

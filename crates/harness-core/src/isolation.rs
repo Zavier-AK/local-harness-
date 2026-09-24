@@ -33,6 +33,13 @@ pub const BRANCH_PREFIX: &str = "harness";
 /// The line written into `.git/info/exclude`.
 const HARNESS_EXCLUDE: &str = ".harness/";
 
+fn harness_branch(branch: &str) -> Result<()> {
+    if !branch.starts_with(&format!("{BRANCH_PREFIX}/")) || branch.contains("..") {
+        bail!("refusing to touch `{branch}`: not a harness branch");
+    }
+    Ok(())
+}
+
 async fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
@@ -331,6 +338,21 @@ impl Workspaces {
     /// should report [`WorkerStatus::Blocked`](crate::event::WorkerStatus::Blocked) while
     /// it waits.
     pub async fn prepare(&self, worker_id: &str, isolation: Isolation) -> Result<Workspace> {
+        self.prepare_from(worker_id, isolation, "HEAD").await
+    }
+
+    /// [`Workspaces::prepare`], with the worktree branched from `base` rather than the
+    /// current checkout — so a worker can build on a line of work that has not landed,
+    /// such as a night shift's best result so far.
+    pub async fn prepare_from(
+        &self,
+        worker_id: &str,
+        isolation: Isolation,
+        base: &str,
+    ) -> Result<Workspace> {
+        if base != "HEAD" && !base.starts_with(&format!("{BRANCH_PREFIX}/")) {
+            bail!("refusing to branch from `{base}`: not HEAD or a harness branch");
+        }
         match isolation {
             Isolation::None => Ok(Workspace {
                 cwd: self.project_root.clone(),
@@ -368,7 +390,7 @@ impl Workspaces {
                     let _file_lock = lock_worktree_admin(&self.project_root).await?;
                     git(
                         &self.project_root,
-                        &["worktree", "add", "-b", &branch, &path.to_string_lossy(), "HEAD"],
+                        &["worktree", "add", "-b", &branch, &path.to_string_lossy(), base],
                     )
                     .await
                     .context("creating the worker's worktree")?;
@@ -527,6 +549,49 @@ impl Workspaces {
             .await
             .context("reverting the merge")?;
         Ok(())
+    }
+
+    /// Create a harness branch at the current checkout's tip.
+    pub async fn create_branch(&self, branch: &str) -> Result<()> {
+        harness_branch(branch)?;
+        git(&self.project_root, &["branch", branch, "HEAD"]).await?;
+        Ok(())
+    }
+
+    /// Move a harness branch to another harness branch's tip — only forward, so kept work
+    /// is never lost.
+    pub async fn advance_branch(&self, branch: &str, to: &str) -> Result<()> {
+        harness_branch(branch)?;
+        harness_branch(to)?;
+        git(&self.project_root, &["merge-base", "--is-ancestor", branch, to])
+            .await
+            .with_context(|| format!("{to} does not build on {branch}"))?;
+        git(&self.project_root, &["branch", "-f", branch, to]).await?;
+        Ok(())
+    }
+
+    /// The commit a branch points at.
+    pub async fn branch_tip(&self, branch: &str) -> Result<String> {
+        harness_branch(branch)?;
+        git(&self.project_root, &["rev-parse", branch]).await
+    }
+
+    /// What a branch changes relative to where it left the current checkout.
+    pub async fn branch_diffstat(&self, branch: &str) -> Result<DiffStat> {
+        harness_branch(branch)?;
+        let numstat =
+            git(&self.project_root, &["diff", "--numstat", &format!("HEAD...{branch}")]).await?;
+        let mut stat = DiffStat::default();
+        for line in numstat.lines().filter(|l| !l.trim().is_empty()) {
+            let mut fields = line.split('\t');
+            stat.insertions += fields.next().unwrap_or("0").parse::<usize>().unwrap_or(0);
+            stat.deletions += fields.next().unwrap_or("0").parse::<usize>().unwrap_or(0);
+            if let Some(path) = fields.next() {
+                stat.files.push(path.to_string());
+            }
+        }
+        stat.files_changed = stat.files.len();
+        Ok(stat)
     }
 
     /// Drop a branch whose work was rejected.

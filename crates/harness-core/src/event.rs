@@ -170,6 +170,10 @@ pub enum HarnessEvent {
     PlanUpdated {
         plan: crate::plan::Plan,
     },
+    /// The night shift moved on: started, scored, tried something, or ended.
+    NightUpdated {
+        report: crate::night::NightReport,
+    },
     /// Every step of a running plan reached a final state.
     PlanFinished {
         plan_id: String,
@@ -299,6 +303,7 @@ impl HarnessEvent {
             | Self::VerificationFinished { worker_id, .. } => worker_id,
             Self::PlanUpdated { plan } => &plan.id,
             Self::PlanFinished { plan_id, .. } => plan_id,
+            Self::NightUpdated { report } => &report.id,
         }
     }
 }

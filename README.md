@@ -192,6 +192,48 @@ markdown". The running view is borrowed from Vibe Kanban's lanes.
 
 Headless, `harness-cli --run-plans` runs a proposed plan unedited.
 
+## Night shift
+
+Set a goal and a way to score it, and walk away. This is Karpathy's
+[autoresearch](https://github.com/karpathy/autoresearch) loop, pointed at a codebase
+instead of a training run. You give it:
+
+- **a goal**, in plain words ("make the test suite faster without dropping tests");
+- **a score command** — whatever it prints last is the score — and whether higher or
+  lower is better;
+- optionally **a command that must keep passing**, such as the test suite;
+- **a role** to make the changes, and a budget in experiments and hours.
+
+Then, round after round:
+
+1. A worker makes **one focused change** on top of the best result so far. Its brief
+   lists the last dozen things tried and how each went, so it doesn't repeat itself.
+2. The harness scores the change in a fresh checkout. It runs the guard first, then the
+   score command.
+3. The change is **kept** only if the guard passes *and* the score beats the best so far.
+   Kept changes are fast-forwarded onto the night's branch; everything else is thrown
+   away.
+
+It stops when the budget is spent, when you press **Stop**, when the role's provider hits
+its usage limit, or after three rounds in a row produce no score. It also refuses to
+start if the starting point can't be scored, so it never spends anything it can't judge.
+
+- **Your checkout is never touched.** All the work happens on `harness/night-<id>`, and
+  experiment branches are cleaned up as it goes.
+- **The morning report** is on the **Night** tab: starting and best score, a chart of
+  every experiment against the best-so-far line, and each experiment with what it changed
+  and why it was kept or thrown away. A notification tells you when it ends.
+- **Propose for review** turns the night's branch into an ordinary merge proposal. It is
+  verified and gated, and obeys the autonomy dial like any other change.
+- **Closing the project stops the night.** Nothing keeps running where you can't see it.
+
+Headless:
+
+```bash
+harness-cli night "Make the benchmark faster" --metric ./bench.sh --lower \
+  --guard "cargo test" --experiments 30 --hours 8 --propose
+```
+
 ## How much runs without you
 
 A four-stop dial in the title bar, set per project. ⌘⇧A cycles through it. This is
@@ -233,6 +275,7 @@ logged in (`claude /login`, `codex login`), plus Ollama or LM Studio for local r
 cargo run -p harness-cli -- roles          # fleet, and which backends are actually reachable
 cargo run -p harness-cli -- run-worker mock "WRITE:demo.txt:hello" --patch
 cargo run -p harness-cli -- chat "Plan the change, then delegate it."
+cargo run -p harness-cli -- night "Add tests" --metric "grep -c '#\[test\]' src/lib.rs" --experiments 3
 cargo run -p harness-cli -- usage --hours 5
 
 # Desktop app
@@ -363,7 +406,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 205 engine tests, no network, no CLI login needed
+cargo test                        # 215 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -378,7 +421,7 @@ Preview discovery, URL safety, settings — run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **205 engine tests, 216 including the Tauri shell** — worth stating explicitly,
+That makes **215 engine tests, 226 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats

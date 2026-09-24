@@ -6,6 +6,8 @@
 //! the isolation tests prove a worker's edits land in its worktree and nowhere else.
 //! `SLOW:<path>:<contents>` writes the file and then does not finish, which is how the
 //! cancellation tests prove a stopped worker keeps what it had already written.
+//! A `MOCK-SH:<command>` anywhere in the task runs that shell line in the workspace — the
+//! night-shift tests put it in the goal, which reaches the worker inside a longer brief.
 
 use anyhow::Result;
 
@@ -27,7 +29,21 @@ pub async fn run(spec: &WorkerSpec, sink: &EventSink) -> Result<RunOutcome> {
 
     let mut is_error = false;
 
-    let text = if let Some(rest) = spec.task.strip_prefix("FAIL:") {
+    let text = if let Some(command) = spec
+        .task
+        .find("MOCK-SH:")
+        .map(|at| spec.task[at + "MOCK-SH:".len()..].lines().next().unwrap_or_default().trim().to_string())
+    {
+        let output = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .current_dir(&spec.cwd)
+            .kill_on_drop(true)
+            .output()
+            .await?;
+        is_error = !output.status.success();
+        format!("ran `{command}`")
+    } else if let Some(rest) = spec.task.strip_prefix("FAIL:") {
         is_error = true;
         rest.trim().to_string()
     } else if let Some(rest) = spec.task.strip_prefix("SLOW:") {

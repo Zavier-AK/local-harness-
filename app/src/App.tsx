@@ -13,6 +13,7 @@ import PreviewPanel from "./PreviewPanel";
 import ToolsView from "./ToolsView";
 import AutonomyDial, { nextStop } from "./AutonomyDial";
 import PlanBoard from "./PlanBoard";
+import NightView from "./NightView";
 import SettingsView from "./SettingsView";
 import { notifyIfAway } from "./notify";
 import { applySettings } from "./appSettings";
@@ -20,6 +21,8 @@ import type {
   AppSettings,
   Autonomy,
   Plan,
+  NightConfig,
+  NightReport,
   StepInput,
   ChatItem,
   HarnessEvent,
@@ -44,7 +47,9 @@ export default function App() {
   const [rateLimited, setRateLimited] = useState(false);
   const [selectedWorker, setSelectedWorker] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [activePane, setActivePane] = useState<"chat" | "plan" | "preview">("chat");
+  const [activePane, setActivePane] = useState<"chat" | "plan" | "night" | "preview">("chat");
+  /** The project's night shift: running, or the last one's report. */
+  const [night, setNight] = useState<NightReport | null>(null);
   /** The plan on the board: the one under review or running, else the last one. */
   const [plan, setPlan] = useState<Plan | null>(null);
   const [fleetOpen, setFleetOpen] = useState(false);
@@ -69,6 +74,33 @@ export default function App() {
       })
       .catch(() => setPlan(null));
   }, [session?.project_root]);
+
+  useEffect(() => {
+    if (!session?.project_root) return;
+    invoke<NightReport | null>("night_status")
+      .then(setNight)
+      .catch(() => setNight(null));
+  }, [session?.project_root]);
+
+  async function startNight(config: NightConfig) {
+    setNight(await invoke<NightReport>("start_night", { config }));
+  }
+
+  async function stopNight() {
+    try {
+      await invoke("stop_night");
+    } catch (err) {
+      setChat((prev) => [...prev, { kind: "notice", tone: "error", text: String(err) }]);
+    }
+  }
+
+  async function proposeNight() {
+    try {
+      await invoke("propose_night");
+    } catch (err) {
+      setChat((prev) => [...prev, { kind: "notice", tone: "error", text: String(err) }]);
+    }
+  }
 
   async function runPlan(steps: StepInput[]) {
     if (!plan) return;
@@ -258,6 +290,17 @@ export default function App() {
         if (incoming.status === "draft") {
           setActivePane("plan");
           void notifyIfAway("The head agent proposed a plan", incoming.title);
+        }
+      }
+      if (payload.type === "night_updated") {
+        const incoming = payload.report;
+        setNight(incoming);
+        if (incoming.status !== "running" && !incoming.proposed_as) {
+          const kept = incoming.experiments.filter((e) => e.kept).length;
+          void notifyIfAway(
+            "The night shift is over",
+            kept > 0 ? `${kept} improvement(s) kept — review them on the Night tab.` : "Nothing was kept.",
+          );
         }
       }
       if (payload.type === "run_finished") {
@@ -504,6 +547,22 @@ export default function App() {
               </button>
               <button
                 role="tab"
+                aria-selected={activePane === "night"}
+                className={activePane === "night" ? "active" : ""}
+                onClick={() => setActivePane("night")}
+              >
+                Night
+                {night?.status === "running" && (
+                  <span className="tab-count" title="kept / tried">
+                    {night.experiments.filter((e) => e.kept).length}/{night.experiments.length}
+                  </span>
+                )}
+                {night && night.status !== "running" && !night.proposed_as && night.experiments.some((e) => e.kept) && (
+                  <span className="tab-dot" aria-label="a report is waiting for you" />
+                )}
+              </button>
+              <button
+                role="tab"
                 aria-selected={activePane === "preview"}
                 className={activePane === "preview" ? "active" : ""}
                 onClick={() => setActivePane("preview")}
@@ -537,6 +596,20 @@ export default function App() {
                 onRun={(steps) => void runPlan(steps)}
                 onFeedback={(steps, comments, note) => void sendPlanFeedback(steps, comments, note)}
                 onDiscard={() => void discardPlan()}
+                onSelectWorker={setSelectedWorker}
+              />
+            </div>
+            <div
+              className={`tab-panel plan-panel ${activePane === "night" ? "" : "hidden"}`}
+              role="tabpanel"
+              aria-hidden={activePane !== "night"}
+            >
+              <NightView
+                report={night}
+                roles={session.roles}
+                onStart={startNight}
+                onStop={() => void stopNight()}
+                onPropose={() => void proposeNight()}
                 onSelectWorker={setSelectedWorker}
               />
             </div>
@@ -662,6 +735,21 @@ function reduceChat(
           text: `Proposed a plan — "${event.plan.title}", ${event.plan.steps.length} step(s). Review it on the Plan tab.`,
         },
       ];
+
+    case "night_updated": {
+      // Only the ending is chat-worthy; the tab carries the progress.
+      const report = event.report;
+      if (report.status === "running" || report.proposed_as) return prev;
+      const kept = report.experiments.filter((e) => e.kept).length;
+      return [
+        ...prev,
+        {
+          kind: "notice",
+          tone: kept > 0 ? "info" : "warn",
+          text: `Night shift ${report.status === "stopped" ? "stopped" : "finished"} (${report.ended_because ?? "done"}): ${kept} of ${report.experiments.length} experiment(s) kept. The report is on the Night tab.`,
+        },
+      ];
+    }
 
     case "plan_finished":
       return [...prev, { kind: "notice", tone: "info", text: `Plan "${event.title}" finished.` }];
