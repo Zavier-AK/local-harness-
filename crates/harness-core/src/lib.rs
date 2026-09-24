@@ -28,6 +28,7 @@ pub mod roles;
 pub mod roles_patch;
 pub mod store;
 pub mod verify;
+pub mod voice;
 
 pub use detection::{
     ConfigurableRole, DetectedBackend, DetectedModel, FleetInspection, ModelOption, RoleModelPatch,

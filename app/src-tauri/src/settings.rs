@@ -20,6 +20,8 @@ pub struct Settings {
     pub notifications: bool,
     /// Accent colour as `#rrggbb`. `None` keeps the theme's own.
     pub accent: Option<String>,
+    /// Push-to-talk.
+    pub voice: crate::voice::VoiceSettings,
 }
 
 impl Default for Settings {
@@ -29,6 +31,7 @@ impl Default for Settings {
             max_turns: 200,
             notifications: true,
             accent: None,
+            voice: crate::voice::VoiceSettings::default(),
         }
     }
 }
@@ -64,6 +67,7 @@ impl Settings {
                 return Err(format!("`{accent}` is not a #rrggbb colour"));
             }
         }
+        self.voice = self.voice.validated()?;
         Ok(self)
     }
 }
@@ -116,6 +120,7 @@ mod tests {
             max_turns: 80,
             notifications: false,
             accent: Some("#e0567a".into()),
+            voice: crate::voice::VoiceSettings { enabled: true, confidence: 0.8, ..Default::default() },
         };
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path), settings);

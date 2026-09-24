@@ -265,9 +265,82 @@ Karpathy's "autonomy slider": you decide how much the fleet does alone, and the
   sets it for a headless run. Nobody is there to approve, so under `ask` the CLI declines
   delegations, and says why.
 
+## Talk to it
+
+Hold **⌥Space** anywhere, not only in the app, say what you want, and let go. Voice is a
+commander for the harness itself, plus a small, safe list of things on the Mac. It is off
+until you turn it on in **Settings › Voice**.
+
+- **Look:** "what's waiting for me?", "what's running", "how's the night shift going?",
+  "show me the plan", "switch to blog", "open worker 3".
+- **Decide:** "approve the builder's merge", "reject it because it drops the cache",
+  "undo that", "let the reviewer start", "stop worker 2".
+- **Steer:** "set autonomy to land safe", "run the plan", "stop the night shift",
+  "start a night shift to make the tests faster" (opens the form with that goal).
+- **Ask:** "tell Claude to add retries to the fetcher". Anything that isn't a command
+  goes to the head agent as a message.
+- **The Mac:** "open Safari", "go to github.com", "open my downloads folder", "show the
+  project in Finder", "open the project in VS Code".
+
+**Workers have numbers now.** Each card in the rail shows **#1**, **#2**, …, in the order
+they started, so "worker 3" means something. Ids are UUIDs nobody can say.
+
+### How it hears you
+
+Everything runs on the Mac; no audio leaves it.
+
+1. **Whisper** (whisper.cpp, Metal) writes the words down. Its prompt is primed with the
+   harness's own words and your role and project names.
+2. **Exact commands** are matched instantly, with no model. On the labelled phrase set
+   this matcher is never wrong. It either gets a phrase right or passes it on.
+3. **[Laya](https://huggingface.co/convaiinnovations/laya)**, Convai's open 421M
+   *decision* model (the open Jev), reads what the matcher missed.
+   - It doesn't write text. It picks from options the harness offers (the actions, and the
+     workers that actually exist) with a calibrated probability, in about 0.15 s.
+   - It can never invent a worker.
+   - Below the confidence you set (0.75 by default), nothing is done on its word.
+4. **Otherwise the words go to Claude**, after a 2-second countdown on the voice bar that
+   you can cancel.
+
+### What stays safe
+
+- **Asks you first.** Merging, rejecting or undoing a change, approving or declining a
+  delegation, running or dropping a plan, stopping the night shift or a worker, and
+  *raising* autonomy all wait for a yes: say it, or click it.
+- **Harness actions** run through the same handlers as their buttons, so voice can do
+  nothing a click couldn't.
+- **The Mac.** Computer actions are a fixed list, run with `open` and fixed arguments.
+  There is never a shell. App names are plain characters, only `http(s)` addresses are
+  opened, and folders must exist.
+
+### Setting it up
+
+1. **Speech model:** Settings › Voice › *Download* (Whisper `base.en`, 142 MB). `tiny`
+   and `small` are there too.
+2. **Laya (optional but recommended):**
+   - run `npm install` in `app/voice-sidecar` (needs Node 20+);
+   - then Settings › Voice › *Download and load*. That's about 1.7 GB once, and about 2 GB
+     of memory while loaded. It unloads after 10 idle minutes and warms again when you
+     press the hotkey.
+3. **Building the app with voice** needs `cmake` for whisper.cpp (`brew install cmake`).
+   `--no-default-features` builds without voice.
+
+**Check it before you trust it.** Laya's own card says it is a base to fine-tune rather
+than a zero-shot engine. So measure it on real commands:
+
+```bash
+cargo run -p harness-cli -- voice "yeah ship the builder's change"   # what it would do
+cargo run -p harness-cli -- voice --eval --laya                       # right / wrong / unsure, by threshold, and speed
+```
+
+`--eval` runs the labelled phrases in `crates/harness-core/src/voice/phrases.toml`. It
+suggests the lowest threshold at which Laya is never wrong on them. Settings › Voice also
+has *Try a phrase*, against the harness as it is, without doing anything.
+
 ## Getting started
 
-Requirements: Rust, Node 18+, `git`. For the full fleet, `claude` and `codex` on `PATH` and
+Requirements: Rust, Node 18+ (20+ for voice's Laya helper), `git`, and `cmake` to build
+voice (`brew install cmake`). For the full fleet, `claude` and `codex` on `PATH` and
 logged in (`claude /login`, `codex login`), plus Ollama or LM Studio for local roles.
 
 ```bash
@@ -277,9 +350,11 @@ cargo run -p harness-cli -- run-worker mock "WRITE:demo.txt:hello" --patch
 cargo run -p harness-cli -- chat "Plan the change, then delegate it."
 cargo run -p harness-cli -- night "Add tests" --metric "grep -c '#\[test\]' src/lib.rs" --experiments 3
 cargo run -p harness-cli -- usage --hours 5
+cargo run -p harness-cli -- voice --eval   # how voice reads a labelled set of phrases
 
 # Desktop app
 cd app && npm install && npm run tauri dev
+cd app/voice-sidecar && npm install        # optional: Laya, for voice
 ```
 
 **After pulling, run `npm install` in `app/` again.** New features sometimes add frontend
@@ -406,7 +481,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 215 engine tests, no network, no CLI login needed
+cargo test                        # 242 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -421,7 +496,7 @@ Preview discovery, URL safety, settings — run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **215 engine tests, 226 including the Tauri shell** — worth stating explicitly,
+That makes **242 engine tests, 259 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats
@@ -494,3 +569,8 @@ skill's "complete the setup" checklist — env files, dependencies, ports, gener
 output — named a real gap here. `git worktree add` checks out tracked files only, so
 builders were being told to run tests in a tree with no dependencies installed. That is
 what the `[worktree]` block in `roles.toml` now fixes.
+
+Voice stands on [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (MIT) through
+[whisper-rs](https://codeberg.org/tazz4843/whisper-rs), and on
+[Laya](https://huggingface.co/convaiinnovations/laya) by Convai Innovations (Apache 2.0),
+run with [`@receptron/laya`](https://github.com/receptron/laya) (MIT).

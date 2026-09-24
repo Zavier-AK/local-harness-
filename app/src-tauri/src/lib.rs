@@ -7,6 +7,7 @@
 
 mod preview_probe;
 mod settings;
+mod voice;
 
 use harness_core::engine::{Harness, WorkerRecord};
 use harness_core::event::HarnessEvent;
@@ -1372,10 +1373,12 @@ fn get_settings() -> settings::Settings {
 /// Takes effect for heads started from now on; a running head keeps the turn limit and
 /// model it was started with.
 #[tauri::command]
-fn save_settings(settings: settings::Settings) -> Result<settings::Settings, String> {
+fn save_settings(app: AppHandle, settings: settings::Settings) -> Result<settings::Settings, String> {
     let settings = settings.validated()?;
     let path = settings::path().ok_or("no home directory to keep settings in")?;
     settings::save_to(&path, &settings)?;
+    // The hotkey follows the settings at once: turned on, off, or changed.
+    voice::apply_hotkey(&app, &settings.voice)?;
     Ok(settings)
 }
 
@@ -1589,8 +1592,20 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(voice::hotkey_plugin())
         .setup(|app| {
             app.manage(AppState::default());
+            let voice_settings = settings::load().voice;
+            let voice = voice::Voice::new(&voice_settings);
+            let laya = Arc::clone(&voice.laya);
+            tauri::async_runtime::spawn(async move { laya.spawn_idle_reaper() });
+            app.manage(voice);
+            if let Err(error) = voice::create_hud(app.handle()) {
+                tracing::warn!("no voice bar: {error}");
+            }
+            if let Err(error) = voice::apply_hotkey(app.handle(), &voice_settings) {
+                tracing::warn!("push-to-talk hotkey not registered: {error}");
+            }
             // Older plugin builds are safe to drop only now, before any worker can be
             // reading one.
             if let Ok(ext) = extensions() {
@@ -1654,6 +1669,13 @@ pub fn run() {
             remove_mcp_server,
             role_tools,
             save_role_tools,
+            voice::voice_status,
+            voice::voice_prepare,
+            voice::voice_start,
+            voice::voice_stop,
+            voice::voice_confirm,
+            voice::voice_try,
+            voice::voice_hide_hud,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the harness app");

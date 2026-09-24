@@ -1,0 +1,11 @@
+{
+  "name": "harness-voice-sidecar",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Runs Laya for the harness's voice commander. Spoken to over stdin/stdout, one JSON object per line.",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@receptron/laya": "^0.1.2"
+  }
+}

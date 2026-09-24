@@ -29,7 +29,7 @@ export type HarnessEvent =
   | { type: "thinking"; run_id: string; text: string }
   | { type: "tool_call"; run_id: string; tool_use_id: string; name: string; input: unknown }
   | { type: "tool_result"; run_id: string; tool_use_id: string; content: string; is_error: boolean }
-  | { type: "worker_spawned"; worker_id: string; role: string; provider: string; model: string | null; isolation: string; cwd: string }
+  | { type: "worker_spawned"; worker_id: string; role: string; provider: string; model: string | null; isolation: string; cwd: string; number?: number }
   | { type: "worker_status_changed"; worker_id: string; status: WorkerStatus }
   | { type: "worker_finished"; worker_id: string; summary: string; usage: Usage; diff: DiffStat | null; is_error: boolean }
   | { type: "merge_requested"; worker_id: string; branch: string; diff: DiffStat }
@@ -142,6 +142,8 @@ export type RoleModelPatch = {
 
 export type Worker = {
   id: string;
+  /** Spoken number — "worker 3" — in the order the session started them. */
+  number?: number;
   role: string;
   provider: string;
   isolation: string;
@@ -315,6 +317,7 @@ export type AppSettings = {
   max_turns: number;
   notifications: boolean;
   accent: string | null;
+  voice: VoiceSettings;
 };
 
 /** What the head agent's CLI reported about MCP servers when it last started. */
@@ -390,4 +393,103 @@ export type NightReport = {
   finished_at: number | null;
   ended_because: string | null;
   proposed_as: string | null;
+};
+
+// ---------- Voice ----------
+
+export type WhisperSize = "tiny.en" | "base.en" | "small.en";
+
+/** Mirrors `voice::VoiceSettings` in the app shell. */
+export type VoiceSettings = {
+  enabled: boolean;
+  hotkey: string;
+  stt_model: WhisperSize;
+  confidence: number;
+  laya_idle_minutes: number;
+  speak_replies: boolean;
+};
+
+export type Pane = "chat" | "plan" | "night" | "preview" | "tools" | "settings";
+export type StatusTopic = "overview" | "workers" | "waiting" | "plan" | "night" | "limits";
+
+/** Mirrors `harness_core::voice::VoiceAction`. */
+export type VoiceAction =
+  | { action: "navigate"; pane: Pane }
+  | { action: "switch_project"; project: string }
+  | { action: "open_worker"; worker: string }
+  | { action: "status"; topic: StatusTopic }
+  | { action: "ask_head"; text: string }
+  | { action: "stop_turn" }
+  | { action: "stop_worker"; worker: string }
+  | { action: "approve_merge"; worker: string }
+  | { action: "reject_merge"; worker: string; reason: string | null }
+  | { action: "undo_merge"; worker: string }
+  | { action: "approve_delegation"; worker: string }
+  | { action: "decline_delegation"; worker: string; reason: string | null }
+  | { action: "set_autonomy"; level: Autonomy }
+  | { action: "run_plan" }
+  | { action: "discard_plan" }
+  | { action: "plan_feedback"; note: string }
+  | { action: "stop_night" }
+  | { action: "propose_night" }
+  | { action: "night_setup"; goal: string | null }
+  | { action: "open_app"; name: string }
+  | { action: "open_url"; url: string }
+  | { action: "open_folder"; path: string }
+  | { action: "reveal_project" }
+  | { action: "open_project_in_editor" }
+  | { action: "confirm" }
+  | { action: "cancel" };
+
+export type VoiceOutcome =
+  | { outcome: "act"; action: VoiceAction; confirm: boolean; describe: string }
+  | { outcome: "clarify"; question: string }
+  | { outcome: "reply"; text: string }
+  | { outcome: "to_head"; text: string }
+  | { outcome: "nothing" };
+
+export type Interpretation = {
+  transcript: string;
+  outcome: VoiceOutcome;
+  source: "matcher" | "laya" | "fallback";
+  confidence: number | null;
+  laya_ms: number | null;
+  reply: string | null;
+};
+
+export type VoicePending = { action: VoiceAction; describe: string };
+
+/** `voice://heard`: what was said, what it came to, and what was done about it. */
+export type Heard = {
+  interpretation: Interpretation;
+  pending: VoicePending | null;
+  done: string | null;
+  error: string | null;
+  speak: boolean;
+};
+
+export type VoicePhase = "idle" | "listening" | "transcribing" | "thinking" | "error";
+
+export type LayaState =
+  | { state: "not_installed"; hint: string }
+  | { state: "stopped"; downloaded: boolean | null }
+  | { state: "loading"; file: string | null; received: number; total: number | null }
+  | { state: "ready" }
+  | { state: "failed"; error: string };
+
+export type VoiceStatus = {
+  built: boolean;
+  settings: VoiceSettings;
+  whisper_downloaded: boolean;
+  whisper_megabytes: number;
+  laya: LayaState;
+  listening: boolean;
+  pending: VoicePending | null;
+};
+
+export type VoiceProgress = {
+  what: "whisper" | "laya";
+  file: string | null;
+  received: number;
+  total: number | null;
 };

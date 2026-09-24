@@ -80,6 +80,8 @@ pub struct Harness {
     approved: RwLock<std::collections::HashSet<String>>,
     /// Merges that landed, with their merge commit, so a landing can be undone.
     landed: RwLock<HashMap<String, Landed>>,
+    /// Each worker's spoken number, in the order they started. See `WorkerSpawned`.
+    worker_numbers: RwLock<HashMap<String, u32>>,
     /// Merges the person discarded — a plan step whose work was thrown away failed.
     discarded: RwLock<std::collections::HashSet<String>>,
     /// Plans proposed in this session, keyed by id.
@@ -101,6 +103,7 @@ struct Landed {
     commit: String,
     automatic: bool,
     risk: Option<crate::verify::Risk>,
+    at: std::time::Instant,
 }
 
 /// Where a proposed merge's checks stand.
@@ -138,6 +141,7 @@ impl Harness {
             approvals: RwLock::new(HashMap::new()),
             approved: RwLock::new(Default::default()),
             landed: RwLock::new(HashMap::new()),
+            worker_numbers: RwLock::new(HashMap::new()),
             discarded: RwLock::new(Default::default()),
             plans: RwLock::new(HashMap::new()),
             night: RwLock::new(None),
@@ -371,7 +375,12 @@ impl Harness {
     }
 
     /// Persist an event as well as broadcasting it, so a session can be replayed.
-    async fn record(&self, event: HarnessEvent) {
+    async fn record(&self, mut event: HarnessEvent) {
+        if let HarnessEvent::WorkerSpawned { worker_id, number, .. } = &mut event {
+            let mut numbers = self.worker_numbers.write().await;
+            let next = numbers.len() as u32 + 1;
+            *number = *numbers.entry(worker_id.clone()).or_insert(next);
+        }
         if let Err(err) = self
             .store
             .lock()
@@ -580,6 +589,7 @@ impl Harness {
             model: role.model.clone(),
             isolation: role.isolation.as_str().to_string(),
             cwd: workspace.cwd.display().to_string(),
+            number: 0,
         })
         .await;
 
@@ -777,6 +787,11 @@ impl Harness {
         self.workers.read().await.get(worker_id).cloned()
     }
 
+    /// Spoken numbers by worker id — "worker 3" — in the order this session started them.
+    pub async fn worker_numbers(&self) -> HashMap<String, u32> {
+        self.worker_numbers.read().await.clone()
+    }
+
     pub async fn workers(&self) -> Vec<WorkerRecord> {
         let mut all: Vec<_> = self.workers.read().await.values().cloned().collect();
         all.sort_by(|a, b| a.id.cmp(&b.id));
@@ -932,6 +947,7 @@ impl Harness {
             model: None,
             isolation: "worktree".into(),
             cwd: String::new(),
+            number: 0,
         })
         .await;
         self.record(HarnessEvent::WorkerFinished {
@@ -1371,6 +1387,14 @@ impl Harness {
     }
 
     /// Where a proposed merge's checks stand, if it has any.
+    /// Workers whose merge landed and can still be undone, most recent last.
+    pub async fn landed_workers(&self) -> Vec<String> {
+        let landed = self.landed.read().await;
+        let mut ids: Vec<(&String, std::time::Instant)> = landed.iter().map(|(id, l)| (id, l.at)).collect();
+        ids.sort_by_key(|(_, at)| *at);
+        ids.into_iter().map(|(id, _)| id.clone()).collect()
+    }
+
     pub async fn verification(&self, worker_id: &str) -> Option<VerificationState> {
         self.verifications.read().await.get(worker_id).cloned()
     }
@@ -1609,7 +1633,7 @@ impl Harness {
         };
         self.landed.write().await.insert(
             worker_id.to_string(),
-            Landed { commit: commit.clone(), automatic, risk },
+            Landed { commit: commit.clone(), automatic, risk, at: std::time::Instant::now() },
         );
         self.record(HarnessEvent::MergeLanded {
             worker_id: worker_id.to_string(),
@@ -1876,6 +1900,7 @@ impl Harness {
             model,
             isolation: isolation.as_str().to_string(),
             cwd: cwd.display().to_string(),
+            number: 0,
         })
         .await;
     }
