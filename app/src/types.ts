@@ -410,6 +410,13 @@ export type VoiceSettings = {
   pause_ms: number;
   agent: boolean;
   agent_model: string;
+  browser: boolean;
+  browser_model: string;
+  about_me: string;
+  speech_engine: "natural" | "system";
+  speech_voice: string;
+  system_voice: string;
+  speech_rate: number;
 };
 
 export type Pane = "chat" | "plan" | "night" | "preview" | "tools" | "settings";
@@ -447,6 +454,9 @@ export type VoiceAction =
   | { action: "play_query"; app: "spotify" | "music" | null; query: string }
   | { action: "new_note"; text: string }
   | { action: "remind"; text: string; when: unknown }
+  | { action: "draft_email"; to: string; subject: string; body: string }
+  | { action: "browser_do"; step: unknown; describe: string }
+  | { action: "stop_browsing" }
   | { action: "system"; control: { control: string; percent?: number } }
   | { action: "confirm" }
   | { action: "cancel" };
@@ -493,12 +503,23 @@ export type VoiceStatus = {
   whisper_downloaded: boolean;
   whisper_megabytes: number;
   laya: LayaState;
+  speech_ready: boolean;
+  speech_downloaded: boolean;
+  speech_hint: string | null;
   listening: boolean;
   pending: VoicePending | null;
 };
 
+/** How to say a reply, from `voice_say`. */
+export type Spoken = {
+  wav: string | null;
+  system_voice: string;
+  rate: number;
+  fallback: string | null;
+};
+
 export type VoiceProgress = {
-  what: "whisper" | "laya";
+  what: "whisper" | "laya" | "speech";
   file: string | null;
   received: number;
   total: number | null;

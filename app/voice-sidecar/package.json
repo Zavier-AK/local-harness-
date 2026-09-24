@@ -3,9 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Runs Laya for the harness's voice commander. Spoken to over stdin/stdout, one JSON object per line.",
+  "description": "Voice helpers for the harness: Laya (laya-server.mjs), the voice browser (browser-server.mjs) and the natural voice (tts-server.mjs). Each is spoken to over stdin/stdout, one JSON object per line.",
   "engines": { "node": ">=20" },
   "dependencies": {
-    "@receptron/laya": "^0.1.2"
+    "@receptron/laya": "^0.1.2",
+    "kokoro-js": "^1.2.1",
+    "playwright-core": "^1.63.0"
   }
 }

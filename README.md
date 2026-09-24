@@ -336,8 +336,13 @@ short sentence aloud.
 
 - **Speed:** 4–9 s for a request, against milliseconds for an exact command. Exact
   commands still skip the agent.
-- **Cost:** it draws on the same Claude plan as the rest of the harness. Each request is a
-  short Haiku turn.
+- **Cost:** on a Claude subscription nothing is billed per request; it counts toward the
+  plan's usage limits like any other Claude use. Measured at API prices, to show the
+  scale: a voice request is about 11–14k tokens in (mostly cached after the first) and a
+  few hundred out, **about a third of a cent** (the first in a session, which fills the
+  cache, about 1.6¢). Fifty a day is about $5 a month at API prices. A browser task with
+  Sonnet was 11 steps and about 3¢ on a small page; big pages cost more. `voice --agent`
+  prints the tokens for each request.
 - **Settings › Voice › Voice agent** turns it off (then it's Laya, then the chat box, as
   before), and sets its model (`haiku` by default).
 - If the agent fails or times out, the request falls back to Laya, then the chat box.
@@ -350,8 +355,69 @@ Try it without the app. This prints each step instead of doing it:
 cargo run -p harness-cli -- voice --agent "open notes and make a note to call the plumber"
 ```
 
+### Web tasks and email
+
+**The browser.** For anything more on the web than opening a page or a search, the voice
+agent hands the whole task to a **browser agent** (Sonnet by default). It works in **its
+own Chrome window**, in the background, and says what it found when it's done:
+
+- "Go on Amazon Germany, find the cheapest trail running shoes in size 44 and put them in
+  my basket."
+- "Check my Gmail for anything from the landlord this week and tell me what it says."
+- "Compare the Pro plans on these three sites and tell me which is cheapest."
+
+The bar shows each step as it happens (✓ Opened amazon.de, ✓ Searched for …), with a
+**Stop** button ("stop browsing" works too). You can keep asking for other things while
+it works. One web task runs at a time.
+
+- **It asks first:** it reads, scrolls, types and clicks freely, but anything that
+  **sends, buys, orders, pays, posts, deletes, books or submits a form waits for your
+  yes**. The harness decides this from what the button or field actually is, not from
+  the model's judgement. Enter in a search box is free; Enter anywhere else asks.
+- **It never types passwords or card details.** Sign in to the sites you want it to use
+  once, in its window (**Settings › Voice › Open it to sign in to sites**). It keeps its
+  own profile, separate from your everyday Chrome, and never touches that.
+- **Pages are data, not instructions.** Page content reaches the model marked as such,
+  and its only tools are that browser: nothing on a page can reach the harness or the
+  Mac. In a test, a page with hidden text telling it to place an order and send your
+  email address elsewhere was read, reported and ignored.
+- It needs Google Chrome, and `npm install` in `app/voice-sidecar` (for Playwright).
+
+**Email, in your words.** "Email Sam that I'm running ten minutes late and to start
+without me" writes the whole email and opens it as a **Gmail draft** in your browser. You
+check it and press Send; it's never sent for you. **Settings › Voice › About you** is
+where you say how you write and who people are ("I keep emails short and sign off with
+Cheers, Z. Sam is my co-founder, sam@…"). Both agents read it. Names are also looked up
+in the Mac's Contacts.
+
+Try both without the app. Mac actions are printed, not done; the browser is real (its own
+profile), and clicks that would need a yes are printed instead:
+
+```bash
+cargo run -p harness-cli -- voice --agent --about "I sign off with Cheers, Z" "email sam@x.dev that I'm late"
+cargo run -p harness-cli -- voice --agent --browse "find the cheapest trail runners on amazon.de"
+```
+
 **Workers have numbers now.** Each card in the rail shows **#1**, **#2**, …, in the order
 they started, so "worker 3" means something. Ids are UUIDs nobody can say.
+
+### How it sounds
+
+Replies are read aloud in a **natural voice** that runs on the Mac: Kokoro, an open
+82M-parameter text-to-speech model (Apache 2.0), with British voices. **George** (the
+default) is deep and measured, the closest thing to a film butler. Fable, Lewis and
+Daniel are the other British men; Emma and Isabella the British women.
+
+- **Settings › Voice › How it sounds:** *Download* (about 90 MB, once), pick a voice and a
+  speed, and *Test the voice*.
+- Until it's downloaded, or if it fails, the reply is read by the best British macOS voice
+  installed instead, so it's never silent. The **Premium** and **Enhanced** macOS voices
+  (Daniel, Jamie, Arthur) are much better than the defaults, and free: System Settings ›
+  Accessibility › Spoken Content › System voice › Manage Voices.
+- It can't be a real actor's voice (Daniel Craig's, or Paul Bettany's as JARVIS): copying
+  a real person's voice isn't something this does. For the manner as well as the accent,
+  put it in **About you**, e.g. "Address me as sir. Be brief and dryly witty, like a
+  British butler." Both agents read it.
 
 ### How it hears you
 
@@ -368,7 +434,8 @@ Everything runs on the Mac; no audio leaves it.
    - It can never invent a worker.
    - Below the confidence you set (0.75 by default), nothing is done on its word.
 4. **The voice agent** (above) takes everything else when it is on. It turns a longer
-   request into steps from the safe list, and puts coding requests into the chat box.
+   request into steps from the safe list, hands web tasks to the browser agent, and puts
+   coding requests into the chat box.
 5. **Otherwise the words go into the chat box**, for you to edit and send. Nothing
    reaches Claude's coding session unless you send it.
 
@@ -394,6 +461,9 @@ Everything runs on the Mac; no audio leaves it.
      press the hotkey.
 3. **Building the app with voice** needs `cmake` for whisper.cpp (`brew install cmake`).
    `--no-default-features` builds without voice.
+4. **The natural voice:** the same `npm install`, then *Download* under How it sounds.
+5. **The browser** needs Google Chrome and the same `npm install` in `app/voice-sidecar`.
+   Then sign in to sites from Settings › Voice.
 
 **Check it before you trust it.** Laya's own card says it is a base to fine-tune rather
 than a zero-shot engine. So measure it on real commands:
@@ -424,7 +494,7 @@ cargo run -p harness-cli -- voice --eval   # how voice reads a labelled set of p
 
 # Desktop app
 cd app && npm install && npm run tauri dev
-cd app/voice-sidecar && npm install        # optional: Laya, for voice
+cd app/voice-sidecar && npm install        # optional: Laya, the browser and the natural voice
 ```
 
 **After pulling, run `npm install` in `app/` again.** New features sometimes add frontend
@@ -551,7 +621,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 254 engine tests, no network, no CLI login needed
+cargo test                        # 267 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -566,7 +636,7 @@ Preview discovery, URL safety, settings — run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **254 engine tests, 275 including the Tauri shell** — worth stating explicitly,
+That makes **267 engine tests, 288 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats

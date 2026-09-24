@@ -169,6 +169,26 @@ enum Command {
 
         #[arg(long, default_value = "haiku")]
         agent_model: String,
+
+        /// With --agent: let it hand web tasks to the browser agent, which drives a real
+        /// browser (its own profile). Clicks that send, buy or submit are printed, not done.
+        #[arg(long)]
+        browse: bool,
+
+        #[arg(long, default_value = "sonnet")]
+        browser_model: String,
+
+        /// A Chrome or Chromium binary. Defaults to the installed Google Chrome.
+        #[arg(long)]
+        chrome: Option<PathBuf>,
+
+        /// Run the browser without a window.
+        #[arg(long)]
+        headless: bool,
+
+        /// What the person says about themselves and how they write.
+        #[arg(long, default_value = "")]
+        about: String,
     },
 
     /// Token totals for the rolling window that governs a subscription.
@@ -482,11 +502,55 @@ async fn build_harness(cli: &Cli, events: harness_core::agents::EventSink) -> Re
 }
 
 /// The voice agent against the example harness, with hands that only say what they would do.
-async fn voice_agent(words: Option<&str>, model: &str) -> Result<()> {
-    use futures::future::BoxFuture;
-    use harness_core::voice::{agent, eval as ev, Snapshot, VoiceAction};
+/// Tokens and the API-price estimate for one agent turn.
+fn spend(reply: &harness_core::voice::agent::AgentReply) -> String {
+    let u = &reply.usage;
+    let cost = reply
+        .cost_usd
+        .map(|c| format!(", ~${c:.4} at API prices"))
+        .unwrap_or_default();
+    format!(
+        "{} in ({} cached, {} written to cache), {} out{cost}",
+        u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens,
+        u.cache_read_input_tokens,
+        u.cache_creation_input_tokens,
+        u.output_tokens
+    )
+}
 
-    struct DryRun;
+struct BrowseSetup {
+    model: String,
+    chrome: Option<PathBuf>,
+    headless: bool,
+}
+
+async fn voice_agent(
+    words: Option<&str>,
+    model: &str,
+    browse: Option<BrowseSetup>,
+    about: &str,
+) -> Result<()> {
+    use futures::future::BoxFuture;
+    use harness_core::voice::agent::VoiceAgent;
+    use harness_core::voice::browser::{BrowserClient, BrowserConfig};
+    use harness_core::voice::{agent, computer, eval as ev, Snapshot, VoiceAction};
+    use std::sync::Arc;
+
+    /// The browser agent, started on the first web task and kept for the next.
+    struct Browsing {
+        browser: Arc<BrowserClient>,
+        model: String,
+        about: String,
+        agent: tokio::sync::Mutex<Option<VoiceAgent>>,
+    }
+
+    /// Prints what would be done. The browser is real, though: it is the only way to know
+    /// what a page says. Only its steps that wait for a yes are printed instead.
+    struct DryRun {
+        browsing: Option<Arc<Browsing>>,
+        /// The voice agent's steps are printed by `perform`; the browser's by `step`.
+        print_steps: bool,
+    }
     impl agent::Hands for DryRun {
         fn snapshot(&self) -> BoxFuture<'static, Snapshot> {
             Box::pin(async { ev::fixture() })
@@ -512,30 +576,111 @@ async fn voice_agent(words: Option<&str>, model: &str) -> Result<()> {
             println!("  → chat box: {text}");
             Box::pin(async {})
         }
-        fn step(&self, _: String) {}
+        fn step(&self, line: String) {
+            if self.print_steps {
+                println!("    · {line}");
+            }
+        }
+        fn browse(&self, task: String) -> BoxFuture<'static, Result<String, String>> {
+            let Some(browsing) = self.browsing.clone() else {
+                return Box::pin(async { Err("browsing is off (add --browse)".into()) });
+            };
+            Box::pin(async move {
+                println!("  → browser agent: {task}");
+                let mut slot = browsing.agent.lock().await;
+                if slot.is_none() {
+                    let hands: Arc<dyn agent::Hands> = Arc::new(DryRun {
+                        browsing: None,
+                        print_steps: true,
+                    });
+                    let cwd = std::env::temp_dir().join("harness-voice-browser-agent");
+                    let started = VoiceAgent::start_browser(
+                        hands,
+                        Arc::clone(&browsing.browser),
+                        &browsing.model,
+                        &cwd,
+                        &browsing.about,
+                    )
+                    .await
+                    .map_err(|e| format!("{e:#}"))?;
+                    *slot = Some(started);
+                }
+                let reply = slot
+                    .as_mut()
+                    .expect("just set")
+                    .run_task(&task, std::time::Duration::from_secs(600))
+                    .await
+                    .map_err(|e| format!("{e:#}"))?;
+                println!(
+                    "  browser agent says: {}\n  ({} steps, {:.1}s; {})",
+                    reply.text,
+                    reply.steps,
+                    reply.ms as f64 / 1000.0,
+                    spend(&reply)
+                );
+                // In the app this runs in the background; here the voice agent hears the
+                // outcome, so a follow-up can build on it.
+                Ok(format!(
+                    "The browser assistant finished and said: {}",
+                    reply.text
+                ))
+            })
+        }
+        fn lookup_email(
+            &self,
+            name: String,
+        ) -> BoxFuture<'static, Result<Vec<(String, String)>, String>> {
+            Box::pin(async move {
+                computer::lookup_emails(&name)
+                    .await
+                    .map_err(|e| format!("{e:#}"))
+            })
+        }
     }
 
     let words = words.context("say something: `harness-cli voice --agent \"…\"`")?;
+    let browsing = browse.map(|setup| {
+        let profile = std::env::temp_dir().join("harness-voice-browser");
+        let mut config = BrowserConfig::new(BrowserConfig::bundled_script(), profile);
+        config.executable = setup.chrome;
+        config.headless = setup.headless;
+        Arc::new(Browsing {
+            browser: BrowserClient::new(config),
+            model: setup.model,
+            about: about.to_string(),
+            agent: tokio::sync::Mutex::new(None),
+        })
+    });
     let cwd = std::env::temp_dir().join("harness-voice-agent");
     let started = std::time::Instant::now();
-    let mut voice_agent =
-        agent::VoiceAgent::start(std::sync::Arc::new(DryRun), model, &cwd).await?;
+    let hands = Arc::new(DryRun {
+        browsing: browsing.clone(),
+        print_steps: false,
+    });
+    let mut voice_agent = VoiceAgent::start(hands, model, &cwd, about).await?;
     eprintln!("  (agent up in {:.1}s)", started.elapsed().as_secs_f64());
     let snapshot = ev::fixture();
     for said in words.split(" || ") {
         println!("\n“{said}”");
         let reply = voice_agent
-            .ask(said, &snapshot, std::time::Duration::from_secs(90))
+            .ask(said, &snapshot, std::time::Duration::from_secs(900))
             .await?;
         println!(
-            "  says: {}\n  ({} steps, {:.1}s)",
+            "  says: {}\n  ({} steps, {:.1}s; {})",
             reply.text,
             reply.steps,
-            reply.ms as f64 / 1000.0
+            reply.ms as f64 / 1000.0,
+            spend(&reply)
         );
     }
     voice_agent.shutdown().await;
-    println!("\n(against the example harness in voice/phrases.toml; nothing was done)");
+    if let Some(browsing) = browsing {
+        if let Some(agent) = browsing.agent.lock().await.take() {
+            agent.shutdown().await;
+        }
+        browsing.browser.close().await;
+    }
+    println!("\n(against the example harness in voice/phrases.toml; nothing on the Mac was done)");
     Ok(())
 }
 
@@ -677,10 +822,20 @@ async fn main() -> Result<()> {
         sidecar,
         agent,
         agent_model,
+        browse,
+        browser_model,
+        chrome,
+        headless,
+        about,
     } = &cli.command
     {
         if *agent {
-            return voice_agent(words.as_deref(), agent_model).await;
+            let browse = browse.then(|| BrowseSetup {
+                model: browser_model.clone(),
+                chrome: chrome.clone(),
+                headless: *headless,
+            });
+            return voice_agent(words.as_deref(), agent_model, browse, about).await;
         }
         return voice(words.as_deref(), *eval, *laya, *threshold, sidecar.clone()).await;
     }
