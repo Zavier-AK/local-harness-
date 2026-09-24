@@ -89,7 +89,7 @@ export default function VoiceHud() {
         setLine(text);
         // Not over the person while they are still talking.
         const stillTalking = phaseRef.current === "listening";
-        if (payload.speak && text && !stillTalking) speak(text);
+        if (payload.speak && text && !stillTalking) void speak(text);
         if (stillTalking || payload.pending) {
           keep();
         } else if (outcome.outcome === "nothing") {

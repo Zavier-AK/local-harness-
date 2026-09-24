@@ -862,6 +862,11 @@ pub struct AgentReply {
     /// How many tools it called.
     pub steps: usize,
     pub ms: u64,
+    /// Tokens for the whole turn (every model call in it).
+    pub usage: crate::event::Usage,
+    /// The CLI's estimate at API prices. On a subscription nothing is billed; it is a
+    /// measure of how much of the plan's allowance the turn used.
+    pub cost_usd: Option<f64>,
 }
 
 /// The running voice agent: its tool server and its Claude session.
@@ -1009,7 +1014,13 @@ impl VoiceAgent {
                 } if !text.trim().is_empty() => {
                     last_text = text;
                 }
-                HarnessEvent::RunFinished { text, is_error, .. } => {
+                HarnessEvent::RunFinished {
+                    text,
+                    is_error,
+                    usage,
+                    cost_usd,
+                    ..
+                } => {
                     if is_error && text.trim().is_empty() {
                         bail!("the voice agent failed");
                     }
@@ -1022,6 +1033,8 @@ impl VoiceAgent {
                         text: text.trim().to_string(),
                         steps,
                         ms: started.elapsed().as_millis() as u64,
+                        usage,
+                        cost_usd,
                     });
                 }
                 HarnessEvent::Error { message, .. } => bail!("the voice agent: {message}"),

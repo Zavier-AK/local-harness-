@@ -502,6 +502,22 @@ async fn build_harness(cli: &Cli, events: harness_core::agents::EventSink) -> Re
 }
 
 /// The voice agent against the example harness, with hands that only say what they would do.
+/// Tokens and the API-price estimate for one agent turn.
+fn spend(reply: &harness_core::voice::agent::AgentReply) -> String {
+    let u = &reply.usage;
+    let cost = reply
+        .cost_usd
+        .map(|c| format!(", ~${c:.4} at API prices"))
+        .unwrap_or_default();
+    format!(
+        "{} in ({} cached, {} written to cache), {} out{cost}",
+        u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens,
+        u.cache_read_input_tokens,
+        u.cache_creation_input_tokens,
+        u.output_tokens
+    )
+}
+
 struct BrowseSetup {
     model: String,
     chrome: Option<PathBuf>,
@@ -596,10 +612,11 @@ async fn voice_agent(
                     .await
                     .map_err(|e| format!("{e:#}"))?;
                 println!(
-                    "  browser agent says: {}\n  ({} steps, {:.1}s)",
+                    "  browser agent says: {}\n  ({} steps, {:.1}s; {})",
                     reply.text,
                     reply.steps,
-                    reply.ms as f64 / 1000.0
+                    reply.ms as f64 / 1000.0,
+                    spend(&reply)
                 );
                 // In the app this runs in the background; here the voice agent hears the
                 // outcome, so a follow-up can build on it.
@@ -649,10 +666,11 @@ async fn voice_agent(
             .ask(said, &snapshot, std::time::Duration::from_secs(900))
             .await?;
         println!(
-            "  says: {}\n  ({} steps, {:.1}s)",
+            "  says: {}\n  ({} steps, {:.1}s; {})",
             reply.text,
             reply.steps,
-            reply.ms as f64 / 1000.0
+            reply.ms as f64 / 1000.0,
+            spend(&reply)
         );
     }
     voice_agent.shutdown().await;

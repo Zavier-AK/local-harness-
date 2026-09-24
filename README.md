@@ -332,8 +332,13 @@ short sentence aloud.
 
 - **Speed:** 4–9 s for a request, against milliseconds for an exact command. Exact
   commands still skip the agent.
-- **Cost:** it draws on the same Claude plan as the rest of the harness. Each request is a
-  short Haiku turn.
+- **Cost:** on a Claude subscription nothing is billed per request; it counts toward the
+  plan's usage limits like any other Claude use. Measured at API prices, to show the
+  scale: a voice request is about 11–14k tokens in (mostly cached after the first) and a
+  few hundred out, **about a third of a cent** (the first in a session, which fills the
+  cache, about 1.6¢). Fifty a day is about $5 a month at API prices. A browser task with
+  Sonnet was 11 steps and about 3¢ on a small page; big pages cost more. `voice --agent`
+  prints the tokens for each request.
 - **Settings › Voice › Voice agent** turns it off (then it's Laya, then the chat box, as
   before), and sets its model (`haiku` by default).
 - If the agent fails or times out, the request falls back to Laya, then the chat box.
@@ -392,6 +397,24 @@ cargo run -p harness-cli -- voice --agent --browse "find the cheapest trail runn
 **Workers have numbers now.** Each card in the rail shows **#1**, **#2**, …, in the order
 they started, so "worker 3" means something. Ids are UUIDs nobody can say.
 
+### How it sounds
+
+Replies are read aloud in a **natural voice** that runs on the Mac: Kokoro, an open
+82M-parameter text-to-speech model (Apache 2.0), with British voices. **George** (the
+default) is deep and measured, the closest thing to a film butler. Fable, Lewis and
+Daniel are the other British men; Emma and Isabella the British women.
+
+- **Settings › Voice › How it sounds:** *Download* (about 90 MB, once), pick a voice and a
+  speed, and *Test the voice*.
+- Until it's downloaded, or if it fails, the reply is read by the best British macOS voice
+  installed instead, so it's never silent. The **Premium** and **Enhanced** macOS voices
+  (Daniel, Jamie, Arthur) are much better than the defaults, and free: System Settings ›
+  Accessibility › Spoken Content › System voice › Manage Voices.
+- It can't be a real actor's voice (Daniel Craig's, or Paul Bettany's as JARVIS): copying
+  a real person's voice isn't something this does. For the manner as well as the accent,
+  put it in **About you**, e.g. "Address me as sir. Be brief and dryly witty, like a
+  British butler." Both agents read it.
+
 ### How it hears you
 
 Everything runs on the Mac; no audio leaves it.
@@ -434,7 +457,8 @@ Everything runs on the Mac; no audio leaves it.
      press the hotkey.
 3. **Building the app with voice** needs `cmake` for whisper.cpp (`brew install cmake`).
    `--no-default-features` builds without voice.
-4. **The browser** needs Google Chrome and the same `npm install` in `app/voice-sidecar`.
+4. **The natural voice:** the same `npm install`, then *Download* under How it sounds.
+5. **The browser** needs Google Chrome and the same `npm install` in `app/voice-sidecar`.
    Then sign in to sites from Settings › Voice.
 
 **Check it before you trust it.** Laya's own card says it is a base to fine-tune rather
@@ -466,7 +490,7 @@ cargo run -p harness-cli -- voice --eval   # how voice reads a labelled set of p
 
 # Desktop app
 cd app && npm install && npm run tauri dev
-cd app/voice-sidecar && npm install        # optional: Laya and the browser, for voice
+cd app/voice-sidecar && npm install        # optional: Laya, the browser and the natural voice
 ```
 
 **After pulling, run `npm install` in `app/` again.** New features sometimes add frontend
@@ -593,7 +617,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 265 engine tests, no network, no CLI login needed
+cargo test                        # 267 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -608,7 +632,7 @@ Preview discovery, URL safety, settings — run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **265 engine tests, 286 including the Tauri shell** — worth stating explicitly,
+That makes **267 engine tests, 288 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats

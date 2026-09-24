@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Interpretation, VoiceProgress, VoiceSettings, VoiceStatus, WhisperSize } from "./types";
+import { speak } from "./voice";
 
 type Props = {
   value: VoiceSettings;
@@ -49,7 +50,9 @@ function summarize(heard: Interpretation): string {
 export default function VoiceSettingsPanel({ value, onChange }: Props) {
   const [status, setStatus] = useState<VoiceStatus | null>(null);
   const [progress, setProgress] = useState<Record<string, VoiceProgress>>({});
-  const [busy, setBusy] = useState<"whisper" | "laya" | null>(null);
+  const [busy, setBusy] = useState<"whisper" | "laya" | "speech" | null>(null);
+  const [naturalVoices, setNaturalVoices] = useState<[string, string, string][]>([]);
+  const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [phrase, setPhrase] = useState("");
   const [tried, setTried] = useState<string | null>(null);
@@ -60,6 +63,23 @@ export default function VoiceSettingsPanel({ value, onChange }: Props) {
       .catch((err) => setError(String(err)));
 
   useEffect(() => {
+    void invoke<[string, string, string][]>("voice_speech_voices").then(setNaturalVoices).catch(() => {});
+    // English voices, British first. The list fills in asynchronously in WebKit.
+    const loadVoices = () => {
+      if (!("speechSynthesis" in window)) return;
+      const english = window.speechSynthesis.getVoices().filter((v) => v.lang.startsWith("en"));
+      english.sort((a, b) => Number(b.lang === "en-GB") - Number(a.lang === "en-GB") || a.name.localeCompare(b.name));
+      setSystemVoices(english);
+    };
+    loadVoices();
+    if ("speechSynthesis" in window) window.speechSynthesis.onvoiceschanged = loadVoices;
+  }, []);
+
+  function testVoice() {
+    return speak("Good evening. Everything is running smoothly, and one change is waiting for your review.");
+  }
+
+  useEffect(() => {
     void refresh();
     const off = listen<VoiceProgress>("voice://progress", ({ payload }) =>
       setProgress((prev) => ({ ...prev, [payload.what]: payload })),
@@ -67,7 +87,7 @@ export default function VoiceSettingsPanel({ value, onChange }: Props) {
     return () => void off.then((f) => f());
   }, []);
 
-  async function prepare(what: "whisper" | "laya") {
+  async function prepare(what: "whisper" | "laya" | "speech") {
     setBusy(what);
     setError(null);
     try {
@@ -92,7 +112,7 @@ export default function VoiceSettingsPanel({ value, onChange }: Props) {
 
   const set = (patch: Partial<VoiceSettings>) => onChange({ ...value, ...patch });
   const laya = status?.laya;
-  const bar = (what: "whisper" | "laya") => {
+  const bar = (what: "whisper" | "laya" | "speech") => {
     const p = progress[what];
     if (!p || !p.total) return null;
     return (
@@ -298,6 +318,94 @@ export default function VoiceSettingsPanel({ value, onChange }: Props) {
         <input type="checkbox" checked={value.speak_replies} onChange={(e) => set({ speak_replies: e.target.checked })} />
         <span>Say answers aloud</span>
       </label>
+
+      {value.speak_replies && (
+        <div className="voice-speech">
+          <div className="field">
+            <span>How it sounds</span>
+            <div className="segmented" role="radiogroup" aria-label="Voice">
+              <button
+                role="radio"
+                aria-checked={value.speech_engine === "natural"}
+                className={value.speech_engine === "natural" ? "active" : ""}
+                onClick={() => set({ speech_engine: "natural" })}
+              >
+                Natural
+              </button>
+              <button
+                role="radio"
+                aria-checked={value.speech_engine === "system"}
+                className={value.speech_engine === "system" ? "active" : ""}
+                onClick={() => set({ speech_engine: "system" })}
+              >
+                macOS voice
+              </button>
+            </div>
+          </div>
+          {value.speech_engine === "natural" ? (
+            <>
+              <label className="field">
+                <span>Voice</span>
+                <select value={value.speech_voice} onChange={(e) => set({ speech_voice: e.target.value })}>
+                  {naturalVoices.map(([id, name, about]) => (
+                    <option key={id} value={id}>
+                      {name} — {about}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="voice-model-state">
+                {status?.speech_hint && <span className="error">{status.speech_hint}</span>}
+                {status && !status.speech_hint && status.speech_ready && <span className="badge risk-low">loaded</span>}
+                {status && !status.speech_hint && !status.speech_ready && (
+                  <button onClick={() => void prepare("speech")} disabled={busy !== null}>
+                    {busy === "speech" ? "Loading…" : status.speech_downloaded ? "Load" : "Download (about 90 MB)"}
+                  </button>
+                )}
+                {bar("speech")}
+              </div>
+              <p className="muted hint">
+                Kokoro, an open voice model that runs on this Mac, so nothing you hear is sent anywhere. George is
+                deep and measured, the closest to a film butler. Until it's downloaded, the macOS voice is used.
+              </p>
+            </>
+          ) : (
+            <>
+              <label className="field">
+                <span>Voice</span>
+                <select value={value.system_voice} onChange={(e) => set({ system_voice: e.target.value })}>
+                  <option value="">Best British voice installed</option>
+                  {systemVoices.map((v) => (
+                    <option key={v.name} value={v.name}>
+                      {v.name} ({v.lang})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="muted hint">
+                Better ones (Premium or Enhanced) are free in System Settings › Accessibility › Spoken Content ›
+                System voice › Manage Voices.
+              </p>
+            </>
+          )}
+          <label className="field">
+            <span>Speed</span>
+            <input
+              type="range"
+              min={0.8}
+              max={1.25}
+              step={0.05}
+              value={value.speech_rate}
+              onChange={(e) => set({ speech_rate: Number(e.target.value) })}
+            />
+            <span className="muted">{value.speech_rate.toFixed(2)}×</span>
+          </label>
+          <button className="ghost" onClick={() => void testVoice()}>
+            Test the voice
+          </button>
+          <span className="muted hint"> Uses the saved settings: save first to hear a change.</span>
+        </div>
+      )}
 
       <div className="voice-try">
         <input

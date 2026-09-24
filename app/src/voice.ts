@@ -1,4 +1,5 @@
-import type { Heard, QuotaReport, VoiceAction } from "./types";
+import { invoke } from "@tauri-apps/api/core";
+import type { Heard, QuotaReport, Spoken, VoiceAction } from "./types";
 
 /**
  * What voice does in the main window. Every harness action runs through the same
@@ -116,10 +117,66 @@ export function limitsLine(report: QuotaReport | null): string {
 }
 
 /** Say it with the Mac's own voices. Anything still being said is cut off. */
-export function speak(text: string): void {
-  if (!("speechSynthesis" in window) || !text) return;
-  window.speechSynthesis.cancel();
+/** macOS voices in order of preference when none is chosen: British men, best first. */
+const BRITISH = ["Daniel (Premium)", "Jamie (Premium)", "Daniel (Enhanced)", "Arthur (Enhanced)", "Oliver (Enhanced)", "Arthur", "Daniel"];
+
+/** The system voice to use: the one named, else the best British one installed. */
+export function systemVoice(name: string): SpeechSynthesisVoice | null {
+  if (!("speechSynthesis" in window)) return null;
+  const voices = window.speechSynthesis.getVoices();
+  if (name) {
+    const chosen = voices.find((v) => v.name === name);
+    if (chosen) return chosen;
+  }
+  for (const wanted of BRITISH) {
+    const found = voices.find((v) => v.name === wanted);
+    if (found) return found;
+  }
+  return voices.find((v) => v.lang === "en-GB") ?? null;
+}
+
+let playing: HTMLAudioElement | null = null;
+
+function stopSpeaking() {
+  playing?.pause();
+  playing = null;
+  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+}
+
+function sayWithSystem(text: string, name: string, rate: number) {
+  if (!("speechSynthesis" in window)) return;
   const utterance = new SpeechSynthesisUtterance(text);
-  utterance.rate = 1.05;
+  const voice = systemVoice(name);
+  if (voice) {
+    utterance.voice = voice;
+    utterance.lang = voice.lang;
+  }
+  utterance.rate = rate;
   window.speechSynthesis.speak(utterance);
+}
+
+/**
+ * Say a reply aloud: the natural voice (Kokoro, on the Mac) when it's chosen and ready,
+ * otherwise the best system voice. Never silent because of the natural voice.
+ */
+export async function speak(text: string): Promise<void> {
+  if (!text) return;
+  stopSpeaking();
+  let spoken: Spoken | null = null;
+  try {
+    spoken = await invoke<Spoken>("voice_say", { text });
+  } catch {
+    spoken = null;
+  }
+  if (spoken?.wav) {
+    const audio = new Audio(`data:audio/wav;base64,${spoken.wav}`);
+    playing = audio;
+    try {
+      await audio.play();
+      return;
+    } catch {
+      playing = null;
+    }
+  }
+  sayWithSystem(text, spoken?.system_voice ?? "", spoken?.rate ?? 1);
 }

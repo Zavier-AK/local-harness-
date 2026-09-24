@@ -23,6 +23,7 @@ pub mod eval;
 pub mod everyday;
 pub mod laya;
 pub mod matcher;
+pub mod speech;
 
 use serde::{Deserialize, Serialize};
 

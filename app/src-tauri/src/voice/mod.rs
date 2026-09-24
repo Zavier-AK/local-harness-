@@ -19,6 +19,7 @@ pub mod audio;
 
 use harness_core::voice::browser::{BrowserClient, BrowserConfig};
 use harness_core::voice::laya::{LayaClient, LayaConfig, LayaState};
+use harness_core::voice::speech::{self, SpeechClient, SpeechConfig};
 use harness_core::voice::{self, computer, Interpretation, Outcome, Snapshot, VoiceAction};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -61,6 +62,14 @@ pub struct VoiceSettings {
     /// The person, in their own words: how they write, who people are. Both agents read
     /// it, so emails come out in their voice.
     pub about_me: String,
+    /// How replies are spoken: "natural" (Kokoro, on the Mac) or "system" (macOS voices).
+    pub speech_engine: String,
+    /// The natural voice, e.g. `bm_george`.
+    pub speech_voice: String,
+    /// A macOS voice by name; empty picks the best British one installed.
+    pub system_voice: String,
+    /// 0.8 to 1.25; 1 is normal.
+    pub speech_rate: f64,
 }
 
 impl Default for VoiceSettings {
@@ -78,6 +87,10 @@ impl Default for VoiceSettings {
             browser: true,
             browser_model: "sonnet".into(),
             about_me: String::new(),
+            speech_engine: "natural".into(),
+            speech_voice: speech::DEFAULT_VOICE.into(),
+            system_voice: String::new(),
+            speech_rate: 1.0,
         }
     }
 }
@@ -120,6 +133,16 @@ impl VoiceSettings {
                 return Err(format!("`{model}` does not look like a model name"));
             }
         }
+        if !matches!(self.speech_engine.as_str(), "natural" | "system") {
+            self.speech_engine = "natural".into();
+        }
+        if !speech::is_voice(&self.speech_voice) {
+            self.speech_voice = speech::DEFAULT_VOICE.into();
+        }
+        self.system_voice = self.system_voice.trim().chars().take(100).collect();
+        if !(0.8..=1.25).contains(&self.speech_rate) {
+            return Err("the speaking speed must be between 0.8 and 1.25".into());
+        }
         self.about_me = self.about_me.trim().to_string();
         if self.about_me.chars().count() > 4000 {
             return Err("keep “About you” under 4,000 characters".into());
@@ -160,6 +183,8 @@ pub struct Voice {
     pub browser: Arc<BrowserClient>,
     /// The browser agent, kept between tasks so "now the second one" makes sense.
     browse_agent: Arc<tokio::sync::Mutex<Option<(String, voice::agent::VoiceAgent)>>>,
+    /// The natural voice for spoken replies.
+    pub speech: Arc<SpeechClient>,
     /// The browser task running in the background, and what it is.
     browse_job: std::sync::Mutex<Option<(String, tauri::async_runtime::JoinHandle<()>)>>,
 }
@@ -183,6 +208,12 @@ impl Voice {
                 harness_core::extensions::app_data_dir()
                     .unwrap_or_else(std::env::temp_dir)
                     .join("voice-browser"),
+            )),
+            speech: SpeechClient::new(SpeechConfig::new(
+                SpeechConfig::bundled_script(),
+                models_dir()
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join("speech"),
             )),
             browse_agent: Arc::new(tokio::sync::Mutex::new(None)),
             browse_job: std::sync::Mutex::new(None),
@@ -471,6 +502,60 @@ fn show_hud(app: &AppHandle) {
     let _ = window.show();
 }
 
+/// How to say a reply: the natural voice's audio, or which system voice to use.
+#[derive(Serialize)]
+pub struct Spoken {
+    /// A WAV file, base64, when the natural voice spoke it.
+    wav: Option<String>,
+    /// Otherwise the system voice to use; empty means the best British one.
+    system_voice: String,
+    rate: f64,
+    /// Why the natural voice wasn't used, when it was chosen.
+    fallback: Option<String>,
+}
+
+/// Speak a reply. The natural voice if it's chosen and can run; the system voice if not,
+/// so a reply is never silent.
+#[tauri::command]
+pub async fn voice_say(app: AppHandle, text: String) -> Spoken {
+    let settings = settings::load().voice;
+    let mut spoken = Spoken {
+        wav: None,
+        system_voice: settings.system_voice.clone(),
+        rate: settings.speech_rate,
+        fallback: None,
+    };
+    if settings.speech_engine != "natural" {
+        return spoken;
+    }
+    let speech = Arc::clone(&app.state::<Voice>().speech);
+    // A reply never waits for the first download; Settings starts that.
+    if !speech.is_ready() && !speech.downloaded() {
+        spoken.fallback = Some("the natural voice isn't downloaded yet".into());
+        return spoken;
+    }
+    match speech
+        .say(&text, &settings.speech_voice, settings.speech_rate)
+        .await
+    {
+        Ok(wav) => spoken.wav = Some(wav),
+        Err(error) => {
+            tracing::warn!("natural voice failed: {error:#}");
+            spoken.fallback = Some(format!("{error:#}"));
+        }
+    }
+    spoken
+}
+
+/// Settings: which natural voices there are.
+#[tauri::command]
+pub fn voice_speech_voices() -> Vec<(String, String, String)> {
+    speech::VOICES
+        .iter()
+        .map(|(id, name, about)| (id.to_string(), name.to_string(), about.to_string()))
+        .collect()
+}
+
 /// The Stop button while the browser is working.
 #[tauri::command]
 pub async fn voice_stop_browsing(app: AppHandle) -> bool {
@@ -569,6 +654,12 @@ fn warm(app: &AppHandle) {
         });
     }
     let settings = settings::load().voice;
+    let natural = Arc::clone(&voice.speech);
+    if settings.speech_engine == "natural" && natural.downloaded() && !natural.is_ready() {
+        tauri::async_runtime::spawn(async move {
+            let _ = natural.load().await;
+        });
+    }
     if settings.agent {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -1177,6 +1268,10 @@ pub struct VoiceStatus {
     whisper_downloaded: bool,
     whisper_megabytes: u32,
     laya: LayaState,
+    /// The natural voice: loaded, on disk, or what to install.
+    speech_ready: bool,
+    speech_downloaded: bool,
+    speech_hint: Option<String>,
     listening: bool,
     pending: Option<Pending>,
 }
@@ -1202,6 +1297,9 @@ pub async fn voice_status(app: AppHandle) -> Result<VoiceStatus, String> {
         whisper_megabytes: settings.stt_model.megabytes(),
         settings,
         laya: voice.laya.state(),
+        speech_ready: voice.speech.is_ready(),
+        speech_downloaded: voice.speech.downloaded(),
+        speech_hint: voice.speech.check_installed().err(),
         listening,
         pending: voice.pending(),
     })
@@ -1256,6 +1354,30 @@ pub async fn voice_prepare(app: AppHandle, what: String) -> Result<VoiceStatus, 
                 }
             });
             let result = laya.load().await;
+            forward.abort();
+            result.map_err(|e| format!("{e:#}"))?;
+        }
+        "speech" => {
+            let speech = Arc::clone(&app.state::<Voice>().speech);
+            speech.check_installed()?;
+            let mut watch = speech.subscribe();
+            let progress_app = app.clone();
+            let forward = tauri::async_runtime::spawn(async move {
+                while watch.changed().await.is_ok() {
+                    if let Some(p) = watch.borrow().clone() {
+                        let _ = progress_app.emit(
+                            "voice://progress",
+                            Progress {
+                                what: "speech",
+                                file: p.file,
+                                received: p.received,
+                                total: p.total,
+                            },
+                        );
+                    }
+                }
+            });
+            let result = speech.load().await;
             forward.abort();
             result.map_err(|e| format!("{e:#}"))?;
         }

@@ -934,3 +934,10 @@ body.hud::before { display: none; }
 .hud-steps { list-style: none; margin: 4px 0 0; padding: 0; font-size: 12px; color: var(--muted); }
 .hud-steps li { overflow-wrap: anywhere; }
 .hud-browsing .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+/* Two or three choices side by side, one selected. */
+.segmented { display: inline-flex; border: 1px solid var(--border-strong); border-radius: 999px; overflow: hidden; }
+.segmented button { border: none; border-radius: 0; background: transparent; color: var(--muted); padding: 4px 14px; font-size: 12px; }
+.segmented button.active { background: var(--accent-soft); color: var(--text); }
+.voice-speech { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 12px; }
+.voice-speech > button { align-self: flex-start; }

@@ -413,6 +413,10 @@ export type VoiceSettings = {
   browser: boolean;
   browser_model: string;
   about_me: string;
+  speech_engine: "natural" | "system";
+  speech_voice: string;
+  system_voice: string;
+  speech_rate: number;
 };
 
 export type Pane = "chat" | "plan" | "night" | "preview" | "tools" | "settings";
@@ -499,12 +503,23 @@ export type VoiceStatus = {
   whisper_downloaded: boolean;
   whisper_megabytes: number;
   laya: LayaState;
+  speech_ready: boolean;
+  speech_downloaded: boolean;
+  speech_hint: string | null;
   listening: boolean;
   pending: VoicePending | null;
 };
 
+/** How to say a reply, from `voice_say`. */
+export type Spoken = {
+  wav: string | null;
+  system_voice: string;
+  rate: number;
+  fallback: string | null;
+};
+
 export type VoiceProgress = {
-  what: "whisper" | "laya";
+  what: "whisper" | "laya" | "speech";
   file: string | null;
   received: number;
   total: number | null;

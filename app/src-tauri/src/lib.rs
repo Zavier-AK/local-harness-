@@ -1759,6 +1759,8 @@ pub fn run() {
             voice::voice_try,
             voice::voice_hide_hud,
             voice::voice_stop_browsing,
+            voice::voice_say,
+            voice::voice_speech_voices,
             voice::voice_open_browser,
         ])
         .run(tauri::generate_context!())

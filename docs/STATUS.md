@@ -76,7 +76,7 @@ output can merge anything.
 
 ### Working and verified
 
-- **265 engine tests** (286 including the separate Tauri shell workspace), no network or
+- **267 engine tests** (288 including the separate Tauri shell workspace), no network or
   CLI login required.
 - **Orchestrator** — live end-to-end against the real `claude` CLI: it called `list_roles`,
   then `delegate`, a worker wrote into its worktree, and it correctly reported the work as
@@ -167,6 +167,18 @@ output can merge anything.
     **Not verified here:** real sites (Amazon, Gmail), Google sign-in inside the
     automated window (flags that usually allow it are set), Contacts lookup, and the app's
     Stop button on a real run.
+  - **A natural voice.** Replies were read by the default system voice. They now use
+    Kokoro (82M, local) with British voices, George by default, through a Node helper
+    (`tts-server.mjs`). The best British macOS voice is the fallback. The helper's
+    protocol runs here. **Not verified here:** the voice itself, because the model downloads
+    from Hugging Face, which this build machine can't reach. `kokoro-js` brings in
+    transformers.js, which has an image library (`sharp`) with open advisories. It is
+    never given an image here.
+  - **Cost, measured** with `voice --agent`, which now prints tokens: Haiku requests were
+    11–14k tokens in, mostly cached, and 136–655 out, about 0.3–0.4¢ each at API
+    prices after the first (about 1.6¢). A Sonnet browser task on the test shop was 11
+    steps, 52k in (48k cached) and 931 out, about 3¢. On a subscription these count toward
+    the plan's limits; they are not billed.
   - The real `@receptron/laya` package runs in the helper. Its protocol and error paths
     work, including a clean error when the weights can't be downloaded.
   - whisper.cpp loads a model and transcribes 11 s of audio (a test model, CPU only).
@@ -215,7 +227,7 @@ output can merge anything.
 
 ### Known gaps
 
-- **No CI.** The repository has no workflows, so the 265 tests run only by hand. This
+- **No CI.** The repository has no workflows, so the 267 tests run only by hand. This
   matters more than usual here: both CLIs' JSON output is parsed leniently against
   fixtures rather than a stable contract, so upstream schema drift would go unnoticed
   until a live run misbehaved. Deferred by choice.
