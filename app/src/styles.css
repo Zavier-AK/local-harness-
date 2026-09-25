@@ -884,9 +884,15 @@ body.hud::before { display: none; }
   flex-direction: column;
   gap: 8px;
   min-height: 56px;
+  max-height: calc(100vh - 12px);
   position: relative;
   padding-right: 40px;
 }
+/* Past the window's maximum height, the answer scrolls; the buttons stay put. */
+/* Top-aligned: centred content that overflows a scroll box is cut off at the top. */
+.voice-hud > .hud-body { min-height: 0; flex-shrink: 1; overflow-y: auto; overscroll-behavior: contain; align-items: flex-start; }
+.voice-hud > .hud-body > .hud-mic { margin-top: 3px; }
+.voice-hud > .hud-actions, .voice-hud > .hud-row:not(.hud-body) { flex-shrink: 0; }
 .voice-hud.failed { border-color: var(--error); }
 .hud-close {
   position: absolute; top: 8px; right: 10px;
