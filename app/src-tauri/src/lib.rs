@@ -1763,6 +1763,7 @@ pub fn run() {
             voice::voice_try,
             voice::voice_hide_hud,
             voice::voice_hud_fit,
+            voice::voice_speaking,
             voice::voice_stop_browsing,
             voice::voice_say,
             voice::voice_speech_voices,

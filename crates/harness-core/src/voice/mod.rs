@@ -24,6 +24,7 @@ pub mod everyday;
 pub mod laya;
 pub mod matcher;
 pub mod speech;
+pub mod turns;
 
 use serde::{Deserialize, Serialize};
 

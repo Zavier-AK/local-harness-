@@ -23,6 +23,7 @@ use harness_core::voice::speech::{self, SpeechClient, SpeechConfig};
 use harness_core::voice::{self, computer, Interpretation, Outcome, Snapshot, VoiceAction};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
@@ -33,6 +34,12 @@ pub const HUD_LABEL: &str = "voice-hud";
 /// A question left unanswered this long is dropped: a "yes" much later is about
 /// something else.
 const PENDING_FOR: Duration = Duration::from_secs(90);
+/// Pressed and let go within this, the hotkey is a tap: listening goes on hands-free.
+const TAP: Duration = Duration::from_millis(350);
+/// A reply read aloud never takes longer; a lost "done speaking" can't mute the mic.
+const MAX_SPEAKING: Duration = Duration::from_secs(90);
+/// Louder than this counts as someone talking, for the hands-free idle timeout.
+const TALKING_LEVEL: f32 = 0.03;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -70,6 +77,12 @@ pub struct VoiceSettings {
     pub system_voice: String,
     /// 0.8 to 1.25; 1 is normal.
     pub speech_rate: f64,
+    /// Hands-free (tap the key instead of holding it) ends after this long with nothing
+    /// said.
+    pub handsfree_idle_secs: u32,
+    /// With Laya loaded, a short single request it's sure of is done on its word, in a
+    /// fraction of a second, instead of waiting seconds for the voice agent.
+    pub laya_first: bool,
 }
 
 impl Default for VoiceSettings {
@@ -91,6 +104,8 @@ impl Default for VoiceSettings {
             speech_voice: speech::DEFAULT_VOICE.into(),
             system_voice: String::new(),
             speech_rate: 1.0,
+            handsfree_idle_secs: 30,
+            laya_first: true,
         }
     }
 }
@@ -140,6 +155,9 @@ impl VoiceSettings {
             self.speech_voice = speech::DEFAULT_VOICE.into();
         }
         self.system_voice = self.system_voice.trim().chars().take(100).collect();
+        if !(5..=600).contains(&self.handsfree_idle_secs) {
+            return Err("hands-free must stop after 5 seconds to 10 minutes of quiet".into());
+        }
         if !(0.8..=1.25).contains(&self.speech_rate) {
             return Err("the speaking speed must be between 0.8 and 1.25".into());
         }
@@ -185,6 +203,23 @@ pub struct Voice {
     browse_agent: Arc<tokio::sync::Mutex<Option<(String, voice::agent::VoiceAgent)>>>,
     /// The natural voice for spoken replies.
     pub speech: Arc<SpeechClient>,
+    /// Hands-free: listening goes on after the key is let go, until it's tapped again,
+    /// "stop listening" is said, or nothing is said for a while.
+    handsfree: AtomicBool,
+    /// The hotkey (or the mic button) is down, so listening should be on.
+    held: AtomicBool,
+    /// When the hotkey went down, to tell a tap from a hold.
+    pressed_at: std::sync::Mutex<Option<Instant>>,
+    /// This press was a tap to end hands-free; its release does nothing.
+    tap_to_stop: AtomicBool,
+    /// A reply is being read aloud (since when), and when the last one ended: what the
+    /// microphone hears then is the assistant's own voice, not the person.
+    speaking_since: std::sync::Mutex<Option<Instant>>,
+    spoke_until: std::sync::Mutex<Option<Instant>>,
+    /// The last sign of use, for the hands-free idle timeout.
+    last_activity: std::sync::Mutex<Instant>,
+    /// Something said is being understood or acted on.
+    working: AtomicBool,
     /// The browser task running in the background, and what it is.
     browse_job: std::sync::Mutex<Option<(String, tauri::async_runtime::JoinHandle<()>)>>,
 }
@@ -217,7 +252,35 @@ impl Voice {
             )),
             browse_agent: Arc::new(tokio::sync::Mutex::new(None)),
             browse_job: std::sync::Mutex::new(None),
+            handsfree: AtomicBool::new(false),
+            held: AtomicBool::new(false),
+            pressed_at: std::sync::Mutex::new(None),
+            tap_to_stop: AtomicBool::new(false),
+            speaking_since: std::sync::Mutex::new(None),
+            spoke_until: std::sync::Mutex::new(None),
+            last_activity: std::sync::Mutex::new(Instant::now()),
+            working: AtomicBool::new(false),
         }
+    }
+
+    fn touch(&self) {
+        *self.last_activity.lock().expect("not poisoned") = Instant::now();
+    }
+
+    /// Reading a reply aloud now. A report that never ended is ignored after a while.
+    fn is_speaking(&self) -> bool {
+        self.speaking_since
+            .lock()
+            .expect("not poisoned")
+            .is_some_and(|since| since.elapsed() < MAX_SPEAKING)
+    }
+
+    fn spoke_until(&self) -> Option<Instant> {
+        *self.spoke_until.lock().expect("not poisoned")
+    }
+
+    fn is_handsfree(&self) -> bool {
+        self.handsfree.load(Ordering::Relaxed)
     }
 
     /// The browser task running now, if any.
@@ -573,6 +636,20 @@ pub fn voice_speech_voices() -> Vec<(String, String, String)> {
         .collect()
 }
 
+/// The voice bar reports when it starts and stops reading a reply aloud, so the
+/// microphone can ignore the assistant's own voice.
+#[tauri::command]
+pub fn voice_speaking(app: AppHandle, on: bool) {
+    let voice = app.state::<Voice>();
+    let mut since = voice.speaking_since.lock().expect("not poisoned");
+    if on {
+        *since = Some(Instant::now());
+    } else if since.take().is_some() {
+        *voice.spoke_until.lock().expect("not poisoned") = Some(Instant::now());
+    }
+    voice.touch();
+}
+
 /// The Stop button while the browser is working.
 #[tauri::command]
 pub async fn voice_stop_browsing(app: AppHandle) -> bool {
@@ -695,29 +772,112 @@ pub fn apply_hotkey(app: &AppHandle, settings: &VoiceSettings) -> Result<(), Str
     Ok(())
 }
 
-/// The global-shortcut plugin, wired to push-to-talk: press starts, release finishes.
+/// The global-shortcut plugin. Hold the key to talk and let go to finish; or tap it to
+/// keep listening hands-free, and tap again to stop.
 pub fn hotkey_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     use tauri_plugin_global_shortcut::ShortcutState;
     tauri_plugin_global_shortcut::Builder::new()
         .with_handler(|app, _shortcut, event| {
             let app = app.clone();
+            let voice = app.state::<Voice>();
             match event.state {
                 ShortcutState::Pressed => {
+                    if voice.is_handsfree() {
+                        // A tap while hands-free ends it.
+                        voice.tap_to_stop.store(true, Ordering::Relaxed);
+                        tauri::async_runtime::spawn(async move {
+                            let _ = finish(&app).await;
+                        });
+                        return;
+                    }
+                    voice.tap_to_stop.store(false, Ordering::Relaxed);
+                    voice.held.store(true, Ordering::Relaxed);
+                    *voice.pressed_at.lock().expect("not poisoned") = Some(Instant::now());
                     tauri::async_runtime::spawn(async move {
                         if let Err(err) = start(&app).await {
+                            // Nothing is listening, so a tap made meanwhile means nothing.
+                            app.state::<Voice>()
+                                .handsfree
+                                .store(false, Ordering::Relaxed);
                             show_hud(&app);
                             phase(&app, "error", Some(err));
                         }
                     });
                 }
                 ShortcutState::Released => {
-                    tauri::async_runtime::spawn(async move {
-                        let _ = finish(&app).await;
-                    });
+                    if voice.tap_to_stop.swap(false, Ordering::Relaxed) {
+                        return;
+                    }
+                    voice.held.store(false, Ordering::Relaxed);
+                    let held_for = voice
+                        .pressed_at
+                        .lock()
+                        .expect("not poisoned")
+                        .map(|at| at.elapsed())
+                        .unwrap_or(TAP);
+                    if held_for < TAP {
+                        go_handsfree(&app);
+                    } else {
+                        tauri::async_runtime::spawn(async move {
+                            let _ = finish(&app).await;
+                        });
+                    }
                 }
             }
         })
         .build()
+}
+
+#[derive(Clone, Serialize)]
+struct Mode {
+    handsfree: bool,
+    /// Hands-free ends after this many seconds with nothing said.
+    idle_secs: u32,
+}
+
+fn emit_mode(app: &AppHandle) {
+    let voice = app.state::<Voice>();
+    let _ = app.emit(
+        "voice://mode",
+        Mode {
+            handsfree: voice.is_handsfree(),
+            idle_secs: settings::load().voice.handsfree_idle_secs,
+        },
+    );
+}
+
+/// Keep listening after the key is let go, until a tap, "stop listening", or quiet.
+fn go_handsfree(app: &AppHandle) {
+    let voice = app.state::<Voice>();
+    if voice.handsfree.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    voice.touch();
+    emit_mode(app);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let idle = Duration::from_secs(settings::load().voice.handsfree_idle_secs as u64);
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let voice = app.state::<Voice>();
+            if !voice.is_handsfree() {
+                return;
+            }
+            if voice.working.load(Ordering::Relaxed) || voice.is_speaking() {
+                voice.touch();
+                continue;
+            }
+            let quiet = voice.last_activity.lock().expect("not poisoned").elapsed();
+            if quiet >= idle {
+                tracing::info!(
+                    "hands-free: {}s with nothing said, stopping",
+                    quiet.as_secs()
+                );
+                let _ = finish(&app).await;
+                return;
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------- listening
@@ -807,31 +967,54 @@ pub async fn start(app: &AppHandle) -> Result<(), String> {
             return Ok(());
         }
         // Each piece is understood and acted on in turn, while listening goes on.
-        let (pieces, mut incoming) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
+        let (pieces, incoming) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
+        let pause = Duration::from_millis(settings.pause_ms as u64);
         let level_app = app.clone();
+        let gate_app = app.clone();
         let listener = audio::Listener::start(
-            Duration::from_millis(settings.pause_ms as u64),
+            pause,
             move |level| {
+                if level > TALKING_LEVEL {
+                    level_app.state::<Voice>().touch();
+                }
                 let _ = level_app.emit("voice://level", level);
             },
             move |piece| {
+                // What the microphone picks up while a reply is read aloud is the
+                // assistant's own voice.
+                let state = gate_app.state::<Voice>();
+                let length = Duration::from_secs_f64(piece.len() as f64 / audio::RATE as f64);
+                if voice::turns::over_speech(
+                    Instant::now(),
+                    length,
+                    pause,
+                    state.is_speaking(),
+                    state.spoke_until(),
+                ) {
+                    tracing::debug!(
+                        "dropped {:.1}s heard over a spoken reply",
+                        length.as_secs_f64()
+                    );
+                    return;
+                }
                 let _ = pieces.send(piece);
             },
         )
         .map_err(|e| format!("{e:#}"))?;
-        let worker_app = app.clone();
-        let worker = tauri::async_runtime::spawn(async move {
-            while let Some(piece) = incoming.recv().await {
-                if let Err(err) = understand(&worker_app, piece).await {
-                    phase(&worker_app, "error", Some(err));
-                }
-            }
-        });
+        let worker = tauri::async_runtime::spawn(work_through(app.clone(), incoming));
         *session = Some(Session { listener, worker });
     }
     show_hud(app);
     phase(app, "listening", voice.pending().map(|p| p.describe));
+    emit_mode(app);
     warm(app);
+    // Let go before the microphone was even open, and not a tap: nothing to listen for.
+    if !voice.held.load(Ordering::Relaxed) && !voice.is_handsfree() {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = finish(&app).await;
+        });
+    }
     Ok(())
 }
 
@@ -840,33 +1023,94 @@ pub async fn start(_app: &AppHandle) -> Result<(), String> {
     Err("this build has no voice support".into())
 }
 
-/// One spoken piece: write it down, work out what it means, act on it.
+/// Write a spoken piece down.
 #[cfg(feature = "voice")]
-async fn understand(app: &AppHandle, piece: Vec<f32>) -> Result<(), String> {
-    let _ = app.emit("voice://busy", true);
-    let result = async {
-        let whisper = whisper(app).await?;
-        let (snapshot, _, roles) = snapshot(&app.state::<AppState>()).await;
-        let names: Vec<String> = snapshot.projects.iter().map(|p| p.name.clone()).collect();
-        let prompt = stt::prompt(&roles, &names);
-        let text = tokio::task::spawn_blocking(move || whisper.transcribe(&piece, &prompt))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| format!("{e:#}"))?;
-        if !text.trim().is_empty() {
-            hear(app, &text).await;
-        }
-        Ok(())
+async fn transcribe(app: &AppHandle, piece: Vec<f32>) -> Result<String, String> {
+    let whisper = whisper(app).await?;
+    let (snapshot, _, roles) = snapshot(&app.state::<AppState>()).await;
+    let names: Vec<String> = snapshot.projects.iter().map(|p| p.name.clone()).collect();
+    let prompt = stt::prompt(&roles, &names);
+    let text = tokio::task::spawn_blocking(move || whisper.transcribe(&piece, &prompt))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(text.trim().to_string())
+}
+
+/// Whether to wait for more before acting on `text`: an exact command, a yes or no, or
+/// "stop listening" acts at once; anything else may be the first half of a request.
+#[cfg(feature = "voice")]
+async fn may_go_on(app: &AppHandle, text: &str) -> bool {
+    let voice = app.state::<Voice>();
+    if voice.pending().is_some() || voice::turns::is_stop_listening(text) {
+        return false;
     }
-    .await;
-    let _ = app.emit("voice://busy", false);
-    result
+    let (mut snapshot, _, _) = snapshot(&app.state::<AppState>()).await;
+    snapshot.apps = voice.apps();
+    voice::matcher::match_command(text, &snapshot, false).is_none()
+}
+
+/// Understand and act on each spoken piece in turn, while listening goes on. A piece
+/// that isn't a command on its own waits a moment for the rest of the request.
+#[cfg(feature = "voice")]
+async fn work_through(
+    app: AppHandle,
+    mut incoming: tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>,
+) {
+    let mut open = true;
+    while open {
+        let Some(piece) = incoming.recv().await else {
+            break;
+        };
+        let voice = app.state::<Voice>();
+        voice.working.store(true, Ordering::Relaxed);
+        let _ = app.emit("voice://busy", true);
+        let mut text = match transcribe(&app, piece).await {
+            Ok(text) => text,
+            Err(err) => {
+                phase(&app, "error", Some(err));
+                String::new()
+            }
+        };
+        while !text.is_empty() && may_go_on(&app, &text).await {
+            match tokio::time::timeout(voice::turns::wait_for_more(&text), incoming.recv()).await {
+                Ok(Some(more)) => match transcribe(&app, more).await {
+                    Ok(more) if !more.is_empty() => text = format!("{text} {more}"),
+                    Ok(_) => {}
+                    Err(err) => phase(&app, "error", Some(err)),
+                },
+                Ok(None) => {
+                    open = false;
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        if !text.is_empty() {
+            if voice.is_handsfree() && voice::turns::is_stop_listening(&text) {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = finish(&app).await;
+                });
+            } else {
+                hear(&app, &text).await;
+            }
+        }
+        let _ = app.emit("voice://busy", false);
+        voice.working.store(false, Ordering::Relaxed);
+        voice.touch();
+    }
 }
 
 /// The key was let go: stop listening, finish what was being said, then rest.
 #[cfg(feature = "voice")]
 pub async fn finish(app: &AppHandle) -> Result<(), String> {
     let voice = app.state::<Voice>();
+    voice.held.store(false, Ordering::Relaxed);
+    let was_handsfree = voice.handsfree.swap(false, Ordering::Relaxed);
+    if was_handsfree {
+        emit_mode(app);
+    }
     let Some(session) = voice.session.lock().expect("not poisoned").take() else {
         return Ok(());
     };
@@ -1153,8 +1397,17 @@ async fn ask_agent(
         tracing::warn!("voice agent unavailable: {error}");
         return None;
     }
-    phase(app, "thinking", Some(text.to_string()));
     let voice = app.state::<Voice>();
+    // While listening goes on, the bar keeps listening and says it's working.
+    #[cfg(feature = "voice")]
+    let listening = voice.session.lock().expect("not poisoned").is_some();
+    #[cfg(not(feature = "voice"))]
+    let listening = false;
+    if listening {
+        let _ = app.emit("voice://working", text);
+    } else {
+        phase(app, "thinking", Some(text.to_string()));
+    }
     let mut slot = voice.agent.lock().await;
     let (_, agent) = slot.as_mut()?;
     match agent.ask(text, snapshot, Duration::from_secs(120)).await {
@@ -1197,12 +1450,32 @@ async fn hear_one(app: &AppHandle, text: &str) -> Heard {
         && pending.is_none()
         && voice::matcher::match_command(text, &snapshot, false).is_none()
         && !voice::matcher::normalize(text).is_empty();
-    let from_agent = if for_agent {
+    // A short, single request Laya is sure of is done on its word, in a fraction of a
+    // second; the agent takes seconds. Anything longer or less certain goes to the agent.
+    let quick = if for_agent
+        && settings.laya_first
+        && matches!(voice.laya.state(), LayaState::Ready)
+        && voice::turns::single_intent(text)
+    {
+        let read = voice::interpret(
+            text,
+            &snapshot,
+            Some(&voice.laya),
+            settings.confidence,
+            None,
+        )
+        .await;
+        (read.source == voice::Source::Laya && matches!(read.outcome, Outcome::Act { .. }))
+            .then_some(read)
+    } else {
+        None
+    };
+    let from_agent = if quick.is_none() && for_agent {
         ask_agent(app, text, &snapshot, &settings).await
     } else {
         None
     };
-    let interpretation = match from_agent {
+    let interpretation = match quick.or(from_agent) {
         Some(interpretation) => interpretation,
         None => {
             voice::interpret(
@@ -1487,6 +1760,8 @@ pub async fn voice_prepare(app: AppHandle, what: String) -> Result<VoiceStatus, 
 /// Mic button in the app: the same as the hotkey.
 #[tauri::command]
 pub async fn voice_start(app: AppHandle) -> Result<(), String> {
+    // The mic button is a toggle: listening goes on until it's clicked again.
+    app.state::<Voice>().held.store(true, Ordering::Relaxed);
     start(&app).await
 }
 

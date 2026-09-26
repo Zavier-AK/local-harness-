@@ -131,7 +131,7 @@ export default function VoiceSettingsPanel({ value, onChange }: Props) {
       <h3>Voice</h3>
       <p className="muted">
         Hold <kbd>{value.hotkey.replace("Alt", "⌥").replace("Cmd", "⌘").replace("Shift", "⇧").replace(/\+/g, "")}</kbd>{" "}
-        anywhere and speak. Each command runs at the pause after it, so you can keep talking. Everything runs on this Mac: Whisper writes down what you said, exact commands are matched instantly, and Laya works out the rest. Anything else goes into the chat box for you to edit and send. Merges, plans and stopping things always ask
+        anywhere and speak, or tap it once to keep listening hands-free. Each command runs at the pause after it, so you can keep talking. Everything runs on this Mac: Whisper writes down what you said, exact commands are matched instantly, and Laya works out the rest. Anything else goes into the chat box for you to edit and send. Merges, plans and stopping things always ask
         you first.
       </p>
       {status && !status.built && (
@@ -213,6 +213,19 @@ export default function VoiceSettingsPanel({ value, onChange }: Props) {
           <input value={value.agent_model} onChange={(e) => set({ agent_model: e.target.value })} spellCheck={false} />
           <span className="muted">haiku is fast and cheap</span>
         </label>
+      )}
+      {value.agent && (
+        <>
+          <label className="toggle-row">
+            <input type="checkbox" checked={value.laya_first} onChange={(e) => set({ laya_first: e.target.checked })} />
+            <span>Let Laya do short, single requests it's sure of (much faster)</span>
+          </label>
+          <p className="muted hint">
+            With Laya loaded, something like "ship the builder's change" or "turn it down a bit" is done in a
+            fraction of a second instead of the agent's few seconds. Longer or multi-step requests, and anything
+            Laya is unsure of, still go to the agent.
+          </p>
+        </>
       )}
 
       {value.agent && (
@@ -298,8 +311,29 @@ export default function VoiceSettingsPanel({ value, onChange }: Props) {
         <span className="mono">{(value.pause_ms / 1000).toFixed(1)}s</span>
       </label>
       <p className="muted hint">
-        How long you pause before what you just said runs, while you keep holding the key.
-        Shorter feels snappier; longer lets you think mid-sentence.
+        How long a pause ends what you just said. An exact command runs then; anything else
+        waits a moment more for the rest (longer if you stopped on "and…" or "for…"), so a
+        pause to think doesn't cut a request in half.
+      </p>
+
+      <label className="field">
+        <span>Hands-free stops after</span>
+        <input
+          type="range"
+          min={10}
+          max={300}
+          step={5}
+          value={value.handsfree_idle_secs}
+          onChange={(e) => set({ handsfree_idle_secs: Number(e.target.value) })}
+          aria-valuetext={`${value.handsfree_idle_secs} seconds`}
+        />
+        <span className="mono">{value.handsfree_idle_secs}s</span>
+      </label>
+      <p className="muted hint">
+        Tap the key instead of holding it and it keeps listening: say one thing after another,
+        and each is done as you go. It stops when you tap again, say "stop listening" or
+        "that's all", or say nothing for this long. It doesn't hear its own replies. With
+        speakers, wait for a reply to finish before speaking; headphones let you talk over it.
       </p>
 
       <label className="field">

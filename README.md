@@ -269,7 +269,15 @@ Karpathy's "autonomy slider": you decide how much the fleet does alone, and the
 
 Hold **⌥Space** anywhere, not only in the app, and talk. Each command runs at the pause
 after it, so you can keep talking: "open Notes … show me the plan … what's waiting for
-me?" is three commands in one hold. Letting go finishes whatever you were saying. Voice
+me?" is three commands in one hold. Letting go finishes whatever you were saying.
+
+**Or tap it once and just talk.** A quick tap (instead of a hold) keeps it listening
+hands-free: say one thing after another, and each is done as you go. It stops when you
+tap again, say "stop listening" or "that's all", or say nothing for 30 seconds (Settings ›
+Voice). Replies are read aloud as you go, and it ignores its own voice while it speaks.
+With speakers, let a reply finish before you speak; with headphones you can talk over it.
+
+Voice
 is a commander for the harness itself, plus a small, safe list of things on the Mac. It
 is off until you turn it on in **Settings › Voice** and click **Save**.
 
@@ -435,7 +443,14 @@ Everything runs on the Mac; no audio leaves it.
    - Below the confidence you set (0.75 by default), nothing is done on its word.
 4. **The voice agent** (above) takes everything else when it is on. It turns a longer
    request into steps from the safe list, hands web tasks to the browser agent, and puts
-   coding requests into the chat box.
+   coding requests into the chat box. With Laya loaded, a short single request Laya is
+   sure of ("ship the builder's change") skips the agent and is done in a fraction of a
+   second; longer, multi-step or uncertain ones still go to the agent.
+
+**A pause to think doesn't cut a request in half.** An exact command runs at the pause
+after it. Anything else waits a moment for more (0.8 s), and longer if you stopped on
+"and…", "for…" or "the…" (2.5 s), so "look through the results for… 4K monitors" reaches
+the agent as one request.
 5. **Otherwise the words go into the chat box**, for you to edit and send. Nothing
    reaches Claude's coding session unless you send it.
 
@@ -621,7 +636,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 267 engine tests, no network, no CLI login needed
+cargo test                        # 271 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -636,7 +651,7 @@ Preview discovery, URL safety, settings — run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **267 engine tests, 288 including the Tauri shell** — worth stating explicitly,
+That makes **271 engine tests, 292 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats

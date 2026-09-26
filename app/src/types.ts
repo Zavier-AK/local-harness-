@@ -417,6 +417,8 @@ export type VoiceSettings = {
   speech_voice: string;
   system_voice: string;
   speech_rate: number;
+  handsfree_idle_secs: number;
+  laya_first: boolean;
 };
 
 export type Pane = "chat" | "plan" | "night" | "preview" | "tools" | "settings";
