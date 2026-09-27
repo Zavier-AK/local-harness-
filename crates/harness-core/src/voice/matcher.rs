@@ -458,6 +458,8 @@ fn pane(words: &str) -> Option<Pane> {
         "preview" => Pane::Preview,
         "tools" | "tools and skills" | "skills" => Pane::Tools,
         "settings" | "preferences" => Pane::Settings,
+        "fleet" | "roles" | "models" => Pane::Fleet,
+        "projects" | "project list" => Pane::Projects,
         _ => return None,
     })
 }

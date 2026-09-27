@@ -421,7 +421,7 @@ export type VoiceSettings = {
   laya_first: boolean;
 };
 
-export type Pane = "chat" | "plan" | "night" | "preview" | "tools" | "settings";
+export type Pane = "chat" | "plan" | "night" | "preview" | "tools" | "settings" | "fleet" | "limits" | "projects";
 export type StatusTopic = "overview" | "workers" | "waiting" | "plan" | "night" | "limits";
 
 /** Mirrors `harness_core::voice::VoiceAction`. */
@@ -459,6 +459,18 @@ export type VoiceAction =
   | { action: "draft_email"; to: string; subject: string; body: string }
   | { action: "browser_do"; step: unknown; describe: string }
   | { action: "stop_browsing" }
+  | { action: "open_project"; path: string }
+  | { action: "new_project"; name: string; parent: string | null }
+  | { action: "close_project"; project: string | null }
+  | { action: "send_chat"; text: string | null }
+  | { action: "set_role_model"; role: string; model: string; provider: string | null }
+  | { action: "preview"; url: string | null }
+  | { action: "extension"; kind: "skill" | "mcp"; name: string; change: "enable" | "disable" | "remove" }
+  | { action: "import_skills"; url: string }
+  | { action: "new_skill"; name: string; description: string }
+  | { action: "add_mcp_server"; name: string; command: string | null; args: string[]; url: string | null }
+  | { action: "set_setting"; key: string; value: string }
+  | { action: "start_night"; goal: string; metric: string; higher_is_better: boolean; guard: string | null; role: string | null }
   | { action: "system"; control: { control: string; percent?: number } }
   | { action: "confirm" }
   | { action: "cancel" };

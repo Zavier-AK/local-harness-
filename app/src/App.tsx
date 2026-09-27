@@ -58,6 +58,10 @@ export default function App() {
   const [voiceOn, setVoiceOn] = useState(false);
   /** Words said for the head agent, handed to the chat box. */
   const [dictated, setDictated] = useState<{ text: string; at: number } | null>(null);
+  /** Voice asked for the chat box's draft to be sent. */
+  const [sendDraft, setSendDraft] = useState(0);
+  /** Voice asked the preview to show an address, or (`url: null`) to reload. */
+  const [previewRequest, setPreviewRequest] = useState<{ url: string | null; at: number } | null>(null);
   /** The latest handlers, for voice events that arrive between renders. */
   const voiceHandlers = useRef<VoiceHandlers | null>(null);
   /** The plan on the board: the one under review or running, else the last one. */
@@ -98,8 +102,30 @@ export default function App() {
       .then((status) => setVoiceOn(status.settings.enabled))
       .catch(() => setVoiceOn(false));
     const offs = [
-      listen<{ action: import("./types").VoiceAction }>("voice://run", ({ payload }) => {
-        if (voiceHandlers.current) dispatch(payload.action, voiceHandlers.current);
+      listen<{ id: number; action: import("./types").VoiceAction }>("voice://run", async ({ payload }) => {
+        // Carried out through the same handlers as the buttons; the shell hears how it went.
+        let message: string | null = null;
+        let error: string | null = null;
+        try {
+          if (!voiceHandlers.current) throw new Error("the window isn't ready yet");
+          message = (await dispatch(payload.action, voiceHandlers.current)) ?? null;
+        } catch (err) {
+          error = err instanceof Error ? err.message : String(err);
+        }
+        void invoke("voice_ran", { id: payload.id, message, error }).catch(() => {});
+      }),
+      // Voice changed something outside this window's own controls.
+      listen<string>("harness://changed", ({ payload }) => {
+        if (payload === "roles") {
+          void invoke<SessionInfo["roles"]>("session_roles")
+            .then((roles) => setSession((current) => (current ? { ...current, roles } : current)))
+            .catch(() => {});
+        } else if (payload === "settings") {
+          void invoke<AppSettings>("get_settings").then(applySettings).catch(() => {});
+          void invoke<{ settings: { enabled: boolean } }>("voice_status")
+            .then((status) => setVoiceOn(status.settings.enabled))
+            .catch(() => {});
+        }
       }),
       listen<{ phase: VoicePhase }>("voice://state", ({ payload }) => setVoicePhase(payload.phase)),
       listen<Heard>("voice://heard", ({ payload }) => {
@@ -502,10 +528,39 @@ export default function App() {
     }
   }
 
+  /** The first project of this run: the session starts, and says what's ready. */
+  function startFirst(info: SessionInfo) {
+    setSession(info);
+    const blocked = info.roles.filter((r) => !r.available);
+    setChat([
+      {
+        kind: "notice",
+        tone: "info",
+        text: info.resumed_head_session
+          ? `Session up. Resumed the previous Harness-owned Claude conversation. ${info.roles.length - blocked.length} of ${info.roles.length} roles ready.`
+          : `Session up with a fresh Claude conversation. ${info.roles.length - blocked.length} of ${info.roles.length} roles ready.`,
+      },
+      // Surfaced here rather than discovered mid-delegation, which costs a turn.
+      // Grouped by reason: four roles blocked on one missing CLI is one problem
+      // to fix, not four, and repeating the same sentence per role buries that.
+      ...groupByReason(blocked),
+    ]);
+  }
+
+  /** Waits for the chat box to hand over its draft, for "send it". */
+  const sendDraftDone = useRef<((draft: string | null) => void) | null>(null);
+
   voiceHandlers.current = {
     navigate: (pane) => {
       if (pane === "tools" || pane === "settings") {
         setView(pane);
+      } else if (pane === "projects") {
+        setAdding(true);
+      } else if (pane === "fleet" || pane === "limits") {
+        if (!session) throw new Error("no project is open");
+        setView("session");
+        if (pane === "fleet") setFleetOpen(true);
+        else setLimitsOpen(true);
       } else {
         setView("session");
         setActivePane(pane);
@@ -539,29 +594,49 @@ export default function App() {
       setActivePane("night");
       setNightGoal({ goal, at: Date.now() });
     },
+    openProject: async (root) => {
+      const info = await invoke<SessionInfo>("start_session", { projectRoot: root, rolesPath: null, model: null });
+      setAdding(false);
+      setView("session");
+      if (!session) startFirst(info);
+      else await focusProject(info.project_root);
+      await refreshProjects();
+    },
+    closeProject: async (root) => {
+      const target = root ?? session?.project_root;
+      if (!target) throw new Error("no project is open");
+      await closeProject(target);
+    },
+    sendChat: async (text) => {
+      if (!session) throw new Error("no project is open");
+      setView("session");
+      setActivePane("chat");
+      let message = text?.trim() ?? "";
+      if (!message) {
+        // What's in the chat box, handed over by it.
+        message =
+          (await new Promise<string | null>((resolve) => {
+            sendDraftDone.current = resolve;
+            setSendDraft(Date.now());
+            window.setTimeout(() => resolve(null), 3000);
+          })) ?? "";
+        sendDraftDone.current = null;
+        if (!message.trim()) throw new Error("the chat box is empty");
+      }
+      await send(message);
+      return `Sent: ${message.length > 80 ? `${message.slice(0, 80)}…` : message}`;
+    },
+    preview: (url) => {
+      if (!session) throw new Error("no project is open");
+      setView("session");
+      setActivePane("preview");
+      setPreviewRequest({ url, at: Date.now() });
+    },
   };
 
   if (!session) {
     return (
-      <StartGate
-        onStarted={(info) => {
-          setSession(info);
-          const blocked = info.roles.filter((r) => !r.available);
-          setChat([
-            {
-              kind: "notice",
-              tone: "info",
-              text: info.resumed_head_session
-                ? `Session up. Resumed the previous Harness-owned Claude conversation. ${info.roles.length - blocked.length} of ${info.roles.length} roles ready.`
-                : `Session up with a fresh Claude conversation. ${info.roles.length - blocked.length} of ${info.roles.length} roles ready.`,
-            },
-            // Surfaced here rather than discovered mid-delegation, which costs a turn.
-            // Grouped by reason: four roles blocked on one missing CLI is one problem
-            // to fix, not four, and repeating the same sentence per role buries that.
-            ...groupByReason(blocked),
-          ]);
-        }}
-      />
+      <StartGate onStarted={startFirst} />
     );
   }
 
@@ -687,6 +762,10 @@ export default function App() {
             >
               <HeadChat
                 dictated={dictated}
+                sendDraft={sendDraft}
+                onDraftForVoice={(draft) => {
+                  sendDraftDone.current?.(draft);
+                }}
                 items={chat}
                 onStop={() => void stopTurn()}
                 busy={busy}
@@ -735,6 +814,7 @@ export default function App() {
                 obscured={Boolean(selected)}
                 projectRoot={session.project_root}
                 workerRoots={workerList.map((worker) => worker.cwd)}
+                request={previewRequest}
               />
             </div>
           </div>

@@ -12,6 +12,7 @@
 
 #![cfg_attr(not(feature = "voice"), allow(dead_code, unused_imports))]
 
+pub mod control;
 pub mod stt;
 
 #[cfg(feature = "voice")]
@@ -220,6 +221,9 @@ pub struct Voice {
     last_activity: std::sync::Mutex<Instant>,
     /// Something said is being understood or acted on.
     working: AtomicBool,
+    /// Actions handed to the main window, waiting for it to say how they went.
+    runs: std::sync::Mutex<std::collections::HashMap<u64, RunReply>>,
+    next_run: std::sync::atomic::AtomicU64,
     /// The browser task running in the background, and what it is.
     browse_job: std::sync::Mutex<Option<(String, tauri::async_runtime::JoinHandle<()>)>>,
 }
@@ -260,6 +264,8 @@ impl Voice {
             spoke_until: std::sync::Mutex::new(None),
             last_activity: std::sync::Mutex::new(Instant::now()),
             working: AtomicBool::new(false),
+            runs: std::sync::Mutex::new(std::collections::HashMap::new()),
+            next_run: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -400,8 +406,14 @@ pub struct Heard {
     pub speak: bool,
 }
 
+/// How an action the main window carried out went: a line to say, or why it failed.
+type RunReply = tokio::sync::oneshot::Sender<Result<Option<String>, String>>;
+
+/// An action for the main window to carry out through its own handlers. It answers with
+/// `voice_ran` and the same `id`.
 #[derive(Clone, Serialize)]
 struct Run {
+    id: u64,
     action: VoiceAction,
 }
 
@@ -1193,13 +1205,7 @@ impl voice::agent::Hands for AppHands {
         let app = self.app.clone();
         Box::pin(async move {
             bring_forward(&app);
-            let _ = app.emit_to(
-                "main",
-                "voice://run",
-                Run {
-                    action: VoiceAction::AskHead { text },
-                },
-            );
+            let _ = in_window(&app, VoiceAction::AskHead { text }).await;
         })
     }
 
@@ -1213,6 +1219,11 @@ impl voice::agent::Hands for AppHands {
     ) -> futures_util::future::BoxFuture<'static, Result<String, String>> {
         let app = self.app.clone();
         Box::pin(async move { start_browsing(&app, task) })
+    }
+
+    fn inventory(&self, topic: String) -> futures_util::future::BoxFuture<'static, String> {
+        let app = self.app.clone();
+        Box::pin(async move { control::inventory(&app, &topic).await })
     }
 
     fn lookup_email(
@@ -1600,32 +1611,75 @@ async fn execute(
         })),
         // Answered in words; nothing to run.
         Status { .. } => Ok(None),
-        // "Tell Claude to …" is put in the chat box too, never sent unseen.
+        // "Tell Claude to …" is put in the chat box, to be edited and sent by hand.
         AskHead { .. } => {
             bring_forward(app);
-            app.emit_to(
-                "main",
-                "voice://run",
-                Run {
-                    action: action.clone(),
-                },
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(Some(
-                "In the chat box — edit it and send when ready.".into(),
-            ))
+            in_window(app, action.clone()).await.map(|m| {
+                m.or_else(|| Some("In the chat box — edit it and send when ready.".into()))
+            })
         }
+        OpenProject { path } => {
+            let root = control::prepare_project(path).await?;
+            bring_forward(app);
+            in_window(app, OpenProject { path: root.clone() })
+                .await
+                .map(|m| m.or(Some(format!("Opened {root}"))))
+        }
+        NewProject { name, parent } => {
+            let root = control::make_project(app, name, parent.as_deref()).await?;
+            bring_forward(app);
+            in_window(app, OpenProject { path: root.clone() })
+                .await
+                .map(|_| {
+                    Some(format!(
+                        "Made {root}, with a git repository and the default fleet, and opened it"
+                    ))
+                })
+        }
+        SendChat { .. } => {
+            bring_forward(app);
+            in_window(app, action.clone()).await
+        }
+        _ => match control::run(app, action).await {
+            Some(result) => result,
+            // Everything else runs in the main window, through the same handlers as its
+            // buttons, which say how it went.
+            None => in_window(app, action.clone()).await,
+        },
+    }
+}
+
+/// Hand an action to the main window and wait for it to say how it went.
+async fn in_window(app: &AppHandle, action: VoiceAction) -> Result<Option<String>, String> {
+    let voice = app.state::<Voice>();
+    let id = voice
+        .next_run
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    voice.runs.lock().expect("not poisoned").insert(id, tx);
+    if let Err(e) = app.emit_to("main", "voice://run", Run { id, action }) {
+        voice.runs.lock().expect("not poisoned").remove(&id);
+        return Err(e.to_string());
+    }
+    match tokio::time::timeout(Duration::from_secs(60), rx).await {
+        Ok(Ok(result)) => result,
         _ => {
-            app.emit_to(
-                "main",
-                "voice://run",
-                Run {
-                    action: action.clone(),
-                },
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(None)
+            voice.runs.lock().expect("not poisoned").remove(&id);
+            Err("the Harness window didn't answer".into())
         }
+    }
+}
+
+/// The main window's answer to a `voice://run`.
+#[tauri::command]
+pub fn voice_ran(app: AppHandle, id: u64, message: Option<String>, error: Option<String>) {
+    let voice = app.state::<Voice>();
+    let waiting = voice.runs.lock().expect("not poisoned").remove(&id);
+    if let Some(tx) = waiting {
+        let _ = tx.send(match error {
+            Some(error) => Err(error),
+            None => Ok(message.filter(|m| !m.trim().is_empty())),
+        });
     }
 }
 

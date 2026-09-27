@@ -292,8 +292,31 @@ switch you to Harness. Click **×** to hide it.
 - **Steer:** "set autonomy to land safe", "run the plan", "stop the night shift",
   "start a night shift to make the tests faster" (opens the form with that goal).
 - **Ask:** "tell Claude to add retries to the fetcher". Anything that isn't a command is
-  **typed into the chat box**, never sent. Edit it and press Enter yourself. More
-  dictation is added after what is already there.
+  **typed into the chat box**, not sent. Edit it and press Enter yourself. More
+  dictation is added after what is already there. To send by voice, say so: "send it"
+  sends what's in the box, and "tell Claude to add retries and send it" sends at once.
+- **Everything else in Harness.** With the voice agent on, all of it:
+  - **Projects:** "make a new project called weather app" (a folder beside the current
+    project, or in `~/Projects`, with a git repository and the default fleet, opened),
+    "open the project in ~/code/site", "close the blog project" (asks first). By voice,
+    projects are made and opened only inside your home folder.
+  - **The fleet:** "put the builder on opus", "which models are the roles using?",
+    "show me the fleet".
+  - **Preview:** "open localhost 3000 in the preview", "reload the preview".
+  - **Tools:** "turn off the pdf skill", "remove the linear MCP server" (asks first),
+    "import skills from github.com/…" (asks first), "make a new skill called release
+    notes", "add an MCP server called github running npx …" (asks first).
+  - **Settings:** "turn off notifications", "make the voice a bit faster", "use Lewis's
+    voice", "switch the speech model to small", "set the accent to teal", "use opus for
+    the head agent by default". Any setting in Settings has a key; the agent looks them
+    up.
+  - **Night shift:** "start a night shift to make the build faster, scored by `npm run
+    bench`, lower is better, keeping only changes that pass `npm test`" starts it after
+    your yes. Without the command it opens the setup instead.
+  - **Views:** chat, plan, night, preview, tools, settings, fleet, limits, projects.
+
+  Harness actions run through the same handlers as their buttons, and the agent hears
+  whether each one worked, so it can tell you when something couldn't be done and why.
 - **The Mac:** "open Notes", "open Safari", "go to github.com", "open my downloads
   folder", "show the project in Finder", "open the project in VS Code".
   - "Open …" is an app command only if the app is **installed**. It's checked against
@@ -636,7 +659,7 @@ default to `responses` while most Ollama-compatible endpoints still want `chat`.
 ## Testing
 
 ```bash
-cargo test                        # 271 engine tests, no network, no CLI login needed
+cargo test                        # 275 engine tests, no network, no CLI login needed
 cd app && npx tsc --noEmit        # frontend
 ```
 
@@ -651,7 +674,7 @@ Preview discovery, URL safety, settings — run on their own:
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-That makes **271 engine tests, 292 including the Tauri shell** — worth stating explicitly,
+That makes **275 engine tests, 297 including the Tauri shell** — worth stating explicitly,
 because the two numbers measure different things and have drifted apart before.
 
 ## Notes and caveats

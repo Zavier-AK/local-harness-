@@ -23,6 +23,7 @@ pub mod eval;
 pub mod everyday;
 pub mod laya;
 pub mod matcher;
+pub mod projects;
 pub mod speech;
 pub mod turns;
 
@@ -146,9 +147,94 @@ pub enum VoiceAction {
     },
     /// Stop the browser task that is running.
     StopBrowsing,
+
+    // ---- the rest of the harness
+    /// Open a folder as a project, or switch to it if it's open. A folder with no fleet
+    /// gets the default one.
+    OpenProject {
+        path: String,
+    },
+    /// A new project: a folder with a git repository and the default fleet, opened.
+    /// `parent` is where to make it; `None` is beside the project in front, or
+    /// `~/Projects`.
+    NewProject {
+        name: String,
+        parent: Option<String>,
+    },
+    /// Close a project: its coding agent, workers and night shift stop. `None` is the one
+    /// in front.
+    CloseProject {
+        project: Option<String>,
+    },
+    /// Send the coding agent a message. `None` sends what's in the chat box.
+    SendChat {
+        text: Option<String>,
+    },
+    /// Put a role on another model (and backend).
+    SetRoleModel {
+        role: String,
+        model: String,
+        provider: Option<String>,
+    },
+    /// Show a local address in the preview; `None` reloads it.
+    Preview {
+        url: Option<String>,
+    },
+    /// Turn a skill or MCP server on or off, or remove it.
+    Extension {
+        kind: ExtensionKind,
+        name: String,
+        change: ExtensionChange,
+    },
+    /// Import skills from a git repository.
+    ImportSkills {
+        url: String,
+    },
+    /// A new, empty skill to fill in.
+    NewSkill {
+        name: String,
+        description: String,
+    },
+    /// Add an MCP server: a command to run, or a URL.
+    AddMcpServer {
+        name: String,
+        command: Option<String>,
+        args: Vec<String>,
+        url: Option<String>,
+    },
+    /// Change one setting, by key ("notifications", "voice.speech_rate", …).
+    SetSetting {
+        key: String,
+        value: String,
+    },
+    /// Start the night shift straight away, rather than opening its setup.
+    StartNight {
+        goal: String,
+        /// Prints the score.
+        metric: String,
+        higher_is_better: bool,
+        /// Must pass for a change to be kept.
+        guard: Option<String>,
+        role: Option<String>,
+    },
     /// Answers to a pending confirmation.
     Confirm,
     Cancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionKind {
+    Skill,
+    Mcp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionChange {
+    Enable,
+    Disable,
+    Remove,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,16 +246,25 @@ pub enum Pane {
     Preview,
     Tools,
     Settings,
+    /// Which model each role runs on.
+    Fleet,
+    /// Usage and plan limits.
+    Limits,
+    /// Open or add a project.
+    Projects,
 }
 
 impl Pane {
-    pub const ALL: [Pane; 6] = [
+    pub const ALL: [Pane; 9] = [
         Pane::Chat,
         Pane::Plan,
         Pane::Night,
         Pane::Preview,
         Pane::Tools,
         Pane::Settings,
+        Pane::Fleet,
+        Pane::Limits,
+        Pane::Projects,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -180,6 +275,9 @@ impl Pane {
             Pane::Preview => "preview",
             Pane::Tools => "tools",
             Pane::Settings => "settings",
+            Pane::Fleet => "fleet",
+            Pane::Limits => "limits",
+            Pane::Projects => "projects",
         }
     }
 
@@ -370,7 +468,12 @@ pub fn needs_confirmation(action: &VoiceAction, snapshot: &Snapshot) -> bool {
         | RunPlan
         | DiscardPlan
         | StopNight
-        | BrowserDo { .. } => true,
+        | BrowserDo { .. }
+        | CloseProject { .. }
+        | ImportSkills { .. }
+        | AddMcpServer { .. }
+        | StartNight { .. } => true,
+        Extension { change, .. } => *change == ExtensionChange::Remove,
         SetAutonomy { level } => autonomy_rank(*level) > autonomy_rank(snapshot.autonomy),
         _ => false,
     }
@@ -476,8 +579,26 @@ pub fn finalize(action: VoiceAction, snapshot: &Snapshot) -> Outcome {
                 text: format!("Autonomy is already {}.", autonomy_words(*level)),
             };
         }
-        RevealProject | OpenProjectInEditor if snapshot.active_project.is_none() => {
+        RevealProject
+        | OpenProjectInEditor
+        | SendChat { .. }
+        | SetRoleModel { .. }
+        | Preview { .. }
+        | StartNight { .. }
+            if snapshot.active_project.is_none() =>
+        {
             return reply("No project is open.");
+        }
+        CloseProject { project: None } if snapshot.active_project.is_none() => {
+            return reply("No project is open.");
+        }
+        StartNight { .. }
+            if snapshot
+                .night
+                .as_ref()
+                .is_some_and(|n| n.status == "running") =>
+        {
+            return reply("A night shift is already running.");
         }
         _ => {}
     }
@@ -570,6 +691,80 @@ pub fn finalize(action: VoiceAction, snapshot: &Snapshot) -> Outcome {
         DraftEmail { to, subject, .. } => format!("Draft an email to {to}: “{subject}”"),
         BrowserDo { describe, .. } => describe.clone(),
         StopBrowsing => "Stop browsing".into(),
+        OpenProject { path } => format!("Open the project at {path}"),
+        NewProject { name, parent: None } => format!("Make a new project, “{name}”"),
+        NewProject {
+            name,
+            parent: Some(parent),
+        } => format!("Make a new project, “{name}”, in {parent}"),
+        CloseProject { project } => {
+            let root = project.as_ref().or(snapshot.active_project.as_ref());
+            let name = root
+                .and_then(|root| snapshot.projects.iter().find(|p| &p.root == root))
+                .map(|p| p.name.clone())
+                .or_else(|| root.cloned())
+                .unwrap_or_else(|| "the project".into());
+            format!("Close {name}, stopping its agent and workers")
+        }
+        SendChat { text: Some(text) } => format!("Send Claude: “{}”", short(text, 80)),
+        SendChat { text: None } => "Send what's in the chat box".into(),
+        SetRoleModel {
+            role,
+            model,
+            provider: Some(provider),
+        } => format!("Put the {role} on {provider} {model}"),
+        SetRoleModel { role, model, .. } => format!("Put the {role} on {model}"),
+        Preview { url: Some(url) } => format!("Preview {url}"),
+        Preview { url: None } => "Reload the preview".into(),
+        Extension { kind, name, change } => {
+            let what = match kind {
+                ExtensionKind::Skill => "skill",
+                ExtensionKind::Mcp => "MCP server",
+            };
+            match change {
+                ExtensionChange::Enable => format!("Turn on the {what} “{name}”"),
+                ExtensionChange::Disable => format!("Turn off the {what} “{name}”"),
+                ExtensionChange::Remove => format!("Remove the {what} “{name}”"),
+            }
+        }
+        ImportSkills { url } => format!("Import skills from {url}"),
+        NewSkill { name, .. } => format!("Make a new skill, “{name}”"),
+        AddMcpServer {
+            name,
+            url: Some(url),
+            ..
+        } => format!("Add the MCP server “{name}” at {url}"),
+        AddMcpServer {
+            name,
+            command,
+            args,
+            ..
+        } => {
+            let run: Vec<&str> = command
+                .iter()
+                .map(String::as_str)
+                .chain(args.iter().map(String::as_str))
+                .collect();
+            format!("Add the MCP server “{name}”, running `{}`", run.join(" "))
+        }
+        SetSetting { key, value } => format!("Set {key} to {value}"),
+        StartNight {
+            goal,
+            metric,
+            higher_is_better,
+            guard,
+            ..
+        } => {
+            let mut line = format!(
+                "Start the night shift on “{}”, scored by `{metric}` ({} is better)",
+                short(goal, 80),
+                if *higher_is_better { "higher" } else { "lower" }
+            );
+            if let Some(guard) = guard {
+                line.push_str(&format!(", keeping only changes that pass `{guard}`"));
+            }
+            line
+        }
         Confirm => "Yes".into(),
         Cancel => "Cancel".into(),
     };
