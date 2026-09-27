@@ -7,9 +7,9 @@ import { limitsLine, replyLine, speak } from "./voice";
 const BARS = 28;
 
 /**
- * The push-to-talk bar: a small window above everything, shown while listening and
- * answering. While the key is held it keeps the waveform up and shows the last thing
- * done underneath, because each command runs at the pause after it, not on letting go.
+ * The voice bar: a small window above everything, shown while listening and answering.
+ * While listening (the key held, or hands-free after a tap) it keeps the waveform up and
+ * shows the last thing done underneath, because each command runs at the pause after it.
  * It asks yes-or-no when an action needs it. It decides nothing itself.
  */
 export default function VoiceHud() {
@@ -25,6 +25,11 @@ export default function VoiceHud() {
   const [browsing, setBrowsing] = useState<string | null>(null);
   const browsingRef = useRef<string | null>(null);
   const phaseRef = useRef<VoicePhase>("idle");
+  /** Hands-free: listening goes on without the key held, so replies are read aloud. */
+  const [handsfree, setHandsfree] = useState(false);
+  const handsfreeRef = useRef(false);
+  /** What the voice agent is working on, while listening goes on. */
+  const [working, setWorking] = useState<string | null>(null);
   const heardThisTurn = useRef(false);
   const hideTimer = useRef<number | null>(null);
 
@@ -65,7 +70,23 @@ export default function VoiceHud() {
       listen<number>("voice://level", ({ payload }) => {
         setLevels((prev) => [...prev.slice(1), Math.min(1, payload * 6)]);
       }),
-      listen<boolean>("voice://busy", ({ payload }) => setBusy(payload)),
+      listen<boolean>("voice://busy", ({ payload }) => {
+        setBusy(payload);
+        // A new request: the last one's steps are done with.
+        if (payload) setSteps([]);
+        else setWorking(null);
+      }),
+      listen<{ handsfree: boolean }>("voice://mode", ({ payload }) => {
+        handsfreeRef.current = payload.handsfree;
+        setHandsfree(payload.handsfree);
+      }),
+      listen<string>("voice://working", ({ payload }) => {
+        keep();
+        // A new request: the last answer is done with.
+        setHeard(null);
+        setLine(null);
+        setWorking(payload);
+      }),
       listen<string>("voice://step", ({ payload }) => {
         keep();
         setSteps((prev) => [...prev, payload].slice(-5));
@@ -87,10 +108,13 @@ export default function VoiceHud() {
           text = limitsLine(await invoke<QuotaReport>("quotas").catch(() => null));
         }
         setLine(text);
-        // Not over the person while they are still talking.
-        const stillTalking = phaseRef.current === "listening";
+        setWorking(null);
+        // Not over the person while they hold the key and talk. Hands-free, replies are
+        // read aloud, and the microphone ignores them while they are.
+        const listeningNow = phaseRef.current === "listening";
+        const stillTalking = listeningNow && !handsfreeRef.current;
         if (payload.speak && text && !stillTalking) void speak(text);
-        if (stillTalking || payload.pending) {
+        if (listeningNow || payload.pending) {
           keep();
         } else if (outcome.outcome === "nothing") {
           scheduleHide(600);
@@ -145,7 +169,7 @@ export default function VoiceHud() {
   const status =
     phase === "transcribing"
       ? "Finishing…"
-      : phase === "thinking"
+      : phase === "thinking" || working
         ? "Working out what you meant…"
         : null;
 
@@ -177,7 +201,9 @@ export default function VoiceHud() {
               <span key={i} style={{ height: `${Math.max(8, level * 100)}%` }} />
             ))}
           </div>
-          <span className="hud-source">{busy ? "…" : message ? `${message}?` : "listening"}</span>
+          <span className="hud-source" title={handsfree ? "Tap the key again, or say “stop listening”, to stop" : undefined}>
+            {busy ? "…" : message ? `${message}?` : handsfree ? "hands-free · tap to stop" : "listening"}
+          </span>
         </div>
       )}
 
@@ -189,7 +215,11 @@ export default function VoiceHud() {
             </span>
           )}
           <div className="hud-text">
-            {interpretation?.transcript && <p className="hud-transcript">“{interpretation.transcript}”</p>}
+            {working ? (
+              <p className="hud-transcript">“{working}”</p>
+            ) : (
+              interpretation?.transcript && <p className="hud-transcript">“{interpretation.transcript}”</p>
+            )}
             {status && !heard && <p className="hud-status muted">{status}</p>}
             {steps.length > 0 && (
               <ul className="hud-steps">

@@ -136,6 +136,8 @@ export function systemVoice(name: string): SpeechSynthesisVoice | null {
 }
 
 let playing: HTMLAudioElement | null = null;
+/** Which reply is being read; only the latest one reports that speaking ended. */
+let reading = 0;
 
 function stopSpeaking() {
   playing?.pause();
@@ -143,8 +145,17 @@ function stopSpeaking() {
   if ("speechSynthesis" in window) window.speechSynthesis.cancel();
 }
 
-function sayWithSystem(text: string, name: string, rate: number) {
-  if (!("speechSynthesis" in window)) return;
+/**
+ * Tell the app when a reply starts and stops being read aloud, so the microphone ignores
+ * the assistant's own voice while listening goes on.
+ */
+function reportSpeaking(on: boolean, token: number) {
+  if (!on && token !== reading) return;
+  void invoke("voice_speaking", { on }).catch(() => {});
+}
+
+function sayWithSystem(text: string, name: string, rate: number, done: () => void) {
+  if (!("speechSynthesis" in window)) return done();
   const utterance = new SpeechSynthesisUtterance(text);
   const voice = systemVoice(name);
   if (voice) {
@@ -152,6 +163,8 @@ function sayWithSystem(text: string, name: string, rate: number) {
     utterance.lang = voice.lang;
   }
   utterance.rate = rate;
+  utterance.onend = done;
+  utterance.onerror = done;
   window.speechSynthesis.speak(utterance);
 }
 
@@ -162,15 +175,22 @@ function sayWithSystem(text: string, name: string, rate: number) {
 export async function speak(text: string): Promise<void> {
   if (!text) return;
   stopSpeaking();
+  const token = ++reading;
   let spoken: Spoken | null = null;
   try {
     spoken = await invoke<Spoken>("voice_say", { text });
   } catch {
     spoken = null;
   }
+  if (token !== reading) return; // A newer reply came in while this one was being voiced.
+  const done = () => reportSpeaking(false, token);
+  reportSpeaking(true, token);
   if (spoken?.wav) {
     const audio = new Audio(`data:audio/wav;base64,${spoken.wav}`);
     playing = audio;
+    audio.onended = done;
+    audio.onerror = done;
+    audio.onpause = done;
     try {
       await audio.play();
       return;
@@ -178,5 +198,5 @@ export async function speak(text: string): Promise<void> {
       playing = null;
     }
   }
-  sayWithSystem(text, spoken?.system_voice ?? "", spoken?.rate ?? 1);
+  sayWithSystem(text, spoken?.system_voice ?? "", spoken?.rate ?? 1, done);
 }

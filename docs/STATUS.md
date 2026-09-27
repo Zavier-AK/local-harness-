@@ -76,7 +76,7 @@ output can merge anything.
 
 ### Working and verified
 
-- **267 engine tests** (288 including the separate Tauri shell workspace), no network or
+- **271 engine tests** (292 including the separate Tauri shell workspace), no network or
   CLI login required.
 - **Orchestrator** — live end-to-end against the real `claude` CLI: it called `list_roles`,
   then `delegate`, a worker wrote into its worktree, and it correctly reported the work as
@@ -173,6 +173,16 @@ output can merge anything.
     **Not verified here:** real sites (Amazon, Gmail), Google sign-in inside the
     automated window (flags that usually allow it are set), Contacts lookup, and the app's
     Stop button on a real run.
+  - **Hands-free.** A tap of the hotkey (under 0.35 s) keeps listening after it's let
+    go; a hold is push-to-talk as before. It ends on another tap, "stop listening" or
+    "that's all", or 30 s with nothing said. Replies are read aloud while listening goes
+    on, and speech heard while one is being read (or just after) is dropped
+    (`voice::turns::over_speech`). Pieces that aren't exact commands wait 0.8 s, or 2.5 s
+    after a trailing "and"/"for", for more, so a thinking pause doesn't split a request.
+    With Laya loaded, short single requests it's sure of skip the agent. Checked here:
+    the timing rules (unit tests), and the bar's two modes headlessly (read aloud while
+    hands-free, silent while held). **Not verified here:** a real microphone, the tap
+    timing on a real keyboard, and how well speakers' echo is dropped.
   - **A natural voice.** Replies were read by the default system voice. They now use
     Kokoro (82M, local) with British voices, George by default, through a Node helper
     (`tts-server.mjs`). The best British macOS voice is the fallback. The helper's
@@ -233,7 +243,7 @@ output can merge anything.
 
 ### Known gaps
 
-- **No CI.** The repository has no workflows, so the 267 tests run only by hand. This
+- **No CI.** The repository has no workflows, so the 271 tests run only by hand. This
   matters more than usual here: both CLIs' JSON output is parsed leniently against
   fixtures rather than a stable contract, so upstream schema drift would go unnoticed
   until a live run misbehaved. Deferred by choice.
