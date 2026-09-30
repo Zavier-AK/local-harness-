@@ -129,6 +129,23 @@ pub enum HarnessEvent {
         diff: Option<DiffStat>,
         is_error: bool,
     },
+    /// The person sent a finished worker's change back with comments; it is making
+    /// another pass on the same branch. `WorkerFinished` follows as usual.
+    WorkerRevising {
+        worker_id: String,
+        /// 1 for the first pass after the original.
+        revision: u32,
+        /// The message it was given.
+        feedback: String,
+    },
+    /// A worker's branch was pushed and a pull request opened (or started in the browser).
+    PullRequestOpened {
+        worker_id: String,
+        url: String,
+        number: Option<u64>,
+        /// The branch name on the remote.
+        remote_branch: String,
+    },
     /// A merge the orchestrator proposed. Never acted on without a human click.
     MergeRequested {
         worker_id: String,
@@ -323,6 +340,8 @@ impl HarnessEvent {
             Self::WorkerSpawned { worker_id, .. }
             | Self::WorkerStatusChanged { worker_id, .. }
             | Self::WorkerFinished { worker_id, .. }
+            | Self::WorkerRevising { worker_id, .. }
+            | Self::PullRequestOpened { worker_id, .. }
             | Self::MergeRequested { worker_id, .. }
             | Self::DelegationRequested { worker_id, .. }
             | Self::DelegationApproved { worker_id }

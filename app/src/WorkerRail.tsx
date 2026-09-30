@@ -204,6 +204,16 @@ export default function WorkerRail({
               {totalInput(worker.usage).toLocaleString()} in /{" "}
               {worker.usage.output_tokens.toLocaleString()} out
             </span>
+            {worker.revision ? (
+              <span className="badge" title="Times it was sent back for another pass">
+                rev {worker.revision}
+              </span>
+            ) : null}
+            {worker.pullRequest && (
+              <span className="badge pr-open" title={worker.pullRequest.url}>
+                {worker.pullRequest.number ? `PR #${worker.pullRequest.number}` : "pushed"}
+              </span>
+            )}
             {worker.diff && worker.diff.files_changed > 0 && (
               <span className="diff-chip">
                 {worker.diff.files_changed} file{worker.diff.files_changed === 1 ? "" : "s"}
