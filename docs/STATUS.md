@@ -243,6 +243,15 @@ output can merge anything.
   and that returned awaiting approval. Auto-landing, its refusals, undo and conflict
   abort are covered by engine tests.
 
+- **Sending work back** — live against the real CLI (haiku builder): the first pass picked
+  an animal and wrote it to a file; sent back with "without reading any file, write the
+  animal you picked into recall.txt", the second pass resumed the conversation in the
+  reopened worktree and wrote the same animal. Both passes were on one branch, checked
+  again, and landed together. Refusals (still running, checks running, landed, nothing
+  said) and the branch push are covered by engine tests; the review drawer's comments,
+  send-back and pull request form were rendered headlessly. Opening a pull request with
+  `gh` could not be run here (no `gh`, no push rights); its argument building and the
+  browser fallback's URL are unit-tested.
 - **Permission prompts** — live against the real CLI (haiku): a `touch` asked, was
   allowed with "always" (rule `Bash(touch made.txt)`) and the file appeared; an `rm` was
   denied and the model said so; an interrupt with a request waiting denied it and ended

@@ -1128,6 +1128,28 @@ function reduceChat(
         },
       ];
 
+    case "worker_revising":
+      return [
+        ...prev,
+        {
+          kind: "notice",
+          tone: "info",
+          text: `Sent ${event.worker_id} back for another pass (revision ${event.revision}). Its merge will be proposed again when it's done.`,
+        },
+      ];
+
+    case "pull_request_opened":
+      return [
+        ...prev,
+        {
+          kind: "notice",
+          tone: "info",
+          text: event.number
+            ? `Opened pull request #${event.number} for ${event.worker_id} (${event.remote_branch}).`
+            : `Pushed ${event.worker_id} as ${event.remote_branch}.`,
+        },
+      ];
+
     case "api_retry":
       return [
         ...prev,
@@ -1185,6 +1207,41 @@ function reduceWorkers(
       const existing = prev[event.worker_id];
       if (!existing) return prev;
       return { ...prev, [event.worker_id]: { ...existing, status: event.status } };
+    }
+
+    case "worker_revising": {
+      // Another pass on the same branch: the old result and checks no longer describe it.
+      const existing = prev[event.worker_id];
+      if (!existing) return prev;
+      return {
+        ...prev,
+        [event.worker_id]: {
+          ...existing,
+          status: "preparing",
+          summary: "",
+          is_error: false,
+          verification: null,
+          currentTool: null,
+          revision: event.revision,
+        },
+      };
+    }
+
+    case "pull_request_opened": {
+      const existing = prev[event.worker_id];
+      if (!existing) return prev;
+      return {
+        ...prev,
+        [event.worker_id]: {
+          ...existing,
+          pullRequest: {
+            url: event.url,
+            number: event.number,
+            remote_branch: event.remote_branch,
+            via: existing.pullRequest?.via ?? "gh",
+          },
+        },
+      };
     }
 
     case "worker_finished": {

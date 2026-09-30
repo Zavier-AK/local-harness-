@@ -598,6 +598,7 @@ pub async fn review(
             cwd: cwd.to_path_buf(),
             context_files: Vec::new(),
             extras: Default::default(),
+            resume_session_id: None,
         };
         match agents::run_worker(&spec, &sink).await {
             Ok(outcome) => {

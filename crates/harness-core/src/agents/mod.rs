@@ -31,6 +31,9 @@ pub struct WorkerSpec {
     pub context_files: Vec<String>,
     /// Skills and MCP servers. Only Claude workers can use them today.
     pub extras: crate::extensions::WorkerExtras,
+    /// A Claude conversation to carry on instead of starting one: another pass at work
+    /// the person sent back. `task` is then only the new message.
+    pub resume_session_id: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -119,6 +122,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             context_files: files.iter().map(|s| s.to_string()).collect(),
             extras: Default::default(),
+            resume_session_id: None,
         }
     }
 

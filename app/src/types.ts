@@ -33,6 +33,8 @@ export type HarnessEvent =
   | { type: "worker_status_changed"; worker_id: string; status: WorkerStatus }
   | { type: "worker_finished"; worker_id: string; summary: string; usage: Usage; diff: DiffStat | null; is_error: boolean }
   | { type: "merge_requested"; worker_id: string; branch: string; diff: DiffStat }
+  | { type: "worker_revising"; worker_id: string; revision: number; feedback: string }
+  | { type: "pull_request_opened"; worker_id: string; url: string; number: number | null; remote_branch: string }
   | { type: "delegation_requested"; worker_id: string; role: string; task: string }
   | { type: "delegation_approved"; worker_id: string }
   | { type: "delegation_declined"; worker_id: string; reason: string }
@@ -169,6 +171,55 @@ export type Worker = {
   task?: string;
   /** Set once its merge landed, so it can be undone. */
   landed?: { commit: string; automatic: boolean } | null;
+  /** How many times it was sent back for another pass. */
+  revision?: number;
+  /** The pull request opened from its branch. */
+  pullRequest?: PullRequest | null;
+};
+
+/** A comment on one line of a worker's diff. Mirrors `revise::ReviewComment`. */
+export type ReviewComment = {
+  file: string;
+  line: number | null;
+  removed: boolean;
+  excerpt: string | null;
+  text: string;
+};
+
+/** Mirrors `publish::PrDraft`. */
+export type PrDraft = {
+  title: string;
+  body: string;
+  remote_branch: string;
+  base: string;
+  draft: boolean;
+};
+
+export type GhState = "missing" | "signed_out" | "ready";
+
+/** Mirrors `publish::PrPlan`. */
+export type PrPlan = {
+  suggested: PrDraft;
+  remote: { name: string; url: string; github: { owner: string; repo: string } | null } | null;
+  gh: GhState;
+};
+
+/** Mirrors `publish::PullRequest`. */
+export type PullRequest = {
+  url: string;
+  number: number | null;
+  remote_branch: string;
+  via: "gh" | "browser" | "pushed_only";
+};
+
+/** Mirrors `publish::PrStatus`. */
+export type PrStatus = {
+  state: string;
+  draft: boolean;
+  passed: number;
+  failed: number;
+  pending: number;
+  failing: string[];
 };
 
 /** How much runs without the person. Mirrors `Autonomy` in the engine. */

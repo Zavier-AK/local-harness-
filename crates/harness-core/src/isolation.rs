@@ -522,6 +522,60 @@ impl Workspaces {
         })
     }
 
+    /// A worktree back on a finished worker's own branch, at the path it first had, so the
+    /// worker can make another pass: its commits land on the same branch, and a Claude
+    /// worker can resume its conversation (which is keyed by that path).
+    pub async fn reopen(&self, worker_id: &str, branch: &str) -> Result<Workspace> {
+        harness_branch(branch)?;
+        if worker_id.contains('/') || worker_id.contains("..") || worker_id.is_empty() {
+            bail!("refusing to reopen `{worker_id}`: not a worker id");
+        }
+        let path = self.project_root.join(WORKTREE_DIR).join(worker_id);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        {
+            let _guard = self.git_lock.lock().await;
+            let _file_lock = lock_worktree_admin(&self.project_root).await?;
+            if path.exists() {
+                let _ = git(
+                    &self.project_root,
+                    &["worktree", "remove", "--force", &path.to_string_lossy()],
+                )
+                .await;
+                let _ = tokio::fs::remove_dir_all(&path).await;
+            }
+            let _ = git(&self.project_root, &["worktree", "prune"]).await;
+            git(
+                &self.project_root,
+                &["worktree", "add", &path.to_string_lossy(), branch],
+            )
+            .await
+            .with_context(|| format!("checking out {branch} for another pass"))?;
+        }
+
+        if let Err(error) = self.bootstrap(&path).await {
+            let _guard = self.git_lock.lock().await;
+            let _file_lock = lock_worktree_admin(&self.project_root).await;
+            let _ = git(
+                &self.project_root,
+                &["worktree", "remove", "--force", &path.to_string_lossy()],
+            )
+            .await;
+            return Err(error);
+        }
+
+        Ok(Workspace {
+            cwd: path,
+            isolation: Isolation::Worktree,
+            branch: Some(branch.to_string()),
+            project_root: self.project_root.clone(),
+            _shared_guard: None,
+            git_lock: Arc::clone(&self.git_lock),
+        })
+    }
+
     /// The unified diff a branch carries, for review before it is landed.
     ///
     /// Computed from the branch rather than the worktree, because the worktree is torn
@@ -700,6 +754,52 @@ mod tests {
         let (dir, workspaces) = scratch_repo().await;
         let workspaces = Workspaces::with_setup(workspaces.project_root().to_path_buf(), setup);
         (dir, workspaces)
+    }
+
+    #[tokio::test]
+    async fn a_finished_branch_can_be_reopened_for_another_pass() {
+        let (dir, workspaces) = scratch_repo().await;
+        let first = workspaces
+            .prepare("w-again", Isolation::Worktree)
+            .await
+            .unwrap();
+        tokio::fs::write(first.cwd.join("a.txt"), "one\n")
+            .await
+            .unwrap();
+        first.commit("first pass").await.unwrap();
+        let path = first.cwd.clone();
+        first.release().await.unwrap();
+        assert!(!path.exists());
+
+        let again = workspaces
+            .reopen("w-again", "harness/w-again")
+            .await
+            .unwrap();
+        assert_eq!(
+            again.cwd, path,
+            "same path, so a session keyed by it resumes"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(again.cwd.join("a.txt"))
+                .await
+                .unwrap(),
+            "one\n"
+        );
+        tokio::fs::write(again.cwd.join("b.txt"), "two\n")
+            .await
+            .unwrap();
+        // Only the new pass counts as this workspace's diff.
+        assert_eq!(again.diff().await.unwrap().files, vec!["b.txt".to_string()]);
+        again.commit("second pass").await.unwrap();
+        again.release().await.unwrap();
+
+        // Both passes are on the branch; the checkout is untouched.
+        let all = workspaces.branch_diffstat("harness/w-again").await.unwrap();
+        assert_eq!(all.files, vec!["a.txt".to_string(), "b.txt".to_string()]);
+        assert!(!dir.path().join("a.txt").exists());
+
+        assert!(workspaces.reopen("../x", "harness/w-again").await.is_err());
+        assert!(workspaces.reopen("w-x", "main").await.is_err());
     }
 
     #[tokio::test]
