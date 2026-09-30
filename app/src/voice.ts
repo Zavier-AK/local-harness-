@@ -1,30 +1,42 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Heard, QuotaReport, Spoken, VoiceAction } from "./types";
+import type { Heard, Pane, QuotaReport, Spoken, VoiceAction } from "./types";
 
 /**
  * What voice does in the main window. Every harness action runs through the same
  * handler as its button, so voice cannot do anything a click could not.
  */
+/**
+ * What the main window does for voice. Each may return a line saying what happened, and
+ * throws if it couldn't; the voice agent hears either.
+ */
+type Done = void | string | Promise<void | string>;
 export type VoiceHandlers = {
-  navigate: (pane: "chat" | "plan" | "night" | "preview" | "tools" | "settings") => void;
-  switchProject: (root: string) => void;
-  openWorker: (id: string) => void;
-  askHead: (text: string) => void;
-  stopTurn: () => void;
-  stopWorker: (id: string) => void;
-  resolveMerge: (id: string, approve: boolean) => void;
-  undoMerge: (id: string) => void;
-  decide: (id: string, approve: boolean, reason?: string) => void;
-  setAutonomy: (level: "ask" | "review" | "land_safe" | "land_most") => void;
-  runPlan: () => void;
-  discardPlan: () => void;
-  planFeedback: (note: string) => void;
-  stopNight: () => void;
-  proposeNight: () => void;
-  nightSetup: (goal: string | null) => void;
+  navigate: (pane: Pane) => Done;
+  switchProject: (root: string) => Done;
+  openWorker: (id: string) => Done;
+  askHead: (text: string) => Done;
+  stopTurn: () => Done;
+  stopWorker: (id: string) => Done;
+  resolveMerge: (id: string, approve: boolean) => Done;
+  undoMerge: (id: string) => Done;
+  decide: (id: string, approve: boolean, reason?: string) => Done;
+  setAutonomy: (level: "ask" | "review" | "land_safe" | "land_most") => Done;
+  runPlan: () => Done;
+  discardPlan: () => Done;
+  planFeedback: (note: string) => Done;
+  stopNight: () => Done;
+  proposeNight: () => Done;
+  nightSetup: (goal: string | null) => Done;
+  /** Open a project by its folder, which is ready (it has a fleet). */
+  openProject: (root: string) => Done;
+  closeProject: (root: string | null) => Done;
+  /** Send the coding agent a message; `null` sends what's in the chat box. */
+  sendChat: (text: string | null) => Done;
+  /** Show a local address in the preview; `null` reloads it. */
+  preview: (url: string | null) => Done;
 };
 
-export function dispatch(action: VoiceAction, on: VoiceHandlers): void {
+export async function dispatch(action: VoiceAction, on: VoiceHandlers): Promise<void | string> {
   switch (action.action) {
     case "navigate":
       return on.navigate(action.pane);
@@ -62,8 +74,16 @@ export function dispatch(action: VoiceAction, on: VoiceHandlers): void {
       return on.proposeNight();
     case "night_setup":
       return on.nightSetup(action.goal);
-    // Status is answered in words, computer actions run in the shell, and yes/no
-    // answers are settled there too: none of them reach this window.
+    case "open_project":
+      return on.openProject(action.path);
+    case "close_project":
+      return on.closeProject(action.project);
+    case "send_chat":
+      return on.sendChat(action.text);
+    case "preview":
+      return on.preview(action.url);
+    // Status is answered in words, computer actions and the rest of the harness run in
+    // the shell, and yes/no answers are settled there too: none of them reach this window.
     default:
       return;
   }

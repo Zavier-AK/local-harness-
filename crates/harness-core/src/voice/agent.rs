@@ -32,7 +32,10 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use super::browser::{BrowserClient, BrowserTools, BROWSE_BRIEF};
 use super::everyday::{Control, Player, Site, SystemControl, When};
 use super::matcher::{find_app, normalize};
-use super::{finalize, spoken_status, Outcome, Pane, Snapshot, StatusTopic, VoiceAction};
+use super::{
+    finalize, spoken_status, ExtensionChange, ExtensionKind, Outcome, Pane, Snapshot, StatusTopic,
+    VoiceAction,
+};
 use crate::agents::claude::ClaudeSession;
 use crate::autonomy::Autonomy;
 use crate::event::HarnessEvent;
@@ -67,13 +70,18 @@ pub trait Hands: Send + Sync + 'static {
         &self,
         name: String,
     ) -> BoxFuture<'static, Result<Vec<(String, String)>, String>>;
+    /// A readout of part of the harness the snapshot doesn't carry: "skills", "mcp",
+    /// "roles", "settings" or "projects". Read-only.
+    fn inventory(&self, topic: String) -> BoxFuture<'static, String>;
 }
 
 pub const BRIEF: &str = "You are the voice assistant built into Harness, a coding app on the person's Mac. The person just spoke to you. Their words come from speech recognition and may contain small errors, so read them generously.
 
 Do what they asked with your tools, one step at a time, in the order they said it. Several requests in one sentence are several tool calls. Fill in sensible details yourself, such as the text of a note or the wording of a reminder, instead of asking.
 
-Requests about code, the project, bugs, features, tests or programming are for the coding agent, not you. For those, call put_in_chat_box with their request, cleaned up but in their words, and do nothing else for that part. Never try to do coding work yourself.
+Requests about code, the project, bugs, features, tests or programming are for the coding agent, not you. For those, call put_in_chat_box with their request, cleaned up but in their words, and do nothing else for that part. Only when they clearly say to send it now (“send it”, “tell Claude to … and send it”, “go ahead and ask Claude”) call send_to_coding_agent instead. Never try to do coding work yourself.
+
+You can run every part of Harness itself: open, create and close projects; show any view; change which model a role uses; open or reload the preview; turn skills and MCP servers on or off, add or remove them, import skills; change settings; set up or start the night shift; and everything about workers, merges and plans. When you need the exact name of a skill, MCP server, role or setting, call harness_info first rather than guessing.
 
 Some actions (merging, discarding or undoing a change, approving or declining a delegation, stopping work, running or dropping a plan, raising autonomy) wait for the person's yes. When a tool says it asked, stop there and tell them it is waiting for their yes.
 
@@ -186,8 +194,122 @@ pub struct TopicParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ViewParams {
-    /// "chat", "plan", "night", "preview", "tools" or "settings".
+    /// "chat", "plan", "night", "preview", "tools", "settings", "fleet" (which model
+    /// each role uses), "limits" (usage) or "projects" (open or add one).
     pub view: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PathParams {
+    /// A folder, e.g. "~/code/shop" or "/Users/z/site".
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NewProjectParams {
+    /// What to call it, e.g. "weather app".
+    pub name: String,
+    /// Where to make it, e.g. "~/code". Leave out for beside the current project, or
+    /// ~/Projects.
+    #[serde(default)]
+    pub parent: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MaybeProjectParams {
+    /// The project's name; leave out for the one in front.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SendParams {
+    /// The message. Leave out to send what's already in the chat box.
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RoleModelParams {
+    /// The role, e.g. "builder".
+    pub role: String,
+    /// The model, e.g. "opus", "sonnet", "haiku", or a local model's name.
+    pub model: String,
+    /// The backend: "claude", "codex" or "openai_compat". Leave out to keep it.
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PreviewParams {
+    /// A local address, e.g. "localhost:3000". Leave out to reload.
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionParams {
+    /// Its exact name, from harness_info.
+    pub name: String,
+    /// "enable", "disable" or "remove".
+    pub change: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RepoParams {
+    /// A git repository URL.
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NewSkillParams {
+    /// A short name, e.g. "release-notes".
+    pub name: String,
+    /// One sentence on when to use it.
+    pub description: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct McpServerParams {
+    pub name: String,
+    /// The program to run, e.g. "npx".
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Or the server's URL.
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SettingParams {
+    /// The setting's key, from harness_info("settings").
+    pub key: String,
+    /// The new value, e.g. "on", "off", "opus", "1.1", "#ff9ebb".
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct StartNightParams {
+    /// What to improve, in plain words.
+    pub goal: String,
+    /// A shell command that prints the score, e.g. "npm run bench".
+    pub metric: String,
+    /// Whether a higher score is better.
+    pub higher_is_better: bool,
+    /// A command that must pass for a change to be kept, e.g. "npm test".
+    #[serde(default)]
+    pub guard: Option<String>,
+    /// The role that makes the changes. Leave out for the default.
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InfoParams {
+    /// "skills", "mcp", "roles", "settings" or "projects".
+    pub topic: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -331,6 +453,20 @@ impl VoiceTools {
                 }
             }
             _ => "Nothing to do.".into(),
+        }
+    }
+
+    async fn extension(&self, kind: ExtensionKind, p: ExtensionParams) -> String {
+        match extension_change(&p.change) {
+            Some(change) => {
+                self.run(VoiceAction::Extension {
+                    kind,
+                    name: p.name,
+                    change,
+                })
+                .await
+            }
+            None => "The change is enable, disable or remove.".into(),
         }
     }
 
@@ -560,7 +696,7 @@ impl VoiceTools {
 
     #[tool(
         name = "show_in_app",
-        description = "Show a part of the coding app: chat, plan, night, preview, tools or settings."
+        description = "Show a part of the coding app: chat, plan, night, preview, tools, settings, fleet, limits or projects."
     )]
     async fn show_in_app(&self, Parameters(p): Parameters<ViewParams>) -> String {
         match Pane::parse(&p.view.to_lowercase()) {
@@ -761,6 +897,166 @@ impl VoiceTools {
     }
 
     #[tool(
+        name = "harness_info",
+        description = "Look up part of Harness by name: its skills, MCP servers, roles and their models, settings, or open projects."
+    )]
+    async fn harness_info(&self, Parameters(p): Parameters<InfoParams>) -> String {
+        self.hands.inventory(p.topic.to_lowercase()).await
+    }
+
+    #[tool(
+        name = "open_project",
+        description = "Open a folder as a project in Harness (or switch to it if it's open). A folder without a fleet gets the default one."
+    )]
+    async fn open_project(&self, Parameters(p): Parameters<PathParams>) -> String {
+        self.run(VoiceAction::OpenProject { path: p.path }).await
+    }
+
+    #[tool(
+        name = "new_project",
+        description = "Make a new project: a new folder with a git repository and the default fleet, opened in Harness."
+    )]
+    async fn new_project(&self, Parameters(p): Parameters<NewProjectParams>) -> String {
+        self.run(VoiceAction::NewProject {
+            name: p.name,
+            parent: p.parent,
+        })
+        .await
+    }
+
+    #[tool(
+        name = "close_project",
+        description = "Close a project in Harness, stopping its coding agent and workers. Asks the person first."
+    )]
+    async fn close_project(&self, Parameters(p): Parameters<MaybeProjectParams>) -> String {
+        let project = match p.name {
+            None => None,
+            Some(name) => {
+                let snapshot = self.hands.snapshot().await;
+                let wanted = normalize(&name);
+                match snapshot
+                    .projects
+                    .iter()
+                    .find(|project| normalize(&project.name) == wanted)
+                {
+                    Some(project) => Some(project.root.clone()),
+                    None => return format!("No open project is called \"{name}\"."),
+                }
+            }
+        };
+        self.run(VoiceAction::CloseProject { project }).await
+    }
+
+    #[tool(
+        name = "send_to_coding_agent",
+        description = "Send the coding agent a message now. Only when the person clearly says to send it; otherwise use put_in_chat_box. Leave text out to send what's in the chat box."
+    )]
+    async fn send_to_coding_agent(&self, Parameters(p): Parameters<SendParams>) -> String {
+        self.run(VoiceAction::SendChat { text: p.text }).await
+    }
+
+    #[tool(
+        name = "set_role_model",
+        description = "Put a role (builder, tester, …) on another model, and optionally another backend."
+    )]
+    async fn set_role_model(&self, Parameters(p): Parameters<RoleModelParams>) -> String {
+        self.run(VoiceAction::SetRoleModel {
+            role: p.role,
+            model: p.model,
+            provider: p.provider,
+        })
+        .await
+    }
+
+    #[tool(
+        name = "preview",
+        description = "Show a local web address (localhost) in Harness's preview, or reload it."
+    )]
+    async fn preview(&self, Parameters(p): Parameters<PreviewParams>) -> String {
+        self.run(VoiceAction::Preview { url: p.url }).await
+    }
+
+    #[tool(
+        name = "skill",
+        description = "Turn a skill on or off, or remove it (asks first)."
+    )]
+    async fn skill(&self, Parameters(p): Parameters<ExtensionParams>) -> String {
+        self.extension(ExtensionKind::Skill, p).await
+    }
+
+    #[tool(
+        name = "mcp_server",
+        description = "Turn an MCP server on or off, or remove it (asks first)."
+    )]
+    async fn mcp_server(&self, Parameters(p): Parameters<ExtensionParams>) -> String {
+        self.extension(ExtensionKind::Mcp, p).await
+    }
+
+    #[tool(
+        name = "import_skills",
+        description = "Import skills from a git repository into Harness. Asks first."
+    )]
+    async fn import_skills(&self, Parameters(p): Parameters<RepoParams>) -> String {
+        self.run(VoiceAction::ImportSkills { url: p.url }).await
+    }
+
+    #[tool(
+        name = "new_skill",
+        description = "Make a new, empty skill for the person to fill in."
+    )]
+    async fn new_skill(&self, Parameters(p): Parameters<NewSkillParams>) -> String {
+        self.run(VoiceAction::NewSkill {
+            name: p.name,
+            description: p.description,
+        })
+        .await
+    }
+
+    #[tool(
+        name = "add_mcp_server",
+        description = "Add an MCP server, by the command that runs it or its URL. Asks first."
+    )]
+    async fn add_mcp_server(&self, Parameters(p): Parameters<McpServerParams>) -> String {
+        if p.command.is_none() && p.url.is_none() {
+            return "Give the command that runs it, or its URL.".into();
+        }
+        self.run(VoiceAction::AddMcpServer {
+            name: p.name,
+            command: p.command,
+            args: p.args,
+            url: p.url,
+        })
+        .await
+    }
+
+    #[tool(
+        name = "change_setting",
+        description = "Change one Harness setting by key (harness_info settings lists the keys and current values)."
+    )]
+    async fn change_setting(&self, Parameters(p): Parameters<SettingParams>) -> String {
+        self.run(VoiceAction::SetSetting {
+            key: p.key.trim().to_lowercase(),
+            value: p.value,
+        })
+        .await
+    }
+
+    #[tool(
+        name = "start_night_shift",
+        description = "Start the night shift now: it tries changes toward a goal while the person is away, keeping those that improve the score. Asks first. To only open its setup, use night_shift with setup."
+    )]
+    async fn start_night_shift(&self, Parameters(p): Parameters<StartNightParams>) -> String {
+        self.run(VoiceAction::StartNight {
+            goal: p.goal,
+            metric: p.metric,
+            higher_is_better: p.higher_is_better,
+            guard: p.guard,
+            role: p.role,
+        })
+        .await
+    }
+
+    #[tool(
         name = "put_in_chat_box",
         description = "For anything about code, the project or programming: type the request into the coding agent's chat box for the person to review and send. Never sent automatically."
     )]
@@ -768,6 +1064,15 @@ impl VoiceTools {
         self.hands.step("Put in the chat box".into());
         self.hands.chat_box(p.text).await;
         "In the chat box, waiting for the person to send it.".into()
+    }
+}
+
+fn extension_change(word: &str) -> Option<ExtensionChange> {
+    match word.trim().to_lowercase().as_str() {
+        "enable" | "on" | "turn on" => Some(ExtensionChange::Enable),
+        "disable" | "off" | "turn off" => Some(ExtensionChange::Disable),
+        "remove" | "delete" | "uninstall" => Some(ExtensionChange::Remove),
+        _ => None,
     }
 }
 
@@ -798,6 +1103,20 @@ pub fn tool_names() -> Vec<String> {
         "stop_browsing",
         "draft_email",
         "find_email_address",
+        "harness_info",
+        "open_project",
+        "new_project",
+        "close_project",
+        "send_to_coding_agent",
+        "set_role_model",
+        "preview",
+        "skill",
+        "mcp_server",
+        "import_skills",
+        "new_skill",
+        "add_mcp_server",
+        "change_setting",
+        "start_night_shift",
         "put_in_chat_box",
     ]
     .iter()
@@ -1084,6 +1403,9 @@ mod tests {
             self.chat.lock().unwrap().push(format!("browse: {task}"));
             Box::pin(async { Ok("Started.".into()) })
         }
+        fn inventory(&self, topic: String) -> BoxFuture<'static, String> {
+            Box::pin(async move { format!("({topic})") })
+        }
         fn lookup_email(
             &self,
             name: String,
@@ -1262,6 +1584,6 @@ mod tests {
         assert!(line.contains("project shop (also open: blog)"), "{line}");
         assert!(line.contains("#1 builder (change waiting)"), "{line}");
         assert!(line.contains("#3 reviewer (waiting to start)"), "{line}");
-        assert_eq!(tool_names().len(), 25);
+        assert_eq!(tool_names().len(), 39);
     }
 }

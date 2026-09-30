@@ -19,6 +19,8 @@ type Props = {
   obscured: boolean;
   projectRoot: string;
   workerRoots: string[];
+  /** Voice asked to show an address, or (`url: null`) to reload. */
+  request?: { url: string | null; at: number } | null;
 };
 
 export default function PreviewPanel({
@@ -26,6 +28,7 @@ export default function PreviewPanel({
   obscured,
   projectRoot,
   workerRoots,
+  request,
 }: Props) {
   const viewport = useRef<HTMLDivElement>(null);
   const created = useRef(false);
@@ -177,6 +180,17 @@ export default function PreviewPanel({
       setError(String(cause));
     }
   }
+
+  useEffect(() => {
+    if (!request) return;
+    if (request.url) {
+      const url = /^https?:\/\//.test(request.url) ? request.url : `http://${request.url}`;
+      // Once the pane is laid out, so the preview has somewhere to go.
+      requestAnimationFrame(() => void navigate(url));
+    } else {
+      void reload();
+    }
+  }, [request?.at]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function submit(event: FormEvent) {
     event.preventDefault();

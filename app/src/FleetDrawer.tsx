@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import FleetSetup from "./FleetSetup";
 import type { FleetInspection, Role } from "./types";
 
@@ -22,11 +23,18 @@ export default function FleetDrawer({ projectRoot, onClose, onRolesChanged }: Pr
 
   useEffect(() => {
     let cancelled = false;
-    invoke<FleetInspection>("inspect_fleet", { projectRoot, rolesPath: null })
-      .then((found) => !cancelled && setInspection(found))
-      .catch((err) => !cancelled && setError(String(err)));
+    const load = () =>
+      invoke<FleetInspection>("inspect_fleet", { projectRoot, rolesPath: null })
+        .then((found) => !cancelled && setInspection(found))
+        .catch((err) => !cancelled && setError(String(err)));
+    void load();
+    // A role moved by voice while this is open.
+    const off = listen<string>("harness://changed", ({ payload }) => {
+      if (payload === "roles") void load();
+    });
     return () => {
       cancelled = true;
+      void off.then((f) => f());
     };
   }, [projectRoot]);
 

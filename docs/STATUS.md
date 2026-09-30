@@ -76,7 +76,7 @@ output can merge anything.
 
 ### Working and verified
 
-- **271 engine tests** (292 including the separate Tauri shell workspace), no network or
+- **275 engine tests** (297 including the separate Tauri shell workspace), no network or
   CLI login required.
 - **Orchestrator** — live end-to-end against the real `claude` CLI: it called `list_roles`,
   then `delegate`, a worker wrote into its worktree, and it correctly reported the work as
@@ -173,6 +173,28 @@ output can merge anything.
     **Not verified here:** real sites (Amazon, Gmail), Google sign-in inside the
     automated window (flags that usually allow it are set), Contacts lookup, and the app's
     Stop button on a real run.
+  - **All of Harness by voice.** Asked to make a new project, the voice agent said it
+    couldn't: it had tools only for workers, merges, plans, the night shift and the
+    Mac. Now it covers every part of the app with a button:
+    - projects (new, open, close), sending to Claude when told, which model each role
+      uses, the preview, skills and MCP servers (on/off, add, remove, import), every
+      setting by key (`voice::control`), and starting the night shift;
+    - a read-only `harness_info` tool lists skills, servers, roles, settings and
+      projects, so it doesn't guess names;
+    - the main window now reports how each action went (`voice_ran`), so failures are
+      said rather than assumed done;
+    - closing a project, removing a skill or server, importing skills, adding a server
+      and starting the night shift ask first.
+
+    Checked here:
+    - real Haiku picked the right tool for nine requests (new project, role model, two
+      settings at once, sending only when told, closing with a yes, preview, fleet);
+    - the window's handlers ran headlessly against a stubbed bridge (open from the start
+      screen, fleet, projects, send the box, send text, empty box, preview, close);
+    - settings-by-key and project-folder naming have unit tests.
+
+    **Not verified here:** making a real project on a Mac (`git init`, roles) and the
+    Tools/Settings views refreshing live.
   - **Hands-free.** A tap of the hotkey (under 0.35 s) keeps listening after it's let
     go; a hold is push-to-talk as before. It ends on another tap, "stop listening" or
     "that's all", or 30 s with nothing said. Replies are read aloud while listening goes
@@ -243,7 +265,7 @@ output can merge anything.
 
 ### Known gaps
 
-- **No CI.** The repository has no workflows, so the 271 tests run only by hand. This
+- **No CI.** The repository has no workflows, so the 275 tests run only by hand. This
   matters more than usual here: both CLIs' JSON output is parsed leniently against
   fixtures rather than a stable contract, so upstream schema drift would go unnoticed
   until a live run misbehaved. Deferred by choice.

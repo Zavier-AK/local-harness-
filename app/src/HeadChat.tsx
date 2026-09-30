@@ -12,6 +12,9 @@ type Props = {
   onUndo: (workerId: string) => void;
   /** Words said for the head agent: added to the box to edit and send, never sent. */
   dictated?: { text: string; at: number } | null;
+  /** Changes when voice says "send it": the draft is handed to `onDraftForVoice`. */
+  sendDraft?: number;
+  onDraftForVoice?: (draft: string | null) => void;
 };
 
 /** Tool calls into the harness read as delegation, not as plumbing. */
@@ -35,7 +38,17 @@ function toolLabel(name: string): string {
   }
 }
 
-export default function HeadChat({ items, busy, onSend, onStop, onSelectWorker, onUndo, dictated }: Props) {
+export default function HeadChat({
+  items,
+  busy,
+  onSend,
+  onStop,
+  onSelectWorker,
+  onUndo,
+  dictated,
+  sendDraft,
+  onDraftForVoice,
+}: Props) {
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -51,6 +64,14 @@ export default function HeadChat({ items, busy, onSend, onStop, onSelectWorker, 
       input.setSelectionRange(input.value.length, input.value.length);
     });
   }, [dictated?.at]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // "Send it": hand the draft over to be sent, and clear the box.
+  useEffect(() => {
+    if (!sendDraft) return;
+    const text = draft.trim();
+    onDraftForVoice?.(text || null);
+    if (text) setDraft("");
+  }, [sendDraft]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });

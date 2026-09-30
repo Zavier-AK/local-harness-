@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { AppSettings, VoiceSettings } from "./types";
 import VoiceSettingsPanel from "./VoiceSettings";
 
@@ -20,12 +21,19 @@ export default function SettingsView({ onSaved, onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    invoke<AppSettings>("get_settings")
-      .then((loaded) => {
-        setSettings(loaded);
-        setSaved(loaded);
-      })
-      .catch((err) => setError(String(err)));
+    const load = () =>
+      invoke<AppSettings>("get_settings")
+        .then((loaded) => {
+          setSettings(loaded);
+          setSaved(loaded);
+        })
+        .catch((err) => setError(String(err)));
+    void load();
+    // Changed by voice while this is open: show what's saved now.
+    const off = listen<string>("harness://changed", ({ payload }) => {
+      if (payload === "settings") void load();
+    });
+    return () => void off.then((f) => f());
   }, []);
 
   if (!settings) {

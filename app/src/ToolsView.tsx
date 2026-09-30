@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { ImportReport, McpServerConfig, McpStatus, RoleTools, SkillInfo } from "./types";
 
@@ -42,6 +43,11 @@ export default function ToolsView({ projectRoot, mcpStatus, onClose }: Props) {
 
   useEffect(() => {
     void load();
+    // Changed by voice while this is open.
+    const off = listen<string>("harness://changed", ({ payload }) => {
+      if (payload === "tools" || payload === "roles") void load();
+    });
+    return () => void off.then((f) => f());
   }, [load]);
 
   /** Run an action, surfacing its failure rather than swallowing it. */
