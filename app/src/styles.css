@@ -140,6 +140,10 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); ou
   background: var(--panel);
 }
 .title { font-weight: 650; }
+/* Where the window is dragged from when there is no title bar. */
+.window-drag { position: fixed; top: 0; left: 0; right: 0; height: 32px; z-index: 5; }
+.add-project .window-drag { display: none; } /* the start screen shown as a dialog */
+.titlebar, .titlebar .title, .titlebar .mono { cursor: default; user-select: none; -webkit-user-select: none; }
 .titlebar .mono { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .panes { flex: 1; display: grid; grid-template-columns: 200px 1fr 340px; min-height: 0; }
