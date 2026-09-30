@@ -645,9 +645,16 @@ export default function App() {
 
   return (
     <div className="app">
-      <header className="titlebar">
-        <span className="title">Harness</span>
-        <span className="muted mono">{session.project_root}</span>
+      {/* The window has no system title bar, so this is where it's dragged from (and
+          double-clicked to zoom). Only elements marked themselves start a drag; the
+          buttons in it stay buttons. */}
+      <header className="titlebar" data-tauri-drag-region>
+        <span className="title" data-tauri-drag-region>
+          Harness
+        </span>
+        <span className="muted mono" data-tauri-drag-region>
+          {session.project_root}
+        </span>
         <AutonomyDial level={autonomy} onChange={(level) => void changeAutonomy(level)} />
         <button
           className={`mic ${voicePhase} ${voiceOn ? "" : "off"}`}

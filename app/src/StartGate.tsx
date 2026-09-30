@@ -93,6 +93,8 @@ export default function StartGate({ onStarted }: Props) {
 
   return (
     <main className="gate">
+      {/* No title bar on this screen either: the strip along the top moves the window. */}
+      <div className="window-drag" data-tauri-drag-region />
       <div className="gate-card">
         <h1>Harness</h1>
         <p className="muted">
