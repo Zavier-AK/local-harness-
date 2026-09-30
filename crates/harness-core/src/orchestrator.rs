@@ -6,16 +6,18 @@
 //! process alive across every turn of a conversation, so that cost is paid once per
 //! session and subsequent turns read from cache instead.
 //!
-//! The orchestrator is also deliberately kept away from editing. It gets `Read`, `Grep`,
-//! `Glob` and the delegation tools, and nothing else: a smaller tool set is a smaller
-//! system prompt is a lower floor, and the workers are the ones with worktrees.
+//! The orchestrator is also deliberately kept away from editing. It is approved for `Read`,
+//! `Grep`, `Glob` and the delegation tools, and nothing else: a smaller tool set is a
+//! smaller system prompt is a lower floor, and the workers are the ones with worktrees.
+//! Anything else it tries — a git command, a `.gitignore` — is put to the person in the
+//! chat, who can allow it once, always, or not at all.
 
 use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::agents::claude::ClaudeSession;
+use crate::agents::claude::{ClaudeSession, PermissionDecision};
 use crate::engine::Harness;
 use crate::event::HarnessEvent;
 use crate::mcp::{self, McpServer};
@@ -132,11 +134,18 @@ pub fn orchestrator_brief_with(roles: &[crate::engine::RoleInfo], native: &[Stri
          - The user decides how much runs without them. A delegation that comes back \
          `awaiting_approval` starts once they approve it, and you will be told how it \
          ends; do not wait or poll for it.\n\
+         - Your own tools are for reading. A shell command or file change you run \
+         yourself waits for the person to allow it in the chat, so keep those to small \
+         housekeeping they asked for (a git command, a `.gitignore`), say what you are \
+         about to do first, and delegate real work. If they say no, do not look for \
+         another way round it.\n\
+         - Workers need a repository with at least one commit. If the project has none, \
+         tell the person to use “Make the first commit” in Harness rather than delegating.\n\
          - Report back concisely: what you delegated, what came back, what needs a decision."
     )
 }
 
-/// The head agent's own role definition. Readonly by construction.
+/// The head agent's own role definition. Approved only to read and delegate.
 pub fn orchestrator_role(model: Option<String>, max_turns: Option<u32>) -> Role {
     let mut tools: Vec<String> = ORCHESTRATOR_TOOLS.iter().map(|s| s.to_string()).collect();
     tools.extend(McpServer::allowed_tool_names());
@@ -144,8 +153,9 @@ pub fn orchestrator_role(model: Option<String>, max_turns: Option<u32>) -> Role 
     Role {
         provider: Provider::Claude,
         model,
-        // The head agent proposes; workers dispose. It never needs write access.
-        isolation: Isolation::Readonly,
+        // The head agent proposes; workers dispose. It is not approved to write, and has
+        // no deny list either: a write it tries goes to the person, who says yes or no.
+        isolation: Isolation::None,
         tools,
         brief: None,
         permission_mode: None,
@@ -158,19 +168,16 @@ pub fn orchestrator_role(model: Option<String>, max_turns: Option<u32>) -> Role 
 
 /// The head agent's role when some roles are native subagents.
 ///
-/// Differs from [`orchestrator_role`] in two ways, both forced by how Claude Code applies
-/// permissions, and both verified against the real CLI:
+/// Differs from [`orchestrator_role`] by the `Agent` tool.
 ///
-/// * It is allowed the `Agent` tool.
-/// * It carries **no session-wide deny list.** `--disallowedTools` binds every subagent
-///   in the session too — a builder subagent was refused `Write` with "disabled for this
-///   session, in subagents as well as here". The head stays read-only another way: it is
-///   approved only these tools, and with nobody to answer a permission prompt, any write
-///   it attempts is refused (also verified). Each subagent carries its own permissions.
+/// Neither carries a session-wide deny list, and here that is forced: `--disallowedTools`
+/// binds every subagent in the session too — a builder subagent was refused `Write` with
+/// "disabled for this session, in subagents as well as here" (verified against the real
+/// CLI). The head stays read-only another way: it is approved only these tools, and any
+/// write it attempts waits for the person. Each subagent carries its own permissions.
 pub fn orchestrator_role_native(model: Option<String>, max_turns: Option<u32>) -> Role {
     let mut role = orchestrator_role(model, max_turns);
     role.tools.push("Agent".into());
-    role.isolation = Isolation::None;
     role
 }
 
@@ -179,6 +186,7 @@ pub struct Orchestrator {
     session: ClaudeSession,
     mcp: McpServer,
     harness: Arc<Harness>,
+    project_root: std::path::PathBuf,
     resumed_backend_session: bool,
 }
 
@@ -206,11 +214,13 @@ impl Orchestrator {
             Vec::new()
         };
 
-        let role = if native.is_empty() {
+        let mut role = if native.is_empty() {
             orchestrator_role(model, max_turns)
         } else {
             orchestrator_role_native(model, max_turns)
         };
+        // What the person has said it may always do here.
+        role.tools.extend(crate::permissions::load(project_root));
         // Skills reach the head agent and, through it, native subagents. The user's MCP
         // servers are connected but not approved for the head: it stays a planner, and a
         // role that should use one lists its tools.
@@ -242,6 +252,7 @@ impl Orchestrator {
             Some(&mcp.claude_mcp_config_with(&extras.mcp_servers)),
             Some(&brief),
             resume_session_id.as_deref(),
+            true,
             &extra_args,
         )
         .await?;
@@ -251,6 +262,7 @@ impl Orchestrator {
                 session,
                 mcp,
                 harness,
+                project_root: project_root.to_path_buf(),
                 resumed_backend_session: resume_session_id.is_some(),
             },
             events,
@@ -292,6 +304,25 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Requests from the head agent still waiting for the person.
+    pub fn pending_permissions(&self) -> Vec<String> {
+        self.session.pending_permissions()
+    }
+
+    /// The person's answer to a request from the head agent. "Always" is remembered for
+    /// the project, so the next session starts with it approved.
+    pub async fn answer_permission(
+        &mut self,
+        request_id: &str,
+        decision: PermissionDecision,
+    ) -> Result<()> {
+        let rules = self.session.answer_permission(request_id, decision).await?;
+        if !rules.is_empty() {
+            crate::permissions::remember(&self.project_root, &rules)?;
+        }
+        Ok(())
+    }
+
     pub async fn shutdown(self) -> Result<()> {
         self.session.shutdown().await?;
         self.mcp.shutdown().await;
@@ -330,13 +361,14 @@ mod tests {
     }
 
     #[test]
-    fn orchestrator_is_readonly_and_cannot_edit() {
+    fn orchestrator_is_not_approved_to_edit_but_can_be_asked() {
         let role = orchestrator_role(Some("opus".into()), Some(50));
-        assert_eq!(role.isolation, Isolation::Readonly);
-
         let tools = role.effective_tools();
-        assert!(!tools.iter().any(|t| t == "Edit" || t == "Write"));
-        assert!(role.denied_tools().contains(&"Edit".to_string()));
+        for tool in ["Edit", "Write", "Bash"] {
+            assert!(!tools.iter().any(|t| t == tool), "{tool} pre-approved");
+        }
+        // No deny list: a write goes to the person instead of being refused outright.
+        assert!(role.denied_tools().is_empty());
     }
 
     #[test]

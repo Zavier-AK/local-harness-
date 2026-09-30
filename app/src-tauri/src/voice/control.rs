@@ -325,22 +325,12 @@ pub async fn make_project(
     let path = projects::new_project_folder(name, parent, active, &home()?)
         .map_err(|e| format!("{e:#}"))?;
     std::fs::create_dir_all(&path).map_err(|e| format!("making {}: {e}", path.display()))?;
-    let git = tokio::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&path)
-        .output()
-        .await;
-    match git {
-        Ok(out) if out.status.success() => {}
-        Ok(out) => tracing::warn!(
-            "git init in {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ),
-        Err(e) => tracing::warn!("git init in {}: {e} — is git installed?", path.display()),
-    }
     let root = path.display().to_string();
     crate::write_default_roles(root.clone()).await?;
+    // With a first commit, so workers can start on it straight away.
+    if let Err(e) = crate::set_up_git(&path).await {
+        tracing::warn!("setting up git in {}: {e}", path.display());
+    }
     Ok(root)
 }
 

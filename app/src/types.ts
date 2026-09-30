@@ -49,6 +49,8 @@ export type HarnessEvent =
   | { type: "run_finished"; run_id: string; text: string; usage: Usage; cost_usd: number | null; is_error: boolean }
   | { type: "error"; run_id: string; message: string }
   | { type: "turn_interrupted"; run_id: string }
+  | { type: "permission_request"; run_id: string; request_id: string; tool: string; description: string; input: unknown; rules: string[] }
+  | { type: "permission_resolved"; run_id: string; request_id: string; allowed: boolean }
   | {
       type: "quota_report";
       run_id: string;
@@ -80,6 +82,8 @@ export type Role = {
 export type ProjectStatus = {
   exists: boolean;
   is_git_repo: boolean;
+  /** Workers branch from a commit, so a brand-new repository can't run them yet. */
+  has_commits: boolean;
   has_roles_file: boolean;
 };
 
@@ -221,7 +225,19 @@ export type ChatItem =
   | { kind: "tool"; name: string; toolUseId?: string; workerId?: string }
   | { kind: "notice"; text: string; tone: "info" | "warn" | "error" }
   /** A merge that landed, with the way back. */
-  | { kind: "landed"; workerId: string; text: string; undone: boolean };
+  | { kind: "landed"; workerId: string; text: string; undone: boolean }
+  /** Something the head agent asked to do, waiting for the person's yes or no. */
+  | {
+      kind: "permission";
+      requestId: string;
+      tool: string;
+      description: string;
+      detail: string | null;
+      rules: string[];
+      state: "waiting" | "sending" | "allowed" | "denied" | "lapsed";
+    };
+
+export type PermissionDecision = "allow" | "always" | "deny";
 
 export const totalInput = (u: Usage) =>
   u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens;

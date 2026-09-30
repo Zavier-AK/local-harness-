@@ -15,13 +15,13 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use super::claude_stream::{parse_line, ResultSummary};
+use super::claude_stream::{parse_line, PendingPermission, ResultSummary};
 use super::{compose_prompt, scrub_api_keys, EventSink, RunOutcome, WorkerSpec};
 use crate::event::HarnessEvent;
 use crate::roles::Role;
 
 /// Shared argument construction for workers and the orchestrator alike.
-fn base_args(role: &Role, streaming_input: bool) -> Vec<String> {
+fn base_args(role: &Role, streaming_input: bool, ask_host: bool) -> Vec<String> {
     let mut args = vec!["-p".to_string()];
 
     args.push("--output-format".into());
@@ -64,10 +64,18 @@ fn base_args(role: &Role, streaming_input: bool) -> Vec<String> {
         args.push(max_turns.to_string());
     }
 
-    // Nobody is at a terminal to answer a prompt; anything unresolved should be denied
-    // and reported rather than hanging the run.
-    args.push("--permission-prompts".into());
-    args.push("none".into());
+    if ask_host {
+        // A tool beyond the allow-list is asked about over stdio (`can_use_tool`), and
+        // the person answers in the app. Verified against the real CLI (2.1.285): allow,
+        // deny and "always" (applying the CLI's own rule suggestion) all work.
+        args.push("--permission-prompt-tool".into());
+        args.push("stdio".into());
+    } else {
+        // Nobody is at a terminal to answer a prompt; anything unresolved should be
+        // denied and reported rather than hanging the run.
+        args.push("--permission-prompts".into());
+        args.push("none".into());
+    }
 
     args
 }
@@ -77,8 +85,9 @@ fn session_args(
     mcp_config: Option<&str>,
     append_system_prompt: Option<&str>,
     resume_session_id: Option<&str>,
+    ask_host: bool,
 ) -> Vec<String> {
-    let mut args = base_args(role, true);
+    let mut args = base_args(role, true, ask_host);
 
     if let Some(session_id) = resume_session_id {
         args.push("--resume".into());
@@ -155,7 +164,7 @@ pub async fn run(spec: &WorkerSpec, sink: &EventSink) -> Result<RunOutcome> {
     // Extras go first: `--mcp-config` takes several values, and placed last it would
     // swallow the prompt as another config.
     let mut args = spec.extras.claude_args();
-    args.extend(base_args(&spec.role, false));
+    args.extend(base_args(&spec.role, false, false));
     args.push(compose_prompt(spec));
 
     let mut child = spawn(&spec.cwd, &args)?;
@@ -189,9 +198,27 @@ pub async fn run(spec: &WorkerSpec, sink: &EventSink) -> Result<RunOutcome> {
 ///
 /// The process stays up across turns, so the system prompt, tool definitions and CLAUDE.md
 /// are paid for once. Follow-up turns read that context from cache instead of rebuilding it.
+/// The person's answer to a permission request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionDecision {
+    /// This once.
+    Allow,
+    /// This, and the same again without asking.
+    Always,
+    Deny,
+}
+
+type Pending =
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, PendingPermission>>>;
+
 pub struct ClaudeSession {
     child: Child,
     stdin: ChildStdin,
+    /// Permission requests waiting for the person, by request id.
+    pending: Pending,
+    /// For telling the stream a request was answered.
+    events: tokio::sync::mpsc::UnboundedSender<HarnessEvent>,
     /// Correlates control requests with their responses.
     next_request: u64,
     pub run_id: String,
@@ -202,7 +229,10 @@ impl ClaudeSession {
     /// Start the orchestrator.
     ///
     /// `mcp_config` is the JSON handed to `--mcp-config`; it is how the delegation tools
-    /// reach the head agent. `append_system_prompt` carries the orchestrator brief.
+    /// reach the head agent. `append_system_prompt` carries the orchestrator brief. With
+    /// `ask_host`, a tool the role isn't approved for is put to the person as a
+    /// [`HarnessEvent::PermissionRequest`] instead of being refused.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         run_id: impl Into<String>,
         cwd: &Path,
@@ -210,10 +240,17 @@ impl ClaudeSession {
         mcp_config: Option<&str>,
         append_system_prompt: Option<&str>,
         resume_session_id: Option<&str>,
+        ask_host: bool,
         extra_args: &[String],
     ) -> Result<(Self, UnboundedReceiver<HarnessEvent>)> {
         let run_id = run_id.into();
-        let mut args = session_args(role, mcp_config, append_system_prompt, resume_session_id);
+        let mut args = session_args(
+            role,
+            mcp_config,
+            append_system_prompt,
+            resume_session_id,
+            ask_host,
+        );
         args.extend(extra_args.iter().cloned());
 
         let mut child = spawn(cwd, &args)?;
@@ -224,12 +261,21 @@ impl ClaudeSession {
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let pump_run_id = run_id.clone();
+        let pending: Pending = Default::default();
+        let pump_pending = pending.clone();
+        let events = tx.clone();
 
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 match parse_line(&pump_run_id, &line) {
                     Ok(parsed) => {
+                        if let Some(ask) = parsed.permission {
+                            pump_pending
+                                .lock()
+                                .expect("not poisoned")
+                                .insert(ask.request_id.clone(), ask);
+                        }
                         for event in parsed.events {
                             if tx.send(event).is_err() {
                                 return; // receiver dropped; session is being torn down
@@ -245,6 +291,8 @@ impl ClaudeSession {
             Self {
                 child,
                 stdin,
+                pending,
+                events,
                 next_request: 0,
                 run_id,
                 backend_session_id: None,
@@ -262,6 +310,19 @@ impl ClaudeSession {
     /// `error_during_execution`, and the same process answers the next turn normally —
     /// so a stop costs neither the conversation nor its cached context.
     pub async fn interrupt(&mut self) -> Result<()> {
+        // A turn waiting on the person would otherwise sit there: say no first.
+        let waiting: Vec<String> = self
+            .pending
+            .lock()
+            .expect("not poisoned")
+            .keys()
+            .cloned()
+            .collect();
+        for request_id in waiting {
+            let _ = self
+                .answer_permission(&request_id, PermissionDecision::Deny)
+                .await;
+        }
         self.next_request += 1;
         let message = serde_json::json!({
             "type": "control_request",
@@ -294,6 +355,86 @@ impl ClaudeSession {
             .context("writing to the orchestrator's stdin — has the process exited?")?;
         self.stdin.flush().await?;
         Ok(())
+    }
+
+    /// Permission requests still waiting for the person.
+    pub fn pending_permissions(&self) -> Vec<String> {
+        self.pending
+            .lock()
+            .expect("not poisoned")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Answer a permission request. Returns the rules "always" added (as `--allowedTools`
+    /// takes them), for the caller to remember across restarts.
+    pub async fn answer_permission(
+        &mut self,
+        request_id: &str,
+        decision: PermissionDecision,
+    ) -> Result<Vec<String>> {
+        let ask = self
+            .pending
+            .lock()
+            .expect("not poisoned")
+            .remove(request_id)
+            .context("that request was already answered, or has lapsed")?;
+        let (response, rules) = match decision {
+            PermissionDecision::Deny => (
+                serde_json::json!({
+                    "behavior": "deny",
+                    "message": "The person said no. Don't try another way round it; say what you needed and why."
+                }),
+                Vec::new(),
+            ),
+            PermissionDecision::Allow => (
+                serde_json::json!({ "behavior": "allow", "updatedInput": ask.input }),
+                Vec::new(),
+            ),
+            PermissionDecision::Always => {
+                // The CLI's own suggestions, kept for this session; the caller keeps them
+                // for the next.
+                let updated: Vec<serde_json::Value> = ask
+                    .suggestions
+                    .iter()
+                    .map(|s| {
+                        let mut s = s.clone();
+                        s["destination"] = serde_json::json!("session");
+                        s
+                    })
+                    .collect();
+                (
+                    serde_json::json!({
+                        "behavior": "allow",
+                        "updatedInput": ask.input,
+                        "updatedPermissions": updated,
+                    }),
+                    ask.rules.clone(),
+                )
+            }
+        };
+        let message = serde_json::json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": response,
+            },
+        });
+        let mut line = serde_json::to_string(&message)?;
+        line.push('\n');
+        self.stdin
+            .write_all(line.as_bytes())
+            .await
+            .context("answering a permission request — has the process exited?")?;
+        self.stdin.flush().await?;
+        let _ = self.events.send(HarnessEvent::PermissionResolved {
+            run_id: self.run_id.clone(),
+            request_id: request_id.to_string(),
+            allowed: decision != PermissionDecision::Deny,
+        });
+        Ok(rules)
     }
 
     /// Close stdin and wait for the process to drain.
@@ -332,7 +473,7 @@ mod tests {
 
     #[test]
     fn worker_args_carry_model_tools_and_rails() {
-        let args = base_args(&role(Isolation::Worktree, &["Read", "Edit"]), false);
+        let args = base_args(&role(Isolation::Worktree, &["Read", "Edit"]), false, false);
         assert_eq!(arg_value(&args, "--model"), Some("sonnet"));
         assert_eq!(arg_value(&args, "--allowedTools"), Some("Read,Edit"));
         assert_eq!(arg_value(&args, "--permission-mode"), Some("acceptEdits"));
@@ -346,7 +487,11 @@ mod tests {
 
     #[test]
     fn readonly_roles_both_lose_and_are_denied_edit_tools() {
-        let args = base_args(&role(Isolation::Readonly, &["Read", "Edit", "Bash"]), false);
+        let args = base_args(
+            &role(Isolation::Readonly, &["Read", "Edit", "Bash"]),
+            false,
+            false,
+        );
         assert_eq!(arg_value(&args, "--allowedTools"), Some("Read,Bash"));
 
         let denied = arg_value(&args, "--disallowedTools").unwrap();
@@ -356,7 +501,7 @@ mod tests {
 
     #[test]
     fn orchestrator_args_enable_streaming_input() {
-        let args = base_args(&role(Isolation::Readonly, &["Read"]), true);
+        let args = base_args(&role(Isolation::Readonly, &["Read"]), true, false);
         assert_eq!(arg_value(&args, "--input-format"), Some("stream-json"));
         assert!(args.iter().any(|a| a == "--include-partial-messages"));
     }
@@ -369,7 +514,11 @@ mod tests {
             Some(r#"{"mcpServers":{}}"#),
             Some("delegate work"),
             Some("harness-session-123"),
+            true,
         );
+        // The head agent asks the person; nothing is refused unseen.
+        assert_eq!(arg_value(&args, "--permission-prompt-tool"), Some("stdio"));
+        assert!(!args.iter().any(|a| a == "--permission-prompts"));
         assert_eq!(arg_value(&args, "--resume"), Some("harness-session-123"));
         assert!(!args.iter().any(|arg| arg == "--continue" || arg == "-c"));
         assert_eq!(
@@ -382,7 +531,7 @@ mod tests {
     fn never_passes_bare_which_would_force_an_api_key() {
         // `--bare` skips OAuth and the keychain entirely, which defeats the whole premise.
         for streaming in [true, false] {
-            let args = base_args(&role(Isolation::Worktree, &["Read"]), streaming);
+            let args = base_args(&role(Isolation::Worktree, &["Read"]), streaming, streaming);
             assert!(!args.iter().any(|a| a == "--bare"));
         }
     }

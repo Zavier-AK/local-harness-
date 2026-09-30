@@ -30,7 +30,9 @@ import type {
   ChatItem,
   HarnessEvent,
   McpStatus,
+  PermissionDecision,
   ProjectHarnessEvent,
+  ProjectStatus,
   ProjectView,
   QuotaReport,
   Role,
@@ -77,6 +79,25 @@ export default function App() {
   const [autonomy, setAutonomy] = useState<Autonomy>("review");
   /** Per project: which MCP servers its head agent's CLI managed to connect. */
   const [mcpStatus, setMcpStatus] = useState<Record<string, McpStatus>>({});
+  const [railCollapsed, setRailCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("harness.railCollapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  function toggleRail() {
+    setRailCollapsed((collapsed) => {
+      try {
+        localStorage.setItem("harness.railCollapsed", collapsed ? "0" : "1");
+      } catch {
+        // Remembering is a convenience.
+      }
+      return !collapsed;
+    });
+  }
+  // False only once checked: a repository with no commits, where workers can't start.
+  const [hasCommits, setHasCommits] = useState(true);
 
   // The project's plans, re-read when a different project comes to the front.
   useEffect(() => {
@@ -294,6 +315,12 @@ export default function App() {
     }
   }, []);
 
+  // Whether workers can start here at all: a brand-new repository has nothing to branch from.
+  useEffect(() => {
+    setHasCommits(true);
+    void checkCommits();
+  }, [session?.project_root]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // A project's earlier conversation, restored when it comes to the front — after an app
   // restart or a switch, the head agent resumes its conversation, and now so does the chat.
   const projectRoot = session?.project_root;
@@ -373,8 +400,15 @@ export default function App() {
           );
         }
       }
+      if (payload.type === "permission_request" && payload.run_id === headRun.current) {
+        void notifyIfAway("The head agent is asking to do something", payload.description);
+      }
       if (payload.type === "run_finished") {
-        if (payload.run_id === headRun.current) setBusy(false);
+        if (payload.run_id === headRun.current) {
+          setBusy(false);
+          // It may have just made the first commit itself.
+          void checkCommits();
+        }
         setRateLimited(false);
         void refreshUsage();
       }
@@ -498,6 +532,49 @@ export default function App() {
       if (approve) await invoke("approve_delegation", { workerId, task: text ?? null });
       else await invoke("decline_delegation", { workerId, reason: text ?? null });
     } catch (err) {
+      setChat((prev) => [...prev, { kind: "notice", tone: "error", text: String(err) }]);
+    }
+  }
+
+  async function checkCommits() {
+    if (!session) return;
+    try {
+      const status = await invoke<ProjectStatus>("inspect_project", {
+        projectRoot: session.project_root,
+      });
+      setHasCommits(!status.exists || status.has_commits);
+    } catch {
+      // A readout; never in the way.
+    }
+  }
+
+  async function makeFirstCommit() {
+    if (!session) return;
+    try {
+      await invoke<boolean>("make_first_commit", { projectRoot: session.project_root });
+      setHasCommits(true);
+      setChat((prev) => [
+        ...prev,
+        { kind: "notice", tone: "info", text: "Made the first commit. Workers can start now." },
+      ]);
+    } catch (err) {
+      setChat((prev) => [...prev, { kind: "notice", tone: "error", text: String(err) }]);
+    }
+  }
+
+  async function answerPermission(requestId: string, decision: PermissionDecision) {
+    const mark = (state: "waiting" | "sending" | "denied") =>
+      setChat((prev) =>
+        prev.map((item) =>
+          item.kind === "permission" && item.requestId === requestId ? { ...item, state } : item,
+        ),
+      );
+    mark("sending");
+    try {
+      // The card settles when `permission_resolved` comes back.
+      await invoke("answer_permission", { requestId, decision });
+    } catch (err) {
+      mark("denied");
       setChat((prev) => [...prev, { kind: "notice", tone: "error", text: String(err) }]);
     }
   }
@@ -686,7 +763,7 @@ export default function App() {
         />
       </header>
 
-      <div className="panes">
+      <div className={`panes ${railCollapsed ? "rail-collapsed" : ""}`}>
         <ProjectSidebar
           projects={projects}
           onFocus={focusProject}
@@ -779,6 +856,9 @@ export default function App() {
                 onSend={send}
                 onSelectWorker={setSelectedWorker}
                 onUndo={(id) => void undoMerge(id)}
+                onPermission={(id, decision) => void answerPermission(id, decision)}
+                needsFirstCommit={!hasCommits}
+                onFirstCommit={() => void makeFirstCommit()}
               />
             </div>
             <div
@@ -835,6 +915,8 @@ export default function App() {
           onChangeFleet={() => setFleetOpen(true)}
           onStopWorker={(id) => void stopWorker(id)}
           onDecide={(id, approve, text) => void decide(id, approve, text)}
+          collapsed={railCollapsed}
+          onToggle={toggleRail}
         />
       </div>
 
@@ -997,6 +1079,37 @@ function reduceChat(
           : item,
       );
     }
+
+    case "permission_request":
+      if (event.run_id !== headRun.current) return prev;
+      return [
+        ...prev,
+        {
+          kind: "permission",
+          requestId: event.request_id,
+          tool: event.tool,
+          description: event.description,
+          detail: permissionDetail(event.input, event.description),
+          rules: event.rules,
+          state: "waiting",
+        },
+      ];
+
+    case "permission_resolved":
+      return prev.map((item) =>
+        item.kind === "permission" && item.requestId === event.request_id
+          ? { ...item, state: event.allowed ? "allowed" : "denied" }
+          : item,
+      );
+
+    case "run_finished":
+      // A turn that ended (the process went away, say) can't still be asking.
+      if (event.run_id !== headRun.current) return prev;
+      return prev.map((item) =>
+        item.kind === "permission" && (item.state === "waiting" || item.state === "sending")
+          ? { ...item, state: "lapsed" }
+          : item,
+      );
 
     case "turn_interrupted":
       if (event.run_id !== headRun.current) return prev;
@@ -1245,6 +1358,20 @@ function toolDetail(input: unknown): string | null {
     if (typeof value === "string" && value.trim()) {
       const line = value.trim().split("\n")[0];
       return line.length > 120 ? `${line.slice(0, 117)}…` : line;
+    }
+  }
+  return null;
+}
+
+/** The command or file behind a permission request, when the description doesn't
+ * already say it. */
+function permissionDetail(input: unknown, description: string): string | null {
+  if (!input || typeof input !== "object") return null;
+  const fields = input as Record<string, unknown>;
+  for (const key of ["command", "file_path", "path", "url", "pattern"]) {
+    const value = fields[key];
+    if (typeof value === "string" && value.trim() && !description.includes(value.trim())) {
+      return value.trim();
     }
   }
   return null;

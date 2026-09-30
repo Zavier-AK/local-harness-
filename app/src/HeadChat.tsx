@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatItem } from "./types";
+import type { ChatItem, PermissionDecision } from "./types";
 
 type Props = {
   items: ChatItem[];
@@ -15,6 +15,11 @@ type Props = {
   /** Changes when voice says "send it": the draft is handed to `onDraftForVoice`. */
   sendDraft?: number;
   onDraftForVoice?: (draft: string | null) => void;
+  /** The person's answer to something the head agent asked to do. */
+  onPermission: (requestId: string, decision: PermissionDecision) => void;
+  /** The repository has no commits yet, so workers can't start. */
+  needsFirstCommit?: boolean;
+  onFirstCommit?: () => void;
 };
 
 /** Tool calls into the harness read as delegation, not as plumbing. */
@@ -48,6 +53,9 @@ export default function HeadChat({
   dictated,
   sendDraft,
   onDraftForVoice,
+  onPermission,
+  needsFirstCommit,
+  onFirstCommit,
 }: Props) {
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
@@ -121,6 +129,8 @@ export default function HeadChat({
                   {item.text}
                 </div>
               );
+            case "permission":
+              return <PermissionCard key={i} item={item} onAnswer={onPermission} />;
             case "landed":
               // The way back sits right next to the news, so letting changes land by
               // themselves never means losing control of them.
@@ -145,6 +155,17 @@ export default function HeadChat({
         )}
         <div ref={endRef} />
       </div>
+
+      {needsFirstCommit && (
+        <div className="first-commit">
+          <span>
+            This repository has no commits yet, so workers have nothing to branch from.
+          </span>
+          <button onClick={onFirstCommit} title="Adds a .gitignore if there is none, then commits everything else">
+            Make the first commit
+          </button>
+        </div>
+      )}
 
       <div className="composer">
         <textarea
@@ -178,5 +199,57 @@ export default function HeadChat({
         )}
       </div>
     </section>
+  );
+}
+
+/** Something the head agent wants to do that it isn't approved for: a command, a file
+ * change. It waits, mid-turn, for the person. */
+function PermissionCard({
+  item,
+  onAnswer,
+}: {
+  item: Extract<ChatItem, { kind: "permission" }>;
+  onAnswer: (requestId: string, decision: PermissionDecision) => void;
+}) {
+  const settled = item.state === "allowed" || item.state === "denied" || item.state === "lapsed";
+  return (
+    <div className={`permission ${item.state}`}>
+      <div className="permission-head">
+        <span className="permission-tool">{item.tool}</span>
+        <span className="permission-what">{item.description}</span>
+      </div>
+      {item.detail && <pre className="permission-detail">{item.detail}</pre>}
+      {settled ? (
+        <div className="permission-outcome">
+          {item.state === "allowed" ? "Allowed" : item.state === "denied" ? "Denied" : "No longer asked"}
+        </div>
+      ) : (
+        <div className="permission-actions">
+          <button
+            className="primary"
+            disabled={item.state === "sending"}
+            onClick={() => onAnswer(item.requestId, "allow")}
+          >
+            Allow
+          </button>
+          {item.rules.length > 0 && (
+            <button
+              disabled={item.state === "sending"}
+              onClick={() => onAnswer(item.requestId, "always")}
+              title={`Always allow in this project: ${item.rules.join(", ")}`}
+            >
+              Always allow
+            </button>
+          )}
+          <button
+            className="deny"
+            disabled={item.state === "sending"}
+            onClick={() => onAnswer(item.requestId, "deny")}
+          >
+            Deny
+          </button>
+        </div>
+      )}
+    </div>
   );
 }

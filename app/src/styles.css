@@ -146,7 +146,10 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); ou
 .titlebar, .titlebar .title, .titlebar .mono { cursor: default; user-select: none; -webkit-user-select: none; }
 .titlebar .mono { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.panes { flex: 1; display: grid; grid-template-columns: 200px 1fr 340px; min-height: 0; }
+.panes { flex: 1; display: grid; grid-template-columns: 200px 1fr 340px; min-height: 0; transition: grid-template-columns 0.18s ease; }
+.panes.rail-collapsed { grid-template-columns: 200px 1fr 40px; }
+/* No underlines anywhere: links read by colour, and text boxes don't squiggle. */
+a, a:hover, u, ins, abbr[title] { text-decoration: none; }
 .main-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .pane-tabs {
   display: flex;
@@ -428,7 +431,6 @@ button.link {
   background: none;
   color: var(--accent);
   padding: 0;
-  text-decoration: underline;
   font-size: 13px;
 }
 
@@ -498,7 +500,7 @@ button.link {
   background: none; border: none; padding: 0;
   color: var(--accent); font-size: 12px; cursor: pointer;
 }
-button.link:hover { color: var(--accent-strong); text-decoration: underline; }
+button.link:hover { color: var(--accent-strong); }
 .fleet-drawer .fleet-setup { margin-top: 12px; }
 
 /* Project switcher. Its own column, mirroring the worker rail on the other side. */
@@ -960,3 +962,104 @@ body.hud::before { display: none; }
 .segmented button.active { background: var(--accent-soft); color: var(--text); }
 .voice-speech { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 12px; }
 .voice-speech > button { align-self: flex-start; }
+
+/* ---------- collapsible worker rail ---------- */
+
+.rail-toggle {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.rail-toggle:hover { color: var(--text); border-color: var(--accent); }
+.rail-head .rail-toggle { margin-left: auto; align-self: center; }
+.rail-head .link { margin-left: auto; }
+.rail-head .link + .rail-toggle { margin-left: 0; }
+.rail.collapsed {
+  padding: 10px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  overflow: hidden;
+}
+.rail-vertical {
+  writing-mode: vertical-rl;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.rail-count {
+  min-width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 600;
+}
+.rail-count.running { background: color-mix(in srgb, var(--ok) 20%, transparent); color: var(--ok); }
+.rail-count.waiting { background: var(--warn-soft); color: var(--warn); }
+
+/* ---------- head agent asking permission ---------- */
+
+.permission {
+  align-self: flex-start;
+  max-width: 88%;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  background: linear-gradient(var(--warn-soft), var(--warn-soft)), var(--panel-strong);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.permission.allowed, .permission.denied, .permission.lapsed { border-color: var(--border); background: var(--panel-strong); opacity: 0.8; }
+.permission-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.permission-tool {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--warn);
+}
+.permission.allowed .permission-tool, .permission.denied .permission-tool, .permission.lapsed .permission-tool { color: var(--muted); }
+.permission-what { font-size: 13px; }
+.permission-detail {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow: auto;
+}
+.permission-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.permission-actions button { font-size: 12px; padding: 5px 12px; }
+.permission-actions .deny { color: var(--muted); }
+.permission-outcome { font-size: 12px; color: var(--muted); }
+
+.first-commit {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 16px 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  background: linear-gradient(var(--warn-soft), var(--warn-soft)), var(--panel-strong);
+  font-size: 13px;
+}
+.first-commit button { flex-shrink: 0; font-size: 12px; }
