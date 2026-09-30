@@ -59,6 +59,13 @@ async fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Whether the repository at `root` has at least one commit.
+pub async fn has_commits(root: &Path) -> bool {
+    git(root, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+        .await
+        .is_ok()
+}
+
 /// Serialize git's worktree bookkeeping across *processes*, not just tasks.
 ///
 /// The in-process mutex covers workers this engine starts. Native subagents are different:
@@ -390,6 +397,15 @@ impl Workspaces {
             }
 
             Isolation::Worktree | Isolation::Readonly => {
+                // A worktree branches from a commit; a brand-new repository has none, and
+                // git's own error ("invalid reference: HEAD") says nothing useful.
+                if base == "HEAD" && !has_commits(&self.project_root).await {
+                    bail!(
+                        "this repository has no commits yet, so a worker has nothing to \
+                         branch from. Make the first commit (Harness offers a button for \
+                         it), then try again"
+                    );
+                }
                 let branch = format!("{BRANCH_PREFIX}/{worker_id}");
                 let path = self.project_root.join(WORKTREE_DIR).join(worker_id);
 
@@ -684,6 +700,22 @@ mod tests {
         let (dir, workspaces) = scratch_repo().await;
         let workspaces = Workspaces::with_setup(workspaces.project_root().to_path_buf(), setup);
         (dir, workspaces)
+    }
+
+    #[tokio::test]
+    async fn a_repo_with_no_commits_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q"]).await.unwrap();
+        assert!(!has_commits(dir.path()).await);
+        let workspaces = Workspaces::new(dir.path());
+        let error = match workspaces.prepare("w-empty", Isolation::Worktree).await {
+            Ok(_) => panic!("an empty repository has nothing to branch from"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("no commits yet"), "{error}");
+
+        let (_dir, workspaces) = scratch_repo().await;
+        assert!(has_commits(workspaces.project_root()).await);
     }
 
     #[tokio::test]

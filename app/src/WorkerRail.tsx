@@ -11,6 +11,8 @@ type Props = {
   onChangeFleet: () => void;
   onStopWorker: (id: string) => void;
   onDecide: (id: string, approve: boolean, text?: string) => void;
+  collapsed: boolean;
+  onToggle: () => void;
 };
 
 /** Statuses a stop can still act on. */
@@ -43,13 +45,54 @@ export default function WorkerRail({
   onChangeFleet,
   onStopWorker,
   onDecide,
+  collapsed,
+  onToggle,
 }: Props) {
+  if (collapsed) {
+    // Folded to a strip that still says whether anything is running or waiting on you.
+    const running = workers.filter((w) => STOPPABLE.has(w.status)).length;
+    const waiting = workers.filter((w) => w.status === "awaiting_approval").length;
+    return (
+      <aside className="rail collapsed">
+        <button
+          className="rail-toggle"
+          onClick={onToggle}
+          title="Show workers"
+          aria-label="Show workers"
+          aria-expanded={false}
+        >
+          ‹
+        </button>
+        <span className="rail-vertical">Workers</span>
+        {running > 0 && (
+          <span className="rail-count running" title={`${running} running`}>
+            {running}
+          </span>
+        )}
+        {waiting > 0 && (
+          <span className="rail-count waiting" title={`${waiting} waiting for you`}>
+            {waiting}
+          </span>
+        )}
+      </aside>
+    );
+  }
+
   return (
     <aside className="rail">
       <div className="rail-head">
         <h2>Workers</h2>
         <button className="link" onClick={onChangeFleet}>
           Change fleet
+        </button>
+        <button
+          className="rail-toggle"
+          onClick={onToggle}
+          title="Hide workers"
+          aria-label="Hide workers"
+          aria-expanded
+        >
+          ›
         </button>
       </div>
 

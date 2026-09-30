@@ -243,6 +243,26 @@ pub enum HarnessEvent {
         total_tokens: u64,
     },
 
+    /// Claude wants to use a tool it may not use without asking (a shell command, an
+    /// edit); its turn waits until the person answers with `answer_permission`.
+    PermissionRequest {
+        run_id: String,
+        request_id: String,
+        tool: String,
+        /// What it would do, in its own words: "Create file notes.txt".
+        description: String,
+        /// The tool's input, e.g. `{"command": "git add roles.toml"}`.
+        input: serde_json::Value,
+        /// What "always allow" would add, e.g. `Bash(git add roles.toml)`.
+        rules: Vec<String>,
+    },
+    /// The person answered a `PermissionRequest`, or it lapsed (the turn was stopped).
+    PermissionResolved {
+        run_id: String,
+        request_id: String,
+        allowed: bool,
+    },
+
     /// The person stopped the head agent's turn. The turn's own `RunFinished` still
     /// follows, with `is_error` set — this is what lets a UI show it as stopped rather
     /// than failed.
@@ -291,6 +311,8 @@ impl HarnessEvent {
             | Self::ToolResult { run_id, .. }
             | Self::ApiRetry { run_id, .. }
             | Self::TurnInterrupted { run_id }
+            | Self::PermissionRequest { run_id, .. }
+            | Self::PermissionResolved { run_id, .. }
             | Self::QuotaReport { run_id, .. }
             | Self::SubagentStarted { run_id, .. }
             | Self::SubagentProgress { run_id, .. }

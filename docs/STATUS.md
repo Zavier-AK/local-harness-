@@ -1,6 +1,6 @@
 # local-harness — project status
 
-_Last updated: 23 September 2026_
+_Last updated: 30 September 2026_
 
 ## What this is
 
@@ -37,6 +37,7 @@ Verified against live docs and against the real CLI, not assumed.
 | Every turn's stream carries a `rate_limit_event` with five-hour and weekly utilization and reset times | The limits panel shows **real Claude quota**. An earlier version wrongly said none was readable under `-p`; that was corrected. |
 | Claude Code's native subagents (`--agents`, the `Agent` tool) take a `WorktreeCreate` hook that replaces worktree creation | Claude roles delegate the way Opus is trained to, while still working in the harness's own bootstrapped worktrees behind the merge gate. |
 | A session-level `--disallowedTools` binds subagents too | The head agent is kept read-only by approving only `Read`/`Grep`/`Glob`/`Agent`, not by a deny list — otherwise builder subagents cannot write. |
+| `--permission-prompt-tool stdio` sends each unapproved tool use to the host as a `can_use_tool` control request, and waits for a `control_response` | The head agent asks in the chat instead of being refused. Verified live: allow ran the command, "always" returned an `addRules` rule for the session, deny was reported back by the model, and Stop while a request waited ended the turn cleanly. |
 | A head agent with `Bash` copied a subagent's work straight into the checkout, skipping review | The brief and subagent preamble now say outright that absence from the checkout is correct. |
 | `--plugin-dir` loads skills as `plugin:name` in headless mode | Skills reach workers without writing anything into the user's repository. |
 | Claude Code abandons an HTTP MCP tool call that is silent for ~5 minutes | Approval under the autonomy slider's **Ask** returns at once instead of blocking. The same limit threatens a synchronous `delegate` of a worker that runs longer — see known gaps. |
@@ -241,6 +242,12 @@ output can merge anything.
   native `Agent` call was refused by the hook, it delegated through `delegate` instead,
   and that returned awaiting approval. Auto-landing, its refusals, undo and conflict
   abort are covered by engine tests.
+
+- **Permission prompts** — live against the real CLI (haiku): a `touch` asked, was
+  allowed with "always" (rule `Bash(touch made.txt)`) and the file appeared; an `rm` was
+  denied and the model said so; an interrupt with a request waiting denied it and ended
+  the turn. The card, "Make the first commit" and the collapsible worker panel were
+  rendered headlessly against a stubbed bridge.
 
 ### Not yet verified
 

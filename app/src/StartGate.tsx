@@ -71,6 +71,16 @@ export default function StartGate({ onStarted }: Props) {
     }
   }
 
+  async function firstCommit() {
+    setError(null);
+    try {
+      await invoke<boolean>("make_first_commit", { projectRoot: projectRoot.trim() });
+      await inspect(projectRoot);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
   async function start() {
     setStarting(true);
     setError(null);
@@ -118,9 +128,24 @@ export default function StartGate({ onStarted }: Props) {
           <ul className="checks">
             <Check ok={status.exists} label="Directory exists" />
             <Check
-              ok={status.is_git_repo}
-              label="Git repository"
-              hint="Workers need a repo to get their own worktrees."
+              ok={status.is_git_repo && status.has_commits}
+              label={status.is_git_repo ? "First commit" : "Git repository"}
+              hint={
+                status.is_git_repo
+                  ? "Workers branch from a commit; this repo has none yet."
+                  : "Workers need a repo to get their own worktrees."
+              }
+              action={
+                status.exists && !(status.is_git_repo && status.has_commits) ? (
+                  <button
+                    className="link"
+                    onClick={firstCommit}
+                    title="Sets up git if needed, adds a .gitignore if there is none, then commits everything else"
+                  >
+                    {status.is_git_repo ? "Make the first commit" : "Set up git"}
+                  </button>
+                ) : undefined
+              }
             />
             <Check
               ok={status.has_roles_file}

@@ -26,6 +26,29 @@ pub struct ParsedLine {
     pub result: Option<ResultSummary>,
     /// Set on `system/init`; the id to hand `--resume` if the process dies.
     pub backend_session_id: Option<String>,
+    /// Set on a `can_use_tool` request: what answering it needs.
+    pub permission: Option<PendingPermission>,
+}
+
+/// A permission request waiting for the person, as the CLI sent it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingPermission {
+    pub request_id: String,
+    /// Echoed back unchanged on allow.
+    pub input: Value,
+    /// The CLI's own `addRules` suggestions, applied on "always allow".
+    pub suggestions: Vec<Value>,
+    /// The same, as rule strings: `Bash(git add roles.toml)`.
+    pub rules: Vec<String>,
+}
+
+/// `Tool(content)`, the form `--allowedTools` takes.
+fn rule_string(rule: &Value) -> Option<String> {
+    let tool = rule.get("toolName").and_then(Value::as_str)?;
+    Some(match rule.get("ruleContent").and_then(Value::as_str) {
+        Some(content) if !content.is_empty() => format!("{tool}({content})"),
+        _ => tool.to_string(),
+    })
 }
 
 fn usage_from(value: &Value) -> Usage {
@@ -422,6 +445,65 @@ pub fn parse_line(run_id: &str, line: &str) -> Result<ParsedLine, String> {
             out.result = Some(summary);
         }
 
+        // The CLI asking its host whether a tool may run (`--permission-prompt-tool stdio`).
+        "control_request" => {
+            let request = value.get("request").cloned().unwrap_or_default();
+            if request.get("subtype").and_then(Value::as_str) != Some("can_use_tool") {
+                return Ok(out);
+            }
+            let Some(request_id) = value.get("request_id").and_then(Value::as_str) else {
+                return Ok(out);
+            };
+            let tool = request
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .unwrap_or("a tool")
+                .to_string();
+            let input = request.get("input").cloned().unwrap_or(Value::Null);
+            let description = request
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| {
+                    input
+                        .get("command")
+                        .or_else(|| input.get("file_path"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| format!("Use {tool}"));
+            let suggestions: Vec<Value> = request
+                .get("permission_suggestions")
+                .and_then(Value::as_array)
+                .map(|all| {
+                    all.iter()
+                        .filter(|s| s.get("type").and_then(Value::as_str) == Some("addRules"))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            let rules: Vec<String> = suggestions
+                .iter()
+                .filter_map(|s| s.get("rules").and_then(Value::as_array))
+                .flatten()
+                .filter_map(rule_string)
+                .collect();
+            out.events.push(HarnessEvent::PermissionRequest {
+                run_id: run_id.to_string(),
+                request_id: request_id.to_string(),
+                tool,
+                description,
+                input: input.clone(),
+                rules: rules.clone(),
+            });
+            out.permission = Some(PendingPermission {
+                request_id: request_id.to_string(),
+                input,
+                suggestions,
+                rules,
+            });
+        }
+
         _ => {}
     }
 
@@ -677,5 +759,39 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// Captured from the real CLI (2.1.285) with `--permission-prompt-tool stdio`.
+    #[test]
+    fn a_permission_request_becomes_an_event_and_a_pending_answer() {
+        let line = r#"{"type":"control_request","request_id":"e3bc","request":{"subtype":"can_use_tool","tool_name":"Bash","display_name":"Bash","input":{"command":"touch made-by-test.txt","description":"Create empty file made-by-test.txt"},"description":"Create empty file made-by-test.txt","permission_suggestions":[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"touch made-by-test.txt"}],"behavior":"allow","destination":"localSettings"},{"type":"addDirectories","directories":["/tmp/x"],"destination":"session"},{"type":"setMode","mode":"acceptEdits","destination":"session"}],"blocked_path":"/tmp/x/made-by-test.txt","tool_use_id":"toolu_1"}}"#;
+        let parsed = parse_line("head", line).unwrap();
+        match &parsed.events[..] {
+            [HarnessEvent::PermissionRequest {
+                run_id,
+                request_id,
+                tool,
+                description,
+                rules,
+                ..
+            }] => {
+                assert_eq!(run_id, "head");
+                assert_eq!(request_id, "e3bc");
+                assert_eq!(tool, "Bash");
+                assert_eq!(description, "Create empty file made-by-test.txt");
+                assert_eq!(rules, &["Bash(touch made-by-test.txt)".to_string()]);
+            }
+            other => panic!("{other:?}"),
+        }
+        let pending = parsed.permission.unwrap();
+        assert_eq!(pending.suggestions.len(), 1, "only the addRules suggestion");
+        assert_eq!(pending.input["command"], "touch made-by-test.txt");
+        // An interrupt's own control_request is not a permission.
+        let other = parse_line(
+            "head",
+            r#"{"type":"control_request","request_id":"i1","request":{"subtype":"interrupt"}}"#,
+        )
+        .unwrap();
+        assert!(other.events.is_empty() && other.permission.is_none());
     }
 }

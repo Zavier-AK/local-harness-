@@ -1277,6 +1277,7 @@ impl VoiceAgent {
             Some(&mcp.claude_mcp_config()),
             None,
             None,
+            false,
             &extra,
         )
         .await?;

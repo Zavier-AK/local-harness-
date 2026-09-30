@@ -96,7 +96,7 @@ What stays the harness's job is everything around the subagent:
 
 Two findings shaped this. The head agent must not have a session-level deny list —
 subagents inherit it — so it is kept read-only by being approved for nothing but
-`Read`, `Grep`, `Glob` and `Agent`, with permission prompts off. And in an early run a
+`Read`, `Grep`, `Glob` and `Agent`; anything else waits for you (below). And in an early run a
 head agent that had `Bash` copied a subagent's work straight into the checkout,
 skipping review, because the work "wasn't there". The brief now says outright that
 absence from the checkout is correct.
@@ -108,6 +108,30 @@ is reopened.
 The MCP server binds to an ephemeral loopback port behind a per-session bearer token.
 Anything that can reach that port can spend your subscription, so unauthenticated requests
 are refused rather than logged.
+
+### When the head agent asks
+
+The head agent is approved to read and to delegate, nothing more. When it wants to do
+something else itself — a `git` command, a `.gitignore`, a tool from one of your MCP
+connectors such as GitHub — the request appears in the chat with **Allow**,
+**Always allow** and **Deny**, and a notification if Harness is in the background. The
+turn waits for your answer.
+
+- **Allow** runs it this once.
+- **Always allow** also remembers the exact rule (e.g. `Bash(git add -A)` or a connector
+  tool) for the project, in `.harness/allowed-tools.json`. Delete that file to forget them.
+- **Deny** tells the head agent no, and not to look for another way round it.
+- **Stop** denies anything still waiting.
+
+Workers are unchanged: they run with their role's tools and never prompt.
+
+### A project with no commits
+
+Workers branch from a commit, so a brand-new repository can't run them. The start screen
+and the chat both offer **Make the first commit**: it runs `git init` if needed, adds a
+`.gitignore` if there isn't one (`node_modules/`, `.env`, `target/`, `dist/` and the like),
+and commits everything else as "Initial commit". Harness's own `.harness/` folder is never
+included. Projects made by voice get this automatically.
 
 ## Roles and isolation
 

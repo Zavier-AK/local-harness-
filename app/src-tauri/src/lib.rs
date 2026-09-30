@@ -9,6 +9,7 @@ mod preview_probe;
 mod settings;
 mod voice;
 
+use harness_core::agents::claude::PermissionDecision;
 use harness_core::engine::{Harness, WorkerRecord};
 use harness_core::event::HarnessEvent;
 use harness_core::extensions::{Extensions, ImportReport, SkillInfo, WorkerExtras};
@@ -178,6 +179,8 @@ pub struct RoleView {
 pub struct ProjectStatus {
     exists: bool,
     is_git_repo: bool,
+    /// Workers branch from a commit, so a brand-new repository can't run them yet.
+    has_commits: bool,
     has_roles_file: bool,
 }
 
@@ -366,8 +369,87 @@ async fn inspect_project(project_root: String) -> ProjectStatus {
         // Worktree isolation needs a repository; without one, only `none`-isolation
         // roles could run, which is not worth starting a session over.
         is_git_repo: project.join(".git").exists(),
+        has_commits: project.join(".git").exists()
+            && harness_core::isolation::has_commits(&project).await,
         has_roles_file: project.join("roles.toml").is_file(),
     }
+}
+
+/// What a new project's first commit leaves out, when it has no `.gitignore` of its own.
+const DEFAULT_GITIGNORE: &str = "\
+node_modules/
+.DS_Store
+.env
+.env.*
+target/
+dist/
+build/
+__pycache__/
+.venv/
+";
+
+async fn run_git(root: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let out = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .await
+        .map_err(|e| format!("running git: {e} — is git installed?"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Make `root` a git repository with a first commit, so workers have something to branch
+/// from: `git init` if needed, a `.gitignore` if there isn't one, then everything else
+/// committed as "Initial commit". Harness's own `.harness/` folder is kept out. Returns
+/// whether a commit was made (false if there already was one).
+pub(crate) async fn set_up_git(root: &std::path::Path) -> Result<bool, String> {
+    if !root.is_dir() {
+        return Err(format!("{} is not a folder", root.display()));
+    }
+    if !root.join(".git").exists() {
+        run_git(root, &["init", "-q"]).await?;
+    }
+    if harness_core::isolation::has_commits(root).await {
+        return Ok(false);
+    }
+    Workspaces::new(root)
+        .ensure_git_exclude()
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    let ignore = root.join(".gitignore");
+    if !ignore.exists() {
+        std::fs::write(&ignore, DEFAULT_GITIGNORE)
+            .map_err(|e| format!("writing {}: {e}", ignore.display()))?;
+    }
+    run_git(root, &["add", "-A"]).await?;
+    // A Mac that has never committed has no name or email set; git refuses rather than
+    // guess. Sign this one commit as Harness instead of failing on it.
+    let named = run_git(root, &["config", "user.email"]).await.is_ok();
+    let mut args = Vec::new();
+    if !named {
+        args.extend([
+            "-c",
+            "user.name=Harness",
+            "-c",
+            "user.email=harness@localhost",
+        ]);
+    }
+    args.extend(["commit", "-q", "--allow-empty", "-m", "Initial commit"]);
+    run_git(root, &args).await?;
+    Ok(true)
+}
+
+/// The button: make the first commit in a project that has none.
+#[tauri::command]
+async fn make_first_commit(project_root: String) -> Result<bool, String> {
+    set_up_git(&PathBuf::from(project_root)).await
 }
 
 /// Write the default fleet into a project that has none.
@@ -1289,6 +1371,29 @@ async fn stop_turn(state: State<'_, AppState>, project: Option<String>) -> Resul
     orchestrator.interrupt().await.map_err(|e| format!("{e:#}"))
 }
 
+/// The person's answer to something the head agent asked to do: `allow` once, `always`
+/// (remembered for the project), or `deny`.
+#[tauri::command]
+async fn answer_permission(
+    state: State<'_, AppState>,
+    project: Option<String>,
+    request_id: String,
+    decision: PermissionDecision,
+) -> Result<(), String> {
+    let key = key_for(&state, project).await?;
+    let mut projects = state.projects.lock().await;
+    let session = projects
+        .get_mut(&key)
+        .ok_or("no session for that project")?;
+    let Head::Live(orchestrator) = &mut session.head else {
+        return Err("the head agent has stopped, so that request has lapsed".into());
+    };
+    orchestrator
+        .answer_permission(&request_id, decision)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
 /// Stop one worker. Its process is killed and anything it wrote is kept on its branch.
 #[tauri::command]
 async fn stop_worker(
@@ -1703,6 +1808,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             inspect_project,
             write_default_roles,
+            make_first_commit,
+            answer_permission,
             inspect_fleet,
             save_role_assignments,
             session_roles,
@@ -1777,6 +1884,27 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_new_folder_gets_git_and_a_first_commit_without_harness_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("notes.md"), "hi\n").unwrap();
+        std::fs::write(root.join(".env"), "SECRET=1\n").unwrap();
+        std::fs::create_dir_all(root.join(".harness")).unwrap();
+        std::fs::write(root.join(".harness/autonomy.json"), "{}").unwrap();
+
+        assert!(set_up_git(root).await.unwrap());
+        assert!(harness_core::isolation::has_commits(root).await);
+        let tracked = run_git(root, &["ls-files"]).await.unwrap();
+        let tracked: Vec<&str> = tracked.lines().collect();
+        assert_eq!(tracked, vec![".gitignore", "notes.md"]);
+
+        // Already has one: nothing more to do.
+        assert!(!set_up_git(root).await.unwrap());
+        let status = inspect_project(root.display().to_string()).await;
+        assert!(status.is_git_repo && status.has_commits);
+    }
 
     #[test]
     fn a_project_is_keyed_by_its_canonical_path() {
