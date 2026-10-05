@@ -1123,6 +1123,109 @@ async fn worker_patch(
         .map_err(|e| format!("{e:#}"))
 }
 
+/// The session's engine, cloned out of the lock so a slow call (a push, a pull request)
+/// doesn't hold up everything else.
+async fn harness_for(state: &AppState, project: Option<String>) -> Result<Arc<Harness>, String> {
+    let key = key_for(state, project).await?;
+    let projects = state.projects.lock().await;
+    let session = projects.get(&key).ok_or("no session for that project")?;
+    Ok(Arc::clone(&session.harness))
+}
+
+/// Send a finished worker's change back with the person's review: it makes another pass on
+/// its own branch, and its merge is proposed (and checked) again when it's done.
+#[tauri::command]
+async fn revise_worker(
+    state: State<'_, AppState>,
+    worker_id: String,
+    note: String,
+    comments: Vec<harness_core::revise::ReviewComment>,
+    project: Option<String>,
+) -> Result<u32, String> {
+    harness_for(&state, project)
+        .await?
+        .revise(&worker_id, &note, &comments)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// What a pull request for a worker's change would say, and whether GitHub is reachable.
+#[tauri::command]
+async fn pull_request_plan(
+    state: State<'_, AppState>,
+    worker_id: String,
+    project: Option<String>,
+) -> Result<harness_core::publish::PrPlan, String> {
+    harness_for(&state, project)
+        .await?
+        .pull_request_plan(&worker_id)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Push a worker's branch and open its pull request — directly with `gh`, or by opening
+/// GitHub's filled-in page in the browser.
+#[tauri::command]
+async fn open_pull_request(
+    state: State<'_, AppState>,
+    worker_id: String,
+    draft: harness_core::publish::PrDraft,
+    project: Option<String>,
+) -> Result<harness_core::publish::PullRequest, String> {
+    let pr = harness_for(&state, project)
+        .await?
+        .open_pull_request(&worker_id, &draft)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    if pr.via == harness_core::publish::OpenedVia::Browser {
+        harness_core::voice::computer::open(&harness_core::voice::computer::Opening::Url(
+            pr.url.clone(),
+        ))
+        .await
+        .map_err(|e| format!("pushed, but the browser didn't open: {e:#}"))?;
+    }
+    Ok(pr)
+}
+
+/// The pull request opened from a worker, if any, and its checks when `gh` can read them.
+#[tauri::command]
+async fn pull_request_status(
+    state: State<'_, AppState>,
+    worker_id: String,
+    project: Option<String>,
+) -> Result<Option<PullRequestView>, String> {
+    let harness = harness_for(&state, project).await?;
+    let Some(pr) = harness.pull_request(&worker_id).await else {
+        return Ok(None);
+    };
+    let status = if pr.via == harness_core::publish::OpenedVia::Gh {
+        harness_core::publish::status(harness.workspaces().project_root(), &pr.url)
+            .await
+            .ok()
+    } else {
+        None
+    };
+    Ok(Some(PullRequestView { pr, status }))
+}
+
+#[derive(Serialize)]
+struct PullRequestView {
+    #[serde(flatten)]
+    pr: harness_core::publish::PullRequest,
+    status: Option<harness_core::publish::PrStatus>,
+}
+
+/// Open a pull request's page.
+#[tauri::command]
+async fn open_link(url: String) -> Result<(), String> {
+    if !url.starts_with("https://github.com/") {
+        return Err("only GitHub links open from here".into());
+    }
+    harness_core::voice::computer::open(&harness_core::voice::computer::Opening::Url(url))
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
 /// Land a worker's branch. This is the only path that merges, and it exists only here —
 /// the model cannot reach it, by design.
 #[tauri::command]
@@ -1810,6 +1913,11 @@ pub fn run() {
             write_default_roles,
             make_first_commit,
             answer_permission,
+            revise_worker,
+            pull_request_plan,
+            open_pull_request,
+            pull_request_status,
+            open_link,
             inspect_fleet,
             save_role_assignments,
             session_roles,

@@ -1894,3 +1894,135 @@ async fn a_night_shift_can_be_stopped() {
     assert_eq!(done.status, NightStatus::Stopped);
     assert_eq!(done.ended_because.as_deref(), Some("stopped by the person"));
 }
+
+async fn checks_settle(harness: &Harness, worker_id: &str) {
+    for _ in 0..200 {
+        if matches!(
+            harness.verification(worker_id).await,
+            Some(harness_core::engine::VerificationState::Done { .. })
+        ) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("checks on {worker_id} never finished");
+}
+
+#[tokio::test]
+async fn a_change_sent_back_gets_another_pass_on_the_same_branch() {
+    let mut f = fixture().await;
+    let record = f
+        .harness
+        .delegate("local_builder", "WRITE:a.txt:one", vec![])
+        .await
+        .unwrap();
+    let branch = record.branch.clone().unwrap();
+    f.harness.request_merge(&record.id).await.unwrap();
+    checks_settle(&f.harness, &record.id).await;
+    drain(&mut f.events);
+
+    // Nothing to say is refused.
+    assert!(f.harness.revise(&record.id, "  ", &[]).await.is_err());
+
+    let comments = vec![harness_core::revise::ReviewComment {
+        file: "a.txt".into(),
+        line: Some(1),
+        removed: false,
+        excerpt: Some("one".into()),
+        text: "also add b. MOCK-SH:echo two > b.txt".into(),
+    }];
+    let revision = f.harness.revise(&record.id, "", &comments).await.unwrap();
+    assert_eq!(revision, 1);
+    // The old version can't land while the new pass runs.
+    assert!(f.harness.pending_merges().await.is_empty());
+    // One pass at a time.
+    assert!(f.harness.revise(&record.id, "again", &[]).await.is_err());
+
+    let after = finished(&f, &record.id).await;
+    assert_eq!(after.branch.as_deref(), Some(branch.as_str()));
+    assert_eq!(
+        after.diff.as_ref().unwrap().files,
+        vec!["a.txt".to_string(), "b.txt".to_string()],
+        "the diff is everything on the branch, not just the last pass"
+    );
+    let events = drain(&mut f.events);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        HarnessEvent::WorkerRevising { revision: 1, feedback, .. } if feedback.contains("a.txt line 1")
+    )));
+
+    // Proposed and checked again, then it lands with both passes.
+    checks_settle(&f.harness, &record.id).await;
+    assert_eq!(f.harness.pending_merges().await.len(), 1);
+    f.harness.approve_merge(&record.id).await.unwrap();
+    assert!(f.root.join("a.txt").exists());
+    assert_eq!(
+        tokio::fs::read_to_string(f.root.join("b.txt"))
+            .await
+            .unwrap()
+            .trim(),
+        "two"
+    );
+    assert!(!f.root.join(".harness/worktrees").join(&record.id).exists());
+
+    // Landed work isn't revised in place.
+    assert!(f.harness.revise(&record.id, "more", &[]).await.is_err());
+    assert_eq!(f.harness.revision_count(&record.id).await, 1);
+}
+
+#[tokio::test]
+async fn a_pull_request_pushes_the_workers_branch() {
+    let mut f = fixture().await;
+    let remote = tempfile::tempdir().unwrap();
+    git(remote.path(), &["init", "-q", "--bare"]).await;
+    git(
+        &f.root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            &remote.path().display().to_string(),
+        ],
+    )
+    .await;
+
+    let record = f
+        .harness
+        .delegate(
+            "local_builder",
+            "WRITE:pr.txt:hello\nAdd the greeting file",
+            vec![],
+        )
+        .await
+        .unwrap();
+    let plan = f.harness.pull_request_plan(&record.id).await.unwrap();
+    assert_eq!(plan.suggested.base, "main");
+    assert!(plan
+        .suggested
+        .remote_branch
+        .starts_with("harness/local-builder-"));
+    assert!(plan.suggested.body.contains("pr.txt"));
+    assert!(plan.remote.as_ref().unwrap().github.is_none());
+
+    let pr = f
+        .harness
+        .open_pull_request(&record.id, &plan.suggested)
+        .await
+        .unwrap();
+    assert_eq!(pr.via, harness_core::publish::OpenedVia::PushedOnly);
+    assert_eq!(f.harness.pull_request(&record.id).await, Some(pr.clone()));
+    let pushed = String::from_utf8(
+        Command::new("git")
+            .args(["branch", "--list"])
+            .current_dir(remote.path())
+            .output()
+            .await
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(pushed.contains(&plan.suggested.remote_branch), "{pushed}");
+    assert!(drain(&mut f.events)
+        .iter()
+        .any(|e| matches!(e, HarnessEvent::PullRequestOpened { .. })));
+}

@@ -165,7 +165,15 @@ pub async fn run(spec: &WorkerSpec, sink: &EventSink) -> Result<RunOutcome> {
     // swallow the prompt as another config.
     let mut args = spec.extras.claude_args();
     args.extend(base_args(&spec.role, false, false));
-    args.push(compose_prompt(spec));
+    match &spec.resume_session_id {
+        // Carrying on: the brief and the files are already in the conversation.
+        Some(session_id) => {
+            args.push("--resume".into());
+            args.push(session_id.clone());
+            args.push(spec.task.clone());
+        }
+        None => args.push(compose_prompt(spec)),
+    }
 
     let mut child = spawn(&spec.cwd, &args)?;
     log_stderr(&mut child, spec.run_id.clone());
@@ -194,10 +202,6 @@ pub async fn run(spec: &WorkerSpec, sink: &EventSink) -> Result<RunOutcome> {
     }
 }
 
-/// A long-lived `claude -p` process in streaming-input mode.
-///
-/// The process stays up across turns, so the system prompt, tool definitions and CLAUDE.md
-/// are paid for once. Follow-up turns read that context from cache instead of rebuilding it.
 /// The person's answer to a permission request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -212,6 +216,10 @@ pub enum PermissionDecision {
 type Pending =
     std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, PendingPermission>>>;
 
+/// A long-lived `claude -p` process in streaming-input mode.
+///
+/// The process stays up across turns, so the system prompt, tool definitions and CLAUDE.md
+/// are paid for once. Follow-up turns read that context from cache instead of rebuilding it.
 pub struct ClaudeSession {
     child: Child,
     stdin: ChildStdin,

@@ -188,6 +188,29 @@ reviewer    = "tester"      # cheap first pass
 escalate_to = "architect"   # only when the first pass is worried
 ```
 
+## Sending work back, and pull requests
+
+A finished change doesn't have to be all or nothing. In the review drawer:
+
+- **Comment on lines.** Click any line of the diff to leave a comment on it; add an overall
+  note if you like, then **Send back**. The same worker makes another pass on its own
+  branch, told exactly which lines you meant (file, line number and the line itself). A
+  Claude worker picks up its earlier conversation, so it remembers what it did and why;
+  other backends get the original task with your review appended. The card shows
+  *revision 1, 2, …*; when it's done, the whole branch — every pass — is checked and put
+  up for review again. Nothing lands meanwhile, and a change whose checks are still
+  running waits for them before it can be sent back.
+- **Open pull request.** Pushes the worker's branch to your remote under a readable name
+  (`harness/builder-add-retries-…`, editable) and opens a pull request into the branch
+  you're on. The title and description are filled in from the task, the worker's summary,
+  the files and the checks, and you can edit all of it, or open it as a draft. With the
+  GitHub CLI installed and signed in (`brew install gh`, `gh auth login`) it opens the
+  pull request directly and shows its checks in the drawer; without it, Harness pushes
+  the branch with your own git credentials and opens GitHub's filled-in page in your
+  browser to finish. A remote that isn't GitHub just gets the branch.
+
+Both are your clicks only: like merging, neither is a tool the head agent can call.
+
 ## The plan board
 
 For work with more than one step, the head agent calls `propose_plan` instead of

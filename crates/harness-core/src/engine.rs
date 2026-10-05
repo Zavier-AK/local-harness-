@@ -89,6 +89,10 @@ pub struct Harness {
     /// The project's night shift — running, or last night's report.
     night: RwLock<Option<crate::night::NightReport>>,
     night_stop: RwLock<Option<tokio::sync::watch::Sender<bool>>>,
+    /// How many times each worker's change was sent back for another pass.
+    revisions: RwLock<HashMap<String, u32>>,
+    /// Pull requests opened from workers' branches.
+    pull_requests: RwLock<HashMap<String, crate::publish::PullRequest>>,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +154,8 @@ impl Harness {
             plans: RwLock::new(HashMap::new()),
             night: RwLock::new(None),
             night_stop: RwLock::new(None),
+            revisions: RwLock::new(HashMap::new()),
+            pull_requests: RwLock::new(HashMap::new()),
         }
     }
 
@@ -645,6 +651,7 @@ impl Harness {
             cwd: workspace.cwd.clone(),
             context_files,
             extras: self.extras_snapshot().await,
+            resume_session_id: None,
         };
 
         // Dropping the worker's future kills its process: `claude` and `codex` are spawned
@@ -1860,6 +1867,342 @@ impl Harness {
 
         self.discarded.write().await.insert(worker_id.to_string());
         self.workspaces.discard(&branch).await
+    }
+
+    /// Send a finished worker's change back for another pass, with the person's review.
+    ///
+    /// The worker reopens its own branch at the path it had, so a Claude worker carries on
+    /// its conversation; other backends get the original task with the review appended.
+    /// Its proposed merge is withdrawn while it works and proposed again — and checked
+    /// again — when it finishes. Returns the revision number; the work runs in the
+    /// background and reports through the usual worker events.
+    pub async fn revise(
+        self: &Arc<Self>,
+        worker_id: &str,
+        note: &str,
+        comments: &[crate::revise::ReviewComment],
+    ) -> Result<u32> {
+        if crate::revise::is_empty(note, comments) {
+            bail!("say what should change — a comment or a note");
+        }
+        let record = self
+            .worker(worker_id)
+            .await
+            .with_context(|| format!("no worker `{worker_id}`"))?;
+        let branch = record
+            .branch
+            .clone()
+            .with_context(|| format!("worker `{worker_id}` left nothing on a branch to revise"))?;
+        if !matches!(
+            record.status,
+            WorkerStatus::Done | WorkerStatus::Failed | WorkerStatus::Cancelled
+        ) || self.cancels.read().await.contains_key(worker_id)
+        {
+            bail!("it is still working — send comments once it has finished");
+        }
+        if self.landed.read().await.contains_key(worker_id) {
+            bail!("this change has already landed; ask for a follow-up instead");
+        }
+        if self.discarded.read().await.contains(worker_id) {
+            bail!("this change was discarded");
+        }
+        // A check still running would finish against the old tip — and might land it.
+        if matches!(
+            self.verification(worker_id).await,
+            Some(VerificationState::Running { .. })
+        ) {
+            bail!("its checks are still running — send the comments when they finish");
+        }
+        let role = self.registry.read().await.get(&record.role)?.clone();
+
+        let revision = {
+            let mut revisions = self.revisions.write().await;
+            let n = revisions.entry(worker_id.to_string()).or_insert(0);
+            *n += 1;
+            *n
+        };
+        // Withdrawn until the new pass is done, so nothing lands the old version meanwhile.
+        self.pending_merges.write().await.remove(worker_id);
+        self.verifications.write().await.remove(worker_id);
+
+        let feedback = crate::revise::feedback(note, comments);
+        let resume = if role.provider == Provider::Claude {
+            self.store
+                .lock()
+                .await
+                .backend_session_id(worker_id)
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let task = if resume.is_some() {
+            feedback.clone()
+        } else {
+            format!("{}\n\n---\n\n{feedback}", record.task.trim())
+        };
+
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        self.cancels
+            .write()
+            .await
+            .insert(worker_id.to_string(), stop);
+        // Before returning, so nobody reads the old pass's "done" as this one's.
+        self.set_status(worker_id, WorkerStatus::Preparing).await;
+        self.record(HarnessEvent::WorkerRevising {
+            worker_id: worker_id.to_string(),
+            revision,
+            feedback,
+        })
+        .await;
+
+        let harness = Arc::clone(self);
+        let worker_id = worker_id.to_string();
+        tokio::spawn(async move {
+            harness
+                .run_revision(
+                    worker_id, record, role, branch, task, resume, revision, stopped,
+                )
+                .await;
+        });
+        Ok(revision)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_revision(
+        self: Arc<Self>,
+        worker_id: String,
+        record: WorkerRecord,
+        role: crate::roles::Role,
+        branch: String,
+        task: String,
+        resume: Option<String>,
+        revision: u32,
+        mut stopped: tokio::sync::watch::Receiver<bool>,
+    ) {
+        let workspace = match self.workspaces.reopen(&worker_id, &branch).await {
+            Ok(workspace) => workspace,
+            Err(err) => {
+                self.cancels.write().await.remove(&worker_id);
+                // The earlier work is untouched on its branch: put it back up for review.
+                self.finish_revision(
+                    &worker_id,
+                    &record,
+                    &branch,
+                    agents::RunOutcome {
+                        text: format!("could not start another pass: {err:#}"),
+                        is_error: true,
+                        ..Default::default()
+                    },
+                )
+                .await;
+                return;
+            }
+        };
+        self.set_status(&worker_id, WorkerStatus::Running).await;
+
+        let spec = WorkerSpec {
+            run_id: worker_id.clone(),
+            role_name: record.role.clone(),
+            role: role.clone(),
+            task,
+            cwd: workspace.cwd.clone(),
+            context_files: Vec::new(),
+            extras: self.extras_snapshot().await,
+            resume_session_id: resume,
+        };
+        let outcome = if *stopped.borrow() {
+            Ok(stopped_outcome())
+        } else {
+            tokio::select! {
+                outcome = agents::run_worker(&spec, &self.events) => outcome,
+                _ = stopped.wait_for(|stop| *stop) => Ok(stopped_outcome()),
+            }
+        };
+        self.cancels.write().await.remove(&worker_id);
+        let outcome = outcome.unwrap_or_else(|err| agents::RunOutcome {
+            text: format!("{err:#}"),
+            is_error: true,
+            ..Default::default()
+        });
+
+        let message = if outcome.cancelled {
+            format!(
+                "harness: {} ({worker_id}) — revision {revision}, stopped",
+                record.role
+            )
+        } else {
+            format!(
+                "harness: {} ({worker_id}) — revision {revision}",
+                record.role
+            )
+        };
+        workspace.commit(&message).await.ok();
+        if let Err(err) = workspace.release().await {
+            tracing::warn!("failed to release the revision worktree for {worker_id}: {err:#}");
+        }
+
+        {
+            let store = self.store.lock().await;
+            store
+                .record_usage(
+                    &self.session_id,
+                    &worker_id,
+                    role.provider.as_str(),
+                    role.model.as_deref(),
+                    &outcome.usage,
+                    outcome.cost_usd,
+                )
+                .ok();
+            if let Some(backend_session_id) = &outcome.backend_session_id {
+                store
+                    .set_backend_session_id(&worker_id, backend_session_id)
+                    .ok();
+            }
+        }
+        self.finish_revision(&worker_id, &record, &branch, outcome)
+            .await;
+    }
+
+    /// Record how a pass ended, and put the branch — all of its passes — back up for review.
+    async fn finish_revision(
+        self: &Arc<Self>,
+        worker_id: &str,
+        before: &WorkerRecord,
+        branch: &str,
+        outcome: agents::RunOutcome,
+    ) {
+        if outcome.cancelled {
+            self.set_status(worker_id, WorkerStatus::Cancelled).await;
+        }
+        let diff = self
+            .workspaces
+            .branch_diffstat(branch)
+            .await
+            .unwrap_or_default();
+        let mut usage = before.usage;
+        usage.add(&outcome.usage);
+        let record = WorkerRecord {
+            id: worker_id.to_string(),
+            role: before.role.clone(),
+            status: if outcome.cancelled {
+                WorkerStatus::Cancelled
+            } else if outcome.is_error {
+                WorkerStatus::Failed
+            } else {
+                WorkerStatus::Done
+            },
+            task: before.task.clone(),
+            summary: outcome.text.clone(),
+            usage,
+            diff: (diff.files_changed > 0).then(|| diff.clone()),
+            branch: Some(branch.to_string()),
+            is_error: outcome.is_error,
+        };
+        self.upsert(record.clone()).await;
+        self.record(HarnessEvent::WorkerFinished {
+            worker_id: worker_id.to_string(),
+            summary: outcome.text,
+            // Every pass so far, as the card shows it.
+            usage: record.usage,
+            diff: record.diff.clone(),
+            is_error: outcome.is_error,
+        })
+        .await;
+        if record.diff.is_some() {
+            if let Err(err) = self.request_merge(worker_id).await {
+                tracing::warn!("could not propose {worker_id} again: {err:#}");
+            }
+        }
+    }
+
+    /// How many times a worker's change has been sent back.
+    pub async fn revision_count(&self, worker_id: &str) -> u32 {
+        self.revisions
+            .read()
+            .await
+            .get(worker_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// What a pull request for this worker's change would say, for the person to edit.
+    pub async fn pull_request_plan(&self, worker_id: &str) -> Result<crate::publish::PrPlan> {
+        use crate::publish;
+        let record = self
+            .worker(worker_id)
+            .await
+            .with_context(|| format!("no worker `{worker_id}`"))?;
+        let branch = record
+            .branch
+            .clone()
+            .with_context(|| format!("worker `{worker_id}` left nothing on a branch"))?;
+        let project = self.workspaces.project_root();
+        let files = self
+            .workspaces
+            .branch_diffstat(&branch)
+            .await
+            .map(|d| d.files)
+            .unwrap_or_default();
+        let report = match self.verification(worker_id).await {
+            Some(VerificationState::Done { report }) => Some(report),
+            _ => None,
+        };
+        let base = publish::current_branch(project)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "main".into());
+        Ok(publish::PrPlan {
+            suggested: publish::PrDraft {
+                title: publish::suggest_title(&record.task),
+                body: publish::suggest_body(&record.task, &record.summary, &files, report.as_ref()),
+                remote_branch: publish::suggest_branch(&record.role, &record.task),
+                base,
+                draft: false,
+            },
+            remote: publish::remote(project).await.ok().flatten(),
+            gh: publish::gh_state(project).await,
+        })
+    }
+
+    /// Push a worker's branch and open a pull request for it. Host-side only, behind the
+    /// person's click — like merging, never an MCP tool.
+    pub async fn open_pull_request(
+        &self,
+        worker_id: &str,
+        draft: &crate::publish::PrDraft,
+    ) -> Result<crate::publish::PullRequest> {
+        let record = self
+            .worker(worker_id)
+            .await
+            .with_context(|| format!("no worker `{worker_id}`"))?;
+        let branch = record
+            .branch
+            .with_context(|| format!("worker `{worker_id}` left nothing on a branch"))?;
+        if self.discarded.read().await.contains(worker_id) {
+            bail!("this change was discarded");
+        }
+        if self.cancels.read().await.contains_key(worker_id) {
+            bail!("it is still working — open the pull request once it has finished");
+        }
+        let pr = crate::publish::open(self.workspaces.project_root(), &branch, draft).await?;
+        self.pull_requests
+            .write()
+            .await
+            .insert(worker_id.to_string(), pr.clone());
+        self.record(HarnessEvent::PullRequestOpened {
+            worker_id: worker_id.to_string(),
+            url: pr.url.clone(),
+            number: pr.number,
+            remote_branch: pr.remote_branch.clone(),
+        })
+        .await;
+        Ok(pr)
+    }
+
+    pub async fn pull_request(&self, worker_id: &str) -> Option<crate::publish::PullRequest> {
+        self.pull_requests.read().await.get(worker_id).cloned()
     }
 
     /// The diff a worker left on its branch, for review before it is landed.
